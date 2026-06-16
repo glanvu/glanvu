@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussion
+    url: https://github.com/glanvu/glanvu/discussions
+    about: Ask questions or share how you use Glanvu
+  - name: Glanvu website
+    url: https://glanvu.com
+    about: Download, docs, and release announcements

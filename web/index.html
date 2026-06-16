@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Glanvu — The viewer that just opens</title>
+  <meta name="description" content="Fast, keyboard-driven image viewer and converter for Linux, macOS and Windows. GPU-accelerated. Instant load. Real batch-convert pipeline. Free and open source.">
+  <meta property="og:title" content="Glanvu — The viewer that just opens">
+  <meta property="og:description" content="Fast, keyboard-driven image viewer and converter for Linux, macOS and Windows. GPU-accelerated. Instant load. Real batch-convert pipeline.">
+  <meta property="og:image" content="https://glanvu.com/assets/images/hero.jpg">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://glanvu.com">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Glanvu — The viewer that just opens">
+  <meta name="twitter:description" content="Fast, keyboard-driven image viewer and converter. GPU-accelerated. Free and open source.">
+  <meta name="twitter:image" content="https://glanvu.com/assets/images/hero.jpg">
+  <link rel="canonical" href="https://glanvu.com">
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="preload" as="image" href="assets/images/hero.jpg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ── NAVIGATION ── -->
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="assets/icon.png" alt="Glanvu" width="28" height="28">
+        <span>Glanvu</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#screenshots">Screenshots</a>
+        <a href="#batch">Batch</a>
+        <a href="#donate">Donate</a>
+        <a href="https://github.com/glanvu/glanvu" target="_blank" rel="noopener" class="nav-github">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <a href="#download" class="btn btn-primary btn-sm">Download</a>
+      </div>
+      <button class="nav-burger" aria-label="Open menu" aria-expanded="false" onclick="toggleMenu(this)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="nav-drawer" id="nav-drawer">
+      <a href="#features" onclick="toggleMenu(document.querySelector('.nav-burger'))">Features</a>
+      <a href="#screenshots" onclick="toggleMenu(document.querySelector('.nav-burger'))">Screenshots</a>
+      <a href="#batch" onclick="toggleMenu(document.querySelector('.nav-burger'))">Batch</a>
+      <a href="https://github.com/glanvu/glanvu" target="_blank" rel="noopener">GitHub</a>
+      <a href="#download" class="btn btn-primary" onclick="toggleMenu(document.querySelector('.nav-burger'))">Download</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <!-- ── HERO ── -->
+    <section class="hero" id="hero">
+      <div class="container">
+        <div class="hero-content">
+          <div class="hero-badge">
+            <span class="badge-dot"></span>
+            v0.5.0 &nbsp;·&nbsp; Free &amp; open source
+          </div>
+          <h1 class="hero-title">The viewer<br>that just opens.</h1>
+          <p class="hero-desc">
+            Fast, keyboard-driven image viewer and converter for
+            <strong>Linux, macOS and Windows</strong>.
+            GPU-accelerated. Instant load. No clutter — just your images, now.
+          </p>
+          <div class="hero-ctas">
+            <a href="#download" class="btn btn-primary btn-lg">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download free
+            </a>
+            <a href="https://github.com/glanvu/glanvu" target="_blank" rel="noopener" class="btn btn-ghost btn-lg">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+              View on GitHub
+            </a>
+          </div>
+          <p class="hero-license">Apache 2.0 — your images stay yours.</p>
+        </div>
+        <div class="hero-image-wrap">
+          <img
+            src="assets/images/hero.jpg"
+            alt="Glanvu image viewer showing photos, diagrams and technical images"
+            class="hero-image"
+            loading="eager"
+            width="1600"
+            height="900"
+          >
+        </div>
+      </div>
+    </section>
+
+    <!-- ── FEATURES ── -->
+    <section class="features" id="features">
+      <div class="container">
+        <header class="section-header">
+          <h2 class="section-title">Everything you need.<br>Nothing you don't.</h2>
+        </header>
+        <div class="features-grid">
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            </div>
+            <h3>Instant load</h3>
+            <p>Images open in milliseconds. GPU-accelerated decode means no waiting, no progress bar — even large files feel immediate.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+            </div>
+            <h3>Keyboard-first</h3>
+            <p>Walk folders, zoom, pan, rotate, go fullscreen — all from the keyboard. Press <kbd>H</kbd> for the full cheatsheet, any time.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </div>
+            <h3>Thumbnail grid</h3>
+            <p>Press <kbd>Tab</kbd> for a scrollable overview of the whole folder. Navigate with arrow keys, jump to any image instantly.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            </div>
+            <h3>Real batch pipeline</h3>
+            <p>Convert, resize, crop, rotate, re-quality and rename entire folders in parallel. One command. Thousands of files. Headless — no GPU needed.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+            </div>
+            <h3>Wide format support</h3>
+            <p>JPEG, PNG, WebP, GIF, BMP, TIFF — all decoded by pure-Rust codecs. No system C libraries. No install surprises.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            </div>
+            <h3>Truly cross-platform</h3>
+            <p>One Rust codebase. Native performance on Linux, macOS and Windows. No Electron, no runtime, no compromise.</p>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ── SCREENSHOTS ── -->
+    <section class="screenshots" id="screenshots">
+      <div class="container">
+        <header class="section-header">
+          <h2 class="section-title">Built for every workflow.</h2>
+          <p class="section-subtitle">From casual browsing to power-user navigation — one tool, every use case.</p>
+        </header>
+        <div class="screenshots-grid">
+          <figure class="screenshot-item">
+            <img src="assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer panel" loading="lazy" width="1100" height="700">
+            <figcaption>Directory explorer &nbsp;<kbd>Enter</kbd></figcaption>
+          </figure>
+          <figure class="screenshot-item">
+            <img src="assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid view" loading="lazy" width="1100" height="700">
+            <figcaption>Thumbnail grid &nbsp;<kbd>Tab</kbd></figcaption>
+          </figure>
+          <figure class="screenshot-item">
+            <img src="assets/images/screenshot-slideshow.jpg" alt="Glanvu slideshow mode" loading="lazy" width="1100" height="700">
+            <figcaption>Slideshow &nbsp;<kbd>S</kbd></figcaption>
+          </figure>
+          <figure class="screenshot-item">
+            <img src="assets/images/screenshot-help.jpg" alt="Glanvu keyboard shortcut help overlay" loading="lazy" width="1100" height="700">
+            <figcaption>Full cheatsheet &nbsp;<kbd>H</kbd></figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── BATCH DEMO ── -->
+    <section class="batch" id="batch">
+      <div class="container">
+        <div class="batch-inner">
+          <div class="batch-text">
+            <h2>A real batch pipeline.</h2>
+            <p>
+              <code>glanvu convert</code> decodes, transforms and re-encodes entire folders
+              in parallel — headless, no display, no GPU.
+            </p>
+            <ul class="batch-features">
+              <li>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                Fixed pipeline: <strong>crop → rotate → resize → encode</strong>
+              </li>
+              <li>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                Parallel execution via Rayon — all CPU cores
+              </li>
+              <li>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                Refuses to overwrite inputs or collide outputs
+              </li>
+              <li>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                Rename patterns: <code>{stem}</code>, <code>{n:04}</code>
+              </li>
+            </ul>
+          </div>
+          <div class="terminal">
+            <div class="terminal-bar">
+              <span class="dot dot-red" aria-hidden="true"></span>
+              <span class="dot dot-yellow" aria-hidden="true"></span>
+              <span class="dot dot-green" aria-hidden="true"></span>
+              <span class="terminal-title">Terminal</span>
+            </div>
+            <pre class="terminal-body" aria-label="Batch convert examples"><span class="p">$</span> glanvu convert \
+    --to webp --resize 2000x2000 \
+    --out web/ photos/*.jpg
+<span class="o">photo_001.jpg → web/photo_001.webp
+photo_002.jpg → web/photo_002.webp
+photo_003.jpg → web/photo_003.webp
+converted 127, failed 0</span>
+
+<span class="p">$</span> glanvu convert \
+    --to jpg --quality 85 \
+    --crop 0,0,800x600 --rotate 90 \
+    scan.png
+<span class="o">scan.png → scan.jpg</span>
+
+<span class="p">$</span> glanvu convert \
+    --to webp --rename "trip_{n:03}" \
+    --out out/ *.jpg
+<span class="o">IMG_4231.jpg → out/trip_001.webp
+IMG_4232.jpg → out/trip_002.webp
+...</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── TECHNICAL ── -->
+    <section class="technical" id="technical">
+      <div class="container">
+        <header class="section-header">
+          <h2 class="section-title">Built to last.</h2>
+          <p class="section-subtitle">Clean architecture. Strict by default. No shortcuts.</p>
+        </header>
+        <div class="tech-grid">
+          <div class="tech-card">
+            <div class="tech-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3>Pure Rust, zero system deps</h3>
+            <p>All Phase 1 decoders are pure-Rust crates. No libjpeg, libpng or libwebp linked at runtime. Consistent behavior everywhere, zero install surprises.</p>
+          </div>
+          <div class="tech-card">
+            <div class="tech-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            </div>
+            <h3>GPU-free headless core</h3>
+            <p>The image engine and viewer state have zero GPU dependencies. The batch CLI runs on any server, CI machine, or embedded system with no display.</p>
+          </div>
+          <div class="tech-card">
+            <div class="tech-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            </div>
+            <h3>Strict by default</h3>
+            <p>The workspace enforces <code>unsafe_code = deny</code> and <code>clippy::all = warn</code>. No exceptions without review. Clean-room, independent implementation.</p>
+          </div>
+          <div class="tech-card">
+            <div class="tech-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M8.46 8.46a5 5 0 0 0 0 7.07"/></svg>
+            </div>
+            <h3>Built for extension</h3>
+            <p>RAW, AVIF, DICOM, CAD, 3D formats and gigapixel images on the roadmap. Each codec added behind a sandboxed plugin layer — no blast radius into the core.</p>
+          </div>
+        </div>
+
+        <div class="crate-map">
+          <div class="crate-item">
+            <span class="crate-name">glanvu-core</span>
+            <span class="crate-desc">Decode · convert · metadata — headless, reusable anywhere</span>
+          </div>
+          <div class="crate-arrow" aria-hidden="true">→</div>
+          <div class="crate-item">
+            <span class="crate-name">glanvu-viewer-core</span>
+            <span class="crate-desc">Folder nav · thumbnails · grid · explorer — no GPU</span>
+          </div>
+          <div class="crate-arrow" aria-hidden="true">→</div>
+          <div class="crate-item">
+            <span class="crate-name">glanvu</span>
+            <span class="crate-desc">wgpu viewer + CLI — GPU/window layer only</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── DOWNLOAD ── -->
+    <section class="download" id="download">
+      <div class="container">
+        <header class="section-header">
+          <h2 class="section-title">Get Glanvu.</h2>
+          <p class="section-subtitle">First public release — <code>v0.5.0</code>. Packaged installers on the way.</p>
+        </header>
+        <div class="download-cards">
+
+          <div class="download-card">
+            <div class="platform-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+            </div>
+            <h3>macOS</h3>
+            <p class="platform-spec">macOS 12 Monterey and later<br>Apple Silicon &amp; Intel</p>
+            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <p class="platform-alt">
+              <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
+            </p>
+            <div class="platform-coming">
+              <span>Coming soon</span>
+              <code>brew install --cask glanvu</code>
+            </div>
+          </div>
+
+          <div class="download-card download-card--featured">
+            <div class="platform-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M12 2a5 5 0 0 0-5 5c0 1.55.7 2.94 1.8 3.89C7.24 12.18 6 14.26 6 16.5V18a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-1.5c0-2.24-1.24-4.32-2.8-5.61A5 5 0 0 0 17 7a5 5 0 0 0-5-5zM10.5 5.5a1 1 0 1 0 0 2 1 1 0 1 0 0-2zM13.5 5.5a1 1 0 1 0 0 2 1 1 0 1 0 0-2zM12 11a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>
+            </div>
+            <h3>Linux</h3>
+            <p class="platform-spec">x86_64 · ARM64<br>All major distros</p>
+            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <p class="platform-alt">
+              <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
+            </p>
+            <div class="platform-coming">
+              <span>Coming soon</span>
+              <code>AppImage · Flatpak · AUR</code>
+            </div>
+          </div>
+
+          <div class="download-card">
+            <div class="platform-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.949"/></svg>
+            </div>
+            <h3>Windows</h3>
+            <p class="platform-spec">Windows 10 / 11<br>x64</p>
+            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <p class="platform-alt">
+              <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
+            </p>
+            <div class="platform-coming">
+              <span>Coming soon</span>
+              <code>Installer · winget · Chocolatey</code>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="download-github">
+          <p>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+            Star the repo on <a href="https://github.com/glanvu/glanvu" target="_blank" rel="noopener">GitHub</a> to get release notifications when packaged installers ship.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── NOTIFY ── -->
+    <section class="notify" id="notify">
+      <div class="container">
+        <div class="notify-inner">
+          <h2>Stay in the loop.</h2>
+          <p>One email when the first packaged release for your platform is ready. No spam.</p>
+          <form class="notify-form" action="https://formspree.io/f/xjgdjwdd" method="POST" onsubmit="handleNotify(event)">
+            <input
+              type="email"
+              name="email"
+              placeholder="you@example.com"
+              autocomplete="email"
+              required
+              aria-label="Email address"
+            >
+            <button type="submit" class="btn btn-primary">Notify me</button>
+          </form>
+          <p id="notify-confirm" class="notify-confirm" hidden>Thanks — we'll reach out when installers ship.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── DONATE ── -->
+  <section class="donate" id="donate">
+    <div class="container">
+      <div class="donate-inner">
+        <div class="donate-text">
+          <h2>Support the project.</h2>
+          <p>
+            Glanvu is free and open source — Apache 2.0. If it saves you time,
+            a small donation keeps development moving.
+          </p>
+          <p class="donate-note">No subscription. No account. Just a one-time thank-you.</p>
+        </div>
+        <div class="donate-actions">
+          <a href="https://ko-fi.com/juanyque" target="_blank" rel="noopener" class="btn btn-donate">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z"/></svg>
+            Support on Ko-fi
+          </a>
+          <a href="https://github.com/sponsors/juanyque" target="_blank" rel="noopener" class="btn btn-ghost">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+            GitHub Sponsors
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ── -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <a href="/" class="footer-logo">
+            <img src="assets/icon.png" alt="Glanvu" width="24" height="24">
+            <span>Glanvu</span>
+          </a>
+          <p class="footer-tagline">The viewer that just opens.</p>
+          <p class="footer-license">Apache 2.0 — free and open source.</p>
+        </div>
+        <nav class="footer-nav" aria-label="Footer navigation">
+          <div class="footer-col">
+            <h4>Product</h4>
+            <a href="#features">Features</a>
+            <a href="#screenshots">Screenshots</a>
+            <a href="#batch">Batch convert</a>
+            <a href="#download">Download</a>
+            <a href="#donate">Donate</a>
+          </div>
+          <div class="footer-col">
+            <h4>Developers</h4>
+            <a href="https://github.com/glanvu/glanvu" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://github.com/glanvu/glanvu/blob/main/AGENTS.md" target="_blank" rel="noopener">Contributor guide</a>
+            <a href="https://github.com/glanvu/glanvu/releases" target="_blank" rel="noopener">Releases</a>
+            <a href="https://github.com/glanvu/glanvu/issues" target="_blank" rel="noopener">Issue tracker</a>
+          </div>
+        </nav>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 Glanvu</span>
+        <span>Built with Rust + wgpu</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Nav scroll effect
+    const nav = document.getElementById('nav');
+    window.addEventListener('scroll', () => {
+      nav.classList.toggle('nav--scrolled', window.scrollY > 40);
+    }, { passive: true });
+
+    // Mobile menu toggle
+    function toggleMenu(btn) {
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!expanded));
+      document.getElementById('nav-drawer').classList.toggle('open', !expanded);
+    }
+
+    // Close drawer on outside click
+    document.addEventListener('click', (e) => {
+      const drawer = document.getElementById('nav-drawer');
+      if (drawer.classList.contains('open') && !e.target.closest('.nav-inner') && !e.target.closest('.nav-drawer')) {
+        drawer.classList.remove('open');
+        document.querySelector('.nav-burger').setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Notify form (placeholder — wire up to backend when ready)
+    function handleNotify(e) {
+      e.preventDefault();
+      const form = e.target;
+      const confirm = document.getElementById('notify-confirm');
+      form.hidden = true;
+      confirm.hidden = false;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[package]
+name = "glanvu-core"
+description = "Glanvu core: image decode, normalize and encode library (no GUI, no windowing)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+image.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

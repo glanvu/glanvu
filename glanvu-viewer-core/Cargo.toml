@@ -1,0 +1,18 @@
+[package]
+name = "glanvu-viewer-core"
+description = "Glanvu viewer-core: pure viewer state (folder nav, thumbnails, grid, explorer). No GPU, no window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+glanvu-core = { path = "../glanvu-core" }
+
+[dev-dependencies]
+# Used in nav.rs tests to create sample images.
+image.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+# Glanvu — Cargo workspace
+# A fast, cross-platform universal image viewer & converter.
+
+[workspace]
+resolver = "2"
+members = ["glanvu-core", "glanvu-viewer-core", "glanvu"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.96"
+license = "Apache-2.0"
+authors = ["Juan García Longarón"]
+repository = "https://github.com/glanvu/glanvu"
+
+[workspace.dependencies]
+# Shared dependencies are declared here and referenced with `dep.workspace = true`
+# in member crates.
+# Pure-Rust decode stack (no system C libraries) for the Phase 1 base formats.
+# AVIF is intentionally NOT enabled here: its decoder needs a C dav1d dependency, so it is
+# split out pending a decode-backend decision (see decision-log Q3/D10 note).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "gif", "bmp", "tiff", "webp",
+] }
+thiserror = "2"
+
+# Lints applied workspace-wide. Treat warnings as errors in CI / pre-push.
+[workspace.lints.clippy]
+all = "warn"
+
+[workspace.lints.rust]
+# Deny (not forbid) so a genuinely-needed, reviewed `#[allow(unsafe_code)]` is possible in the
+# app/GPU layer later; glanvu-core is expected to stay unsafe-free.
+unsafe_code = "deny"
