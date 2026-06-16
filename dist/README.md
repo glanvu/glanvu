@@ -6,13 +6,13 @@ is hand-maintained and versioned.
 
 ## Channels
 
-| Channel | Platform | Hosting | Publish method | Status |
+| Channel | Platform | Hosting | Publish method | Status (v0.5.0) |
 |---|---|---|---|---|
-| [`brew/`](brew/) | macOS | Self-hosted tap (`glanvu/homebrew-glanvu`) | Push cask to tap repo | Ready to publish |
-| [`scoop/`](scoop/) | Windows | Self-hosted bucket (`glanvu/scoop-glanvu`) | Push manifest to bucket repo | Ready to publish |
-| [`aur/`](aur/) | Linux (Arch) | AUR (`glanvu-bin`) | `git push` to AUR (needs account) | Ready to publish |
-| [`winget/`](winget/) | Windows | `microsoft/winget-pkgs` | Pull request (review-gated) | Ready to submit |
-| [`chocolatey/`](chocolatey/) | Windows | community.chocolatey.org | `choco push` (moderation) | Ready to submit |
+| [`brew/`](brew/) | macOS + Linux | Self-hosted tap (`glanvu/homebrew-glanvu`) | Push cask + formula to tap repo | ✅ Published |
+| [`scoop/`](scoop/) | Windows | Self-hosted bucket (`glanvu/scoop-glanvu`) | Push manifest to bucket repo | ✅ Published |
+| [`winget/`](winget/) | Windows | `microsoft/winget-pkgs` | Pull request (review-gated) | ⏳ PR [#388474](https://github.com/microsoft/winget-pkgs/pull/388474) in review |
+| [`chocolatey/`](chocolatey/) | Windows | community.chocolatey.org | `choco push` (moderation) | ⏳ In moderation |
+| [`aur/`](aur/) | Linux (Arch) | AUR (`glanvu-bin`) | `git push` to AUR (needs account) | ⛔ Blocked — AUR account registration unavailable |
 
 Each channel folder has its own `README.md` with setup and per-release steps.
 
@@ -26,13 +26,19 @@ deferred until there's traction — see the roadmap.
 ## Per-release checklist
 
 When cutting a new version, the asset digests change, so each manifest's `version` + `sha256`
-must be bumped. Pull all four digests at once:
+must be bumped. This is automated by [`scripts/bump-packaging.sh`](../scripts/bump-packaging.sh):
+
+```bash
+./scripts/bump-packaging.sh v<version>
+```
+
+It fetches the release digests via `gh release view` and updates `version` + `sha256` across
+all five manifests (brew cask + formula, scoop, winget — new version folder with UPPERCASE
+sha256, chocolatey). Review `git diff dist/` before publishing each channel.
+
+To pull the digests manually instead:
 
 ```bash
 gh release view v<version> --repo glanvu/glanvu --json assets \
   --jq '.assets[] | "\(.name)  \(.digest)"'
 ```
-
-Then update: `brew/Casks/glanvu.rb`, `scoop/bucket/glanvu.json`, `aur/PKGBUILD` (+`.SRCINFO`),
-`winget/manifests/.../*.yaml` (new version folder, UPPERCASE sha256),
-`chocolatey/tools/chocolateyinstall.ps1` + `glanvu.nuspec` + `VERIFICATION.txt`.
