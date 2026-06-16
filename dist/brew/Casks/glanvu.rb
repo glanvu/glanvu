@@ -1,22 +1,26 @@
 cask "glanvu" do
   # Update version + sha256 on each release.
   # Generate sha256 with: shasum -a 256 Glanvu-<version>-macos-arm64.zip
-  version "0.0.0"
-  sha256 :no_check   # replace with real sha256 before publishing
+  # (or: gh release view v<version> --json assets --jq '.assets[].digest')
+  version "0.5.0"
+  sha256 "51a8586eeac520ba97f02fe565bf037a42fd77c3a86d469a53bb7b410fa97f65"
 
-  # GitHub Releases URL pattern (arm64 macOS zip):
-  url "https://github.com/glanvu-dev/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
-  # Alternative: x86_64 build
-  # url "https://github.com/glanvu-dev/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-x86_64.zip"
-
+  url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
   name "Glanvu"
   desc "Fast, keyboard-driven, cross-platform universal image viewer and converter"
   homepage "https://glanvu.com"
 
+  # Only an arm64 (Apple Silicon) build is published today; Intel users build from source.
+  depends_on arch: :arm64
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
   app "Glanvu.app"
 
-  # Associate Glanvu with common image types in Finder (optional — user can override).
-  # This runs lsregister so macOS knows Glanvu can open these files.
+  # Register Glanvu with Launch Services so Finder offers it under "Open With".
   postflight do
     system_command "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
                    args: ["-f", "#{appdir}/Glanvu.app"]

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>glanvu</id>
+    <version>0.5.0</version>
+    <packageSourceUrl>https://github.com/glanvu/glanvu/tree/main/dist/chocolatey</packageSourceUrl>
+    <owners>juanyque</owners>
+    <title>Glanvu</title>
+    <authors>Juan García Longarón</authors>
+    <projectUrl>https://glanvu.com</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/glanvu/glanvu/main/web/assets/icon.png</iconUrl>
+    <licenseUrl>https://github.com/glanvu/glanvu/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/glanvu/glanvu</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/glanvu/glanvu/issues</bugTrackerUrl>
+    <docsUrl>https://github.com/glanvu/glanvu#readme</docsUrl>
+    <tags>glanvu image viewer converter graphics photo</tags>
+    <summary>Fast, keyboard-driven, cross-platform universal image viewer and converter</summary>
+    <description>
+Glanvu is a fast, GPU-accelerated image viewer and converter for Linux, macOS and Windows.
+It loads instantly, navigates entire folders by keyboard, and includes a real batch-convert
+pipeline (crop, rotate, resize, re-quality, rename). Supports JPEG, PNG, WebP, GIF, BMP and
+TIFF via pure-Rust codecs — no system C libraries.
+
+The `glanvu` command works both as a GUI viewer and a headless batch converter.
+    </description>
+    <releaseNotes>https://github.com/glanvu/glanvu/releases/tag/v0.5.0</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

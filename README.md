@@ -56,17 +56,26 @@ The name is **glance + view** — a fast look.
 
 ## Install
 
-> Glanvu `0.5.0` is the first public release — functional and tested. Packaged installers are
-> coming; follow [glanvu.com](https://glanvu.com) for release announcements.
+Pre-built binaries for v0.5.0 are available at [glanvu.com](https://glanvu.com) and
+[GitHub Releases](https://github.com/glanvu/glanvu/releases):
+
+| Platform | Download |
+|---|---|
+| macOS (Apple Silicon) | [`Glanvu-0.5.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-arm64.zip) |
+| Linux x86_64 | [`glanvu-0.5.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu-0.5.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu_0.5.0_amd64.deb) |
+| Windows x64 | [`Glanvu-0.5.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-windows-x86_64.zip) |
+
+Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
+see the [Roadmap](#roadmap).
+
+### Build from source
 
 ```bash
-git clone <repo-url> glanvu && cd glanvu
+git clone https://github.com/glanvu/glanvu && cd glanvu
 make release            # release binary → target/release/glanvu
 make app                # macOS .app bundle → dist/macos/Glanvu.app  (macOS only)
 make install-app        # install to /Applications/                  (macOS only)
 ```
-
-A Homebrew cask and Linux/Windows installers are planned (see [Roadmap](#roadmap)).
 
 ## Usage
 
@@ -138,8 +147,9 @@ viewer above is the foundation. Planned, in priority order:
 - **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images, multipage documents.
 - **Technical & 3D** — DICOM (medical), CAD drawings, 3D-printing formats (STL/OBJ/3MF/STEP/G-code)
   and general 3D models.
-- **Distribution** — Homebrew cask, Linux/Windows installers, code-signed & notarized builds,
-  auto-update.
+- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.5.0).
+  Package managers in progress: Homebrew tap, Scoop bucket, AUR, winget, Chocolatey.
+  Code signing and auto-update planned.
 - **Hosted (Phase 3)** — [glanvu.com](https://glanvu.com): web viewer, shareable links, and a
   browser-based batch-convert service (upload images, choose transforms, download results).
 

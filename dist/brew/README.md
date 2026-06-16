@@ -1,24 +1,39 @@
 # Glanvu Homebrew Tap
 
-This directory contains the Homebrew cask formula for Glanvu.
+[Homebrew](https://brew.sh) tap for [Glanvu](https://glanvu.com) — fast, keyboard-driven image viewer and batch converter.
 
-## Setup (one-time, when publishing)
+## Install
 
-1. Create a public GitHub repo named `homebrew-glanvu` under the `glanvu` organization.
-2. Copy `Casks/glanvu.rb` into that repo.
-3. On each release, update `version` and `sha256` in `glanvu.rb`.
-
-## User installation
-
+**macOS** — installs `Glanvu.app`:
 ```bash
 brew tap glanvu/glanvu
 brew install --cask glanvu
 ```
 
-## Release workflow
+**Linux** — installs `glanvu` binary to PATH:
+```bash
+brew tap glanvu/glanvu
+brew install glanvu
+```
 
-1. Build the release binary: `make app`
-2. Create a zip: `cd dist/macos && zip -r Glanvu-<version>-macos-arm64.zip Glanvu.app`
-3. Upload to GitHub Releases.
-4. Update `glanvu.rb` with the new version + `shasum -a 256 Glanvu-<version>-macos-arm64.zip`.
-5. Push to homebrew-glanvu.
+**macOS CLI-only** — binary on PATH without the `.app`:
+```bash
+brew tap glanvu/glanvu
+brew install glanvu
+```
+
+## What's in this tap
+
+| File | Description |
+|---|---|
+| `Casks/glanvu.rb` | macOS app bundle — installs `Glanvu.app` |
+| `Formula/glanvu.rb` | Formula for Linux (and macOS CLI) |
+
+## Per-release update
+
+Update `version` and `sha256` in both files, or run from the main repo:
+
+```bash
+./scripts/bump-packaging.sh <new-version>
+# then push the updated Casks/ and Formula/ to this repo
+```
