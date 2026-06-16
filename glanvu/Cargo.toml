@@ -21,13 +21,17 @@ glam = "0.33.1"
 glanvu-core = { path = "../glanvu-core" }
 glanvu-viewer-core = { path = "../glanvu-viewer-core" }
 glyphon = "0.11.0"
-objc2 = "0.6.4"
 pollster = "0.4.0"
 rayon = "1.12.0"
 rfd = "0.17.2"
 wgpu = "29.0.3"
 winit = "0.30.13"
 # The viewer (winit + wgpu) lands in T3; the batch CLI in T5.
+
+# macOS-only: Objective-C runtime for NSWorkspace (set-default) and file-open events.
+# Must be platform-gated — the crate refuses to compile on Linux/Windows.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
 
 [lints]
 workspace = true
