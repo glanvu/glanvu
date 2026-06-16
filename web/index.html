@@ -165,19 +165,27 @@
         </header>
         <div class="screenshots-grid">
           <figure class="screenshot-item">
-            <img src="assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer panel" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-explorer.jpg','Glanvu directory explorer panel')" aria-label="View full size: Directory explorer">
+              <img src="assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer panel" loading="lazy" width="1100" height="700">
+            </button>
             <figcaption>Directory explorer &nbsp;<kbd>Enter</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
-            <img src="assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid view" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-grid.jpg','Glanvu thumbnail grid view')" aria-label="View full size: Thumbnail grid">
+              <img src="assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid view" loading="lazy" width="1100" height="700">
+            </button>
             <figcaption>Thumbnail grid &nbsp;<kbd>Tab</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
-            <img src="assets/images/screenshot-slideshow.jpg" alt="Glanvu slideshow mode" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-slideshow.jpg','Glanvu slideshow mode')" aria-label="View full size: Slideshow">
+              <img src="assets/images/screenshot-slideshow.jpg" alt="Glanvu slideshow mode" loading="lazy" width="1100" height="700">
+            </button>
             <figcaption>Slideshow &nbsp;<kbd>S</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
-            <img src="assets/images/screenshot-help.jpg" alt="Glanvu keyboard shortcut help overlay" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-help.jpg','Glanvu keyboard shortcut help overlay')" aria-label="View full size: Keyboard help">
+              <img src="assets/images/screenshot-help.jpg" alt="Glanvu keyboard shortcut help overlay" loading="lazy" width="1100" height="700">
+            </button>
             <figcaption>Full cheatsheet &nbsp;<kbd>H</kbd></figcaption>
           </figure>
         </div>
@@ -307,7 +315,7 @@ IMG_4232.jpg → out/trip_002.webp
       <div class="container">
         <header class="section-header">
           <h2 class="section-title">Get Glanvu.</h2>
-          <p class="section-subtitle">First public release — <code>v0.5.0</code>. Packaged installers on the way.</p>
+          <p class="section-subtitle">Version <code>v0.5.0</code> — download directly or build from source.</p>
         </header>
         <div class="download-cards">
 
@@ -316,10 +324,10 @@ IMG_4232.jpg → out/trip_002.webp
               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
             </div>
             <h3>macOS</h3>
-            <p class="platform-spec">macOS 12 Monterey and later<br>Apple Silicon &amp; Intel</p>
-            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <p class="platform-spec">macOS 12 Monterey and later<br>Apple Silicon (arm64)</p>
+            <a href="https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-arm64.zip" class="btn btn-primary">Download .zip</a>
             <p class="platform-alt">
-              <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
+              <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a> (Intel / Rosetta 2)
             </p>
             <div class="platform-coming">
               <span>Coming soon</span>
@@ -329,12 +337,13 @@ IMG_4232.jpg → out/trip_002.webp
 
           <div class="download-card download-card--featured">
             <div class="platform-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M12 2a5 5 0 0 0-5 5c0 1.55.7 2.94 1.8 3.89C7.24 12.18 6 14.26 6 16.5V18a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-1.5c0-2.24-1.24-4.32-2.8-5.61A5 5 0 0 0 17 7a5 5 0 0 0-5-5zM10.5 5.5a1 1 0 1 0 0 2 1 1 0 1 0 0-2zM13.5 5.5a1 1 0 1 0 0 2 1 1 0 1 0 0-2zM12 11a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.247 1.99.43 3.36.472.999.028 1.73-.333 2.335-.716.606-.384 1.004-.93 1.416-1.434.413-.504.763-1.063 1.05-1.586.32-.59.3-1.43.22-2.115-.08-.682-.184-1.352.15-1.764.334-.413.66-.62.98-.872.336-.258.65-.518.977-.797.613-.536 1.22-1.157 1.6-2.03.428-1.148.476-2.499.384-3.742-.196-2.566-1.016-4.898-3.13-5.887A5.042 5.042 0 0012.504 0zM9.04 5.508c.34 0 .6.268.6.59 0 .32-.26.59-.6.59-.33 0-.59-.27-.59-.59 0-.322.26-.59.59-.59zm3.96 0c.33 0 .6.268.6.59 0 .32-.27.59-.6.59-.34 0-.6-.27-.6-.59 0-.322.26-.59.6-.59zm-1.985 3.27c1.379 0 2.497 1.09 2.497 2.44 0 1.35-1.118 2.44-2.497 2.44-1.38 0-2.498-1.09-2.498-2.44 0-1.35 1.117-2.44 2.498-2.44z"/></svg>
             </div>
             <h3>Linux</h3>
-            <p class="platform-spec">x86_64 · ARM64<br>All major distros</p>
-            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <p class="platform-spec">x86_64 · Debian/Ubuntu and all major distros</p>
+            <a href="https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu-0.5.0-linux-x86_64.tar.gz" class="btn btn-primary">Download .tar.gz</a>
             <p class="platform-alt">
+              <a href="https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu_0.5.0_amd64.deb" target="_blank" rel="noopener">.deb package</a> ·
               <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
             </p>
             <div class="platform-coming">
@@ -349,7 +358,7 @@ IMG_4232.jpg → out/trip_002.webp
             </div>
             <h3>Windows</h3>
             <p class="platform-spec">Windows 10 / 11<br>x64</p>
-            <a href="#notify" class="btn btn-primary">Notify me</a>
+            <a href="https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-windows-x86_64.zip" class="btn btn-primary">Download .zip</a>
             <p class="platform-alt">
               <a href="https://github.com/glanvu/glanvu#building--testing" target="_blank" rel="noopener">Build from source</a>
             </p>
@@ -488,6 +497,31 @@ IMG_4232.jpg → out/trip_002.webp
       form.hidden = true;
       confirm.hidden = false;
     }
+
+    // Lightbox
+    function openLightbox(src, alt) {
+      const lb = document.getElementById('lightbox');
+      const img = document.getElementById('lightbox-img');
+      img.src = src;
+      img.alt = alt;
+      lb.hidden = false;
+      document.body.style.overflow = 'hidden';
+      lb.focus();
+    }
+    function closeLightbox() {
+      const lb = document.getElementById('lightbox');
+      lb.hidden = true;
+      document.body.style.overflow = '';
+      document.getElementById('lightbox-img').src = '';
+    }
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeLightbox();
+    });
   </script>
+
+  <div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot viewer" tabindex="-1" onclick="if(event.target===this)closeLightbox()">
+    <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+    <img id="lightbox-img" class="lightbox-img" src="" alt="">
+  </div>
 </body>
 </html>
