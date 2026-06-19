@@ -10,9 +10,17 @@ class Glanvu < Formula
   end
 
   on_macos do
-    url "https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-arm64.zip"
-    sha256 "51a8586eeac520ba97f02fe565bf037a42fd77c3a86d469a53bb7b410fa97f65"
-    version "0.5.0"
+    on_arm do
+      url "https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-arm64.zip"
+      sha256 "51a8586eeac520ba97f02fe565bf037a42fd77c3a86d469a53bb7b410fa97f65"
+      version "0.5.0"
+    end
+
+    on_intel do
+      url "https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-x86_64.zip"
+      sha256 "2057242093d1dbda92824fb37e982ff8d797a7cbce286f502fe1b07b18577353"
+      version "0.5.0"
+    end
   end
 
   def install

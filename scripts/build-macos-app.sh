@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Build a macOS .app bundle for Glanvu.
-# Usage: ./scripts/build-macos-app.sh [--release | --debug]
+# Usage: ./scripts/build-macos-app.sh [--release | --debug] [--target <triple>]
 # Output: dist/macos/Glanvu.app
+#
+# Cross-compilation example (from Apple Silicon):
+#   rustup target add x86_64-apple-darwin
+#   ./scripts/build-macos-app.sh --release --target x86_64-apple-darwin
 #
 # Note: codesigning and notarization require an Apple Developer account ($99/yr).
 # Without them the app runs fine but macOS shows a one-time "unverified developer"
@@ -10,13 +14,32 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PROFILE=${1:---release}
+PROFILE=--release
+TARGET=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release|--debug) PROFILE="$1"; shift ;;
+        --target) TARGET="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
 if [[ "$PROFILE" == "--release" ]]; then
-    cargo build --release
-    BINARY=target/release/glanvu
+    if [[ -n "$TARGET" ]]; then
+        cargo build --release --target "$TARGET"
+        BINARY="target/$TARGET/release/glanvu"
+    else
+        cargo build --release
+        BINARY="target/release/glanvu"
+    fi
 else
-    cargo build
-    BINARY=target/debug/glanvu
+    if [[ -n "$TARGET" ]]; then
+        cargo build --target "$TARGET"
+        BINARY="target/$TARGET/debug/glanvu"
+    else
+        cargo build
+        BINARY="target/debug/glanvu"
+    fi
 fi
 
 # Version for the bundle (single source of truth: workspace Cargo.toml).

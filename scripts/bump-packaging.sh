@@ -22,34 +22,56 @@ ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets \
   --jq '.assets[] | "\(.name) \(.digest)"')
 
 extract() { echo "$ASSETS" | awk "/$1/ {print \$2}" | sed 's/^sha256://'; }
-SHA_MACOS=$(extract "Glanvu-${VERSION}-macos-arm64\\.zip")
-SHA_LINUX=$(extract "glanvu-${VERSION}-linux-x86_64\\.tar\\.gz")
-SHA_WIN=$(extract   "Glanvu-${VERSION}-windows-x86_64\\.zip")
+SHA_MACOS_ARM=$(extract "Glanvu-${VERSION}-macos-arm64\\.zip")
+SHA_MACOS_X86=$(extract "Glanvu-${VERSION}-macos-x86_64\\.zip")
+SHA_LINUX=$(extract     "glanvu-${VERSION}-linux-x86_64\\.tar\\.gz")
+SHA_WIN=$(extract       "Glanvu-${VERSION}-windows-x86_64\\.zip")
 
-[[ -z "$SHA_MACOS" || -z "$SHA_LINUX" || -z "$SHA_WIN" ]] && {
-  echo "Error: could not find all three digests. Does the release exist?" >&2
+[[ -z "$SHA_MACOS_ARM" || -z "$SHA_MACOS_X86" || -z "$SHA_LINUX" || -z "$SHA_WIN" ]] && {
+  echo "Error: could not find all four digests. Does the release have both macOS assets?" >&2
   printf "%s\n" "$ASSETS" >&2; exit 1; }
 
 SHA_WIN_UP=$(echo "$SHA_WIN" | tr '[:lower:]' '[:upper:]')
-printf "macOS:   %s\nLinux:   %s\nWindows: %s\n\n" "$SHA_MACOS" "$SHA_LINUX" "$SHA_WIN"
+printf "macOS arm64: %s\nmacOS x86_64: %s\nLinux:       %s\nWindows:     %s\n\n" \
+  "$SHA_MACOS_ARM" "$SHA_MACOS_X86" "$SHA_LINUX" "$SHA_WIN"
 
 # Helper: in-place perl substitution (portable across macOS/Linux)
 p() { perl -i -pe "$1" "$2"; }
 
-# ── Homebrew cask (macOS) ─────────────────────────────────────────────────────
+# ── Homebrew cask (macOS arm64 + x86_64) ─────────────────────────────────────
 echo "Updating Homebrew cask..."
-p "s/^version \".*\"/version \"${VERSION}\"/"  dist/brew/Casks/glanvu.rb
-p "s/^sha256 \".*\"/sha256 \"${SHA_MACOS}\"/"  dist/brew/Casks/glanvu.rb
+p "s/^  version \".*\"/  version \"${VERSION}\"/" dist/brew/Casks/glanvu.rb
+# Update each arch's sha256 using awk for context-aware block matching.
+awk -v arm="$SHA_MACOS_ARM" -v intel="$SHA_MACOS_X86" '
+  /on_arm do/   { in_arm=1 }
+  /on_intel do/ { in_intel=1 }
+  /^  end/      { in_arm=0; in_intel=0 }
+  in_arm   && /sha256/ { sub(/"[0-9a-f]{64}"/, "\"" arm   "\"") }
+  in_intel && /sha256/ { sub(/"[0-9a-f]{64}"/, "\"" intel "\"") }
+  { print }
+' dist/brew/Casks/glanvu.rb > dist/brew/Casks/glanvu.rb.tmp \
+  && mv dist/brew/Casks/glanvu.rb.tmp dist/brew/Casks/glanvu.rb
 
-# ── Homebrew formula (Linux + macOS CLI) ──────────────────────────────────────
+# ── Homebrew formula (Linux + macOS arm64 + macOS x86_64) ────────────────────
 echo "Updating Homebrew formula..."
+# URLs: bump version string in all three download URLs.
 p "s|releases/download/v[0-9.]+/glanvu-[0-9.]+-linux|releases/download/v${VERSION}/glanvu-${VERSION}-linux|g" dist/brew/Formula/glanvu.rb
 p "s|releases/download/v[0-9.]+/Glanvu-[0-9.]+-macos|releases/download/v${VERSION}/Glanvu-${VERSION}-macos|g" dist/brew/Formula/glanvu.rb
-# sha256 appears twice (linux + macos on_* blocks); replace each by matching context
-p "s/(on_linux.*?sha256 \")[0-9a-f]{64}/\${1}${SHA_LINUX}/s"  dist/brew/Formula/glanvu.rb
-p "s/(on_macos.*?sha256 \")[0-9a-f]{64}/\${1}${SHA_MACOS}/s"  dist/brew/Formula/glanvu.rb
-# version appears twice; replace both (same value for linux + macos blocks)
-p "s/version \"[0-9.]+\"/version \"${VERSION}\"/g"             dist/brew/Formula/glanvu.rb
+# version appears three times; replace all.
+p "s/version \"[0-9.]+\"/version \"${VERSION}\"/g" dist/brew/Formula/glanvu.rb
+# sha256: use awk for context-aware block matching (linux / on_arm / on_intel).
+awk -v linux="$SHA_LINUX" -v arm="$SHA_MACOS_ARM" -v intel="$SHA_MACOS_X86" '
+  /on_linux do/  { in_linux=1 }
+  /on_arm do/    { in_arm=1 }
+  /on_intel do/  { in_intel=1 }
+  /^    end/     { in_arm=0; in_intel=0 }
+  /^  end/       { in_linux=0 }
+  in_linux && /sha256/ { sub(/"[0-9a-f]{64}"/, "\"" linux "\"") }
+  in_arm   && /sha256/ { sub(/"[0-9a-f]{64}"/, "\"" arm   "\"") }
+  in_intel && /sha256/ { sub(/"[0-9a-f]{64}"/, "\"" intel "\"") }
+  { print }
+' dist/brew/Formula/glanvu.rb > dist/brew/Formula/glanvu.rb.tmp \
+  && mv dist/brew/Formula/glanvu.rb.tmp dist/brew/Formula/glanvu.rb
 
 # ── Scoop ─────────────────────────────────────────────────────────────────────
 echo "Updating Scoop..."

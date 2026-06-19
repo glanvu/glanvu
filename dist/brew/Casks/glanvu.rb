@@ -1,17 +1,20 @@
 cask "glanvu" do
-  # Update version + sha256 on each release.
-  # Generate sha256 with: shasum -a 256 Glanvu-<version>-macos-arm64.zip
-  # (or: gh release view v<version> --json assets --jq '.assets[].digest')
+  # Update version + both sha256 values on each release (use scripts/bump-packaging.sh).
   version "0.5.0"
-  sha256 "51a8586eeac520ba97f02fe565bf037a42fd77c3a86d469a53bb7b410fa97f65"
 
-  url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
+  on_arm do
+    sha256 "51a8586eeac520ba97f02fe565bf037a42fd77c3a86d469a53bb7b410fa97f65"
+    url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
+  end
+
+  on_intel do
+    sha256 "2057242093d1dbda92824fb37e982ff8d797a7cbce286f502fe1b07b18577353"
+    url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-x86_64.zip"
+  end
+
   name "Glanvu"
   desc "Fast, keyboard-driven, cross-platform universal image viewer and converter"
   homepage "https://glanvu.com"
-
-  # Only an arm64 (Apple Silicon) build is published today; Intel users build from source.
-  depends_on arch: :arm64
 
   livecheck do
     url :url

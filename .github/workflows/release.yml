@@ -15,9 +15,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── macOS arm64 ──────────────────────────────────────────────────────────────
+  # ── macOS arm64 + x86_64 ─────────────────────────────────────────────────────
   build-macos:
-    name: macOS (arm64)
+    name: macOS (arm64 + x86_64)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -25,17 +25,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          targets: x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build .app bundle
+      - name: Build arm64 .app bundle
         run: ./scripts/build-macos-app.sh --release
 
-      - name: Zip .app
+      - name: Zip arm64 .app
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           cd dist/macos
           zip -r "../../Glanvu-${VERSION}-macos-arm64.zip" Glanvu.app
+
+      - name: Build x86_64 .app bundle
+        run: ./scripts/build-macos-app.sh --release --target x86_64-apple-darwin
+
+      - name: Zip x86_64 .app
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd dist/macos
+          zip -r "../../Glanvu-${VERSION}-macos-x86_64.zip" Glanvu.app
 
       - uses: actions/upload-artifact@v4
         with:
