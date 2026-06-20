@@ -10,7 +10,7 @@ VERSION="${VERSION#v}"
 TAG="v${VERSION}"
 REPO="glanvu/glanvu"
 
-PREV_VERSION=$(awk '/^version / {gsub(/"/, "", $2); print $2}' dist/brew/Casks/glanvu.rb)
+PREV_VERSION=$(awk '/^[[:space:]]*version / {gsub(/"/, "", $2); print $2; exit}' dist/brew/Casks/glanvu.rb)
 [[ -z "$PREV_VERSION" ]] && { echo "Could not read current version from dist/brew/Casks/glanvu.rb" >&2; exit 1; }
 [[ "$PREV_VERSION" == "$VERSION" ]] && { echo "Already at $VERSION, nothing to do." >&2; exit 0; }
 

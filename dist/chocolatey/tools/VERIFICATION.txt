@@ -1,17 +1,17 @@
 VERIFICATION
 
 Glanvu is published by the software author (Juan García Longarón) on GitHub:
-  https://github.com/glanvu/glanvu/releases/tag/v0.5.0
+  https://github.com/glanvu/glanvu/releases/tag/v0.5.3
 
 This package downloads the official Windows release zip and verifies its SHA256:
 
-  File:   Glanvu-0.5.0-windows-x86_64.zip
-  SHA256: E095838461DD27610A6CDB702EB3161B3883860DF38281FC1AF46C0BA7CA57DF
+  File:   Glanvu-0.5.3-windows-x86_64.zip
+  SHA256: FBEAA068D928702A82B644A13BDCFA733F4F533AC42015C999BBD64BD36A726C
 
 To verify the checksum yourself:
 
   PowerShell:
-    Get-FileHash .\Glanvu-0.5.0-windows-x86_64.zip -Algorithm SHA256
+    Get-FileHash .\Glanvu-0.5.3-windows-x86_64.zip -Algorithm SHA256
 
   GitHub CLI:
     gh release view v0.5.0 --repo glanvu/glanvu --json assets `
