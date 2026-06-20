@@ -42,6 +42,33 @@ jobs:
         run: |
           cd dist/chocolatey
           choco pack
-          choco push glanvu.${{ steps.ver.outputs.version }}.nupkg `
-            --source https://push.chocolatey.org/ `
-            --api-key $env:CHOCO_API_KEY
+          $nupkg = "glanvu.${{ steps.ver.outputs.version }}.nupkg"
+
+          # push.chocolatey.org intermittently returns 504 Gateway Timeout. Retry with
+          # backoff, and treat an "already exists" response as success (idempotent re-runs).
+          $maxAttempts = 4
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            Write-Host "Push attempt $i/$maxAttempts..."
+            $output = (choco push $nupkg `
+              --source https://push.chocolatey.org/ `
+              --api-key $env:CHOCO_API_KEY `
+              --timeout 300 2>&1 | Out-String)
+            Write-Host $output
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Push succeeded."
+              exit 0
+            }
+            if ($output -match 'already (exists|been submitted)' -or
+                $output -match 'version with the same') {
+              Write-Host "Version already on Chocolatey — treating as success."
+              exit 0
+            }
+            if ($i -lt $maxAttempts) {
+              $wait = 30 * $i
+              Write-Host "Push failed (likely a transient 504). Retrying in $wait s..."
+              Start-Sleep -Seconds $wait
+            }
+          }
+          Write-Error "choco push failed after $maxAttempts attempts (Chocolatey server 504s)."
+          exit 1
