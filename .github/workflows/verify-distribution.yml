@@ -39,12 +39,13 @@ jobs:
           else
             # Not merged — find the open PR and surface anything blocking it (CLA re-prompts
             # on every PR, so this turns that recurring manual step into a visible nudge).
-            pr_json=$(gh pr list --repo microsoft/winget-pkgs --state open \
-              --search "in:title Glanvu.Glanvu ${VERSION}" \
-              --json number,url,labels --jq '.[0]' 2>/dev/null || true)
+            # Use the REST pulls endpoint with a head filter (immediate; the search API
+            # lags behind freshly-created PRs).
+            pr_json=$(gh api "repos/microsoft/winget-pkgs/pulls?state=open&head=juanyque:glanvu-${VERSION}" \
+              --jq '.[0]' 2>/dev/null || true)
             if [[ -n "$pr_json" && "$pr_json" != "null" ]]; then
               pr_num=$(echo "$pr_json" | jq -r '.number')
-              pr_url=$(echo "$pr_json" | jq -r '.url')
+              pr_url=$(echo "$pr_json" | jq -r '.html_url')
               pr_labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(", ")')
               extra=""
               if echo "$pr_labels" | grep -q "Needs-CLA"; then
