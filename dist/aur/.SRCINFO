@@ -1,6 +1,6 @@
 pkgbase = glanvu-bin
 	pkgdesc = Fast, keyboard-driven, cross-platform universal image viewer and converter
-	pkgver = 0.5.3
+	pkgver = 0.5.4
 	pkgrel = 1
 	url = https://glanvu.com
 	arch = x86_64
@@ -10,6 +10,6 @@ pkgbase = glanvu-bin
 	optdepends = vulkan-icd-loader: GPU-accelerated rendering
 	provides = glanvu
 	conflicts = glanvu
-	source = glanvu-bin-0.5.3.tar.gz::https://github.com/glanvu/glanvu/releases/download/v0.5.3/glanvu-0.5.3-linux-x86_64.tar.gz	sha256sums = 21396c517602c1599bb69aa6d875fa72b96afacaa2c9efe3c82f6fe615631235
+	source = glanvu-bin-0.5.4.tar.gz::https://github.com/glanvu/glanvu/releases/download/v0.5.4/glanvu-0.5.4-linux-x86_64.tar.gz = 89784c67f149b925beac1b7208d8961485092253ad66ad2ff460eadccfcd0b52
 
 pkgname = glanvu-bin

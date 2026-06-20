@@ -1,14 +1,14 @@
 cask "glanvu" do
   # Update version + both sha256 values on each release (use scripts/bump-packaging.sh).
-  version "0.5.3"
+  version "0.5.4"
 
   on_arm do
-    sha256 "e18bd9cc414b4aca915cf9dd583f5a5d0f692b35817e29123b96d9e98e615d04"
+    sha256 "975844e0b6f2ee65dbfecdcdc3e759814164ab9abd03c2ce04aa9a36123782e5"
     url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
   end
 
   on_intel do
-    sha256 "fdf888a36d74db1dc5c9502b5e2e19138a54c5cb6432b9214347647f7f0e26bf"
+    sha256 "2f63998127629cf8a80e43dca6a5c466347d020d73e87a3f1f0118090ed705a0"
     url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-x86_64.zip"
   end
 
