@@ -24,6 +24,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Ensure the cross-compilation target is installed for the *active* toolchain.
+# rust-toolchain.toml pins the channel, so the target must be added to that
+# toolchain specifically — adding it to `stable` (e.g. via a CI action) is not enough.
+if [[ -n "$TARGET" ]]; then
+    rustup target add "$TARGET"
+fi
+
 if [[ "$PROFILE" == "--release" ]]; then
     if [[ -n "$TARGET" ]]; then
         cargo build --release --target "$TARGET"
