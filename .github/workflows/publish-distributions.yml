@@ -1,0 +1,131 @@
+name: Publish to distributions
+
+# Runs automatically when a GitHub release is published (i.e. a draft is made public).
+# Prerequisite: create a fine-grained PAT with write access to:
+#   - glanvu/homebrew-glanvu
+#   - glanvu/scoop-glanvu
+#   - juanyque/winget-pkgs
+# Store it as the repository secret DIST_GITHUB_TOKEN.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  DIST_REPO: glanvu/glanvu
+
+jobs:
+  # ── Homebrew tap (cask + formula) ────────────────────────────────────────────
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Push cask and formula to homebrew-glanvu
+        env:
+          GH_TOKEN: ${{ secrets.DIST_GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Update a file in a remote repo via the GitHub Contents API.
+          # Works for both updates (sha required) and creates (no sha).
+          update_file() {
+            local repo="$1" remote_path="$2" local_path="$3" msg="$4"
+            local sha
+            sha=$(gh api "repos/${repo}/contents/${remote_path}" --jq '.sha' 2>/dev/null || true)
+            local args=(
+              --method PUT
+              --field "message=${msg}"
+              --field "content=$(base64 -w 0 < "$local_path")"
+            )
+            [[ -n "$sha" ]] && args+=(--field "sha=${sha}")
+            gh api "repos/${repo}/contents/${remote_path}" "${args[@]}"
+          }
+
+          TAP="glanvu/homebrew-glanvu"
+          update_file "$TAP" Casks/glanvu.rb   dist/brew/Casks/glanvu.rb   "glanvu ${VERSION}: update cask"
+          update_file "$TAP" Formula/glanvu.rb dist/brew/Formula/glanvu.rb "glanvu ${VERSION}: update formula"
+
+  # ── Scoop bucket ─────────────────────────────────────────────────────────────
+  scoop:
+    name: Update Scoop bucket
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Push manifest to scoop-glanvu
+        env:
+          GH_TOKEN: ${{ secrets.DIST_GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA=$(gh api repos/glanvu/scoop-glanvu/contents/bucket/glanvu.json --jq '.sha' 2>/dev/null || true)
+          args=(
+            --method PUT
+            --field "message=glanvu ${VERSION}: update manifest"
+            --field "content=$(base64 -w 0 < dist/scoop/bucket/glanvu.json)"
+          )
+          [[ -n "$SHA" ]] && args+=(--field "sha=${SHA}")
+          gh api repos/glanvu/scoop-glanvu/contents/bucket/glanvu.json "${args[@]}"
+
+  # ── winget (PR to microsoft/winget-pkgs) ─────────────────────────────────────
+  winget:
+    name: Submit winget PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Create PR in juanyque/winget-pkgs fork
+        env:
+          GH_TOKEN: ${{ secrets.DIST_GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="glanvu-${VERSION}"
+          MANIFEST_DIR="manifests/g/Glanvu/Glanvu/${VERSION}"
+          FORK="juanyque/winget-pkgs"
+          UPSTREAM="microsoft/winget-pkgs"
+
+          # Sync fork's master with upstream before branching
+          UPSTREAM_SHA=$(gh api "repos/${UPSTREAM}/git/ref/heads/master" --jq '.object.sha')
+
+          # Delete branch if it already exists (idempotent re-runs)
+          gh api "repos/${FORK}/git/refs/heads/${BRANCH}" \
+            --method DELETE 2>/dev/null || true
+
+          # Create fresh branch from upstream master
+          gh api "repos/${FORK}/git/refs" \
+            --method POST \
+            --field "ref=refs/heads/${BRANCH}" \
+            --field "sha=${UPSTREAM_SHA}"
+
+          # Push each manifest file to the branch
+          for local_file in "dist/winget/${MANIFEST_DIR}"/*.yaml; do
+            fname=$(basename "$local_file")
+            gh api "repos/${FORK}/contents/${MANIFEST_DIR}/${fname}" \
+              --method PUT \
+              --field "message=New version: Glanvu.Glanvu version ${VERSION}" \
+              --field "content=$(base64 -w 0 < "$local_file")" \
+              --field "branch=${BRANCH}"
+          done
+
+          # Open PR — skip if one already exists for this version
+          EXISTING=$(gh pr list --repo "$UPSTREAM" \
+            --head "${FORK%/*}:${BRANCH}" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [[ -z "$EXISTING" ]]; then
+            gh pr create \
+              --repo "$UPSTREAM" \
+              --head "${FORK%/*}:${BRANCH}" \
+              --base master \
+              --title "New version: Glanvu.Glanvu version ${VERSION}" \
+              --body "Automated submission for Glanvu ${VERSION}. See https://github.com/glanvu/glanvu/releases/tag/v${VERSION}"
+          else
+            echo "PR #${EXISTING} already exists, skipping."
+          fi
