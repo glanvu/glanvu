@@ -372,6 +372,14 @@ struct Gpu {
     about_text_buf: TextBuffer,
     about_layout_scale: f32,
     about_line_h: f32,
+    // Info overlay (I key): translucent panel, top-left. The body text is supplied by App
+    // (which owns the nav/metadata) via `render(.., info)`, mirroring the status overlay.
+    info_uniform_buf: wgpu::Buffer,
+    info_uniform_bind: wgpu::BindGroup,
+    info_text_buf: TextBuffer,
+    info_layout_scale: f32,
+    info_line_h: f32,
+    info_text_cache: String,
     // GPU-uploaded thumbnails keyed by path.
     thumb_binds: std::collections::HashMap<PathBuf, wgpu::BindGroup>,
     // Explorer panel: per-item text buffers (index 0 = header, 1..n = entries) + solid textures.
@@ -641,6 +649,11 @@ impl Gpu {
             make_uniform_bind(&device, &uniform_layout_solo, &about_uniform_buf);
         let about_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
 
+        let info_uniform_buf = make_uniform_buffer(&device);
+        let info_uniform_bind =
+            make_uniform_bind(&device, &uniform_layout_solo, &info_uniform_buf);
+        let info_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+
         // Date overlay (bottom-right counterpart to the path overlay).
         let date_uniform_buf = make_uniform_buffer(&device);
         let date_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &date_uniform_buf);
@@ -728,6 +741,12 @@ impl Gpu {
             about_text_buf,
             about_layout_scale: -1.0,
             about_line_h: 22.0,
+            info_uniform_buf,
+            info_uniform_bind,
+            info_text_buf,
+            info_layout_scale: -1.0,
+            info_line_h: 22.0,
+            info_text_cache: String::new(),
             thumb_binds: std::collections::HashMap::new(),
             explorer_item_bufs: Vec::new(),
             explorer_text_cache: String::new(),
@@ -964,6 +983,50 @@ impl Gpu {
         (bx, by, bw, bh, bx + pad_h, by + pad_v)
     }
 
+    /// Lay out the info overlay (I key): translucent box anchored top-left, left-aligned text.
+    /// `text` is the metadata body supplied by App. Reshapes only when the text or scale changes.
+    /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`.
+    fn layout_info(
+        &mut self,
+        text: &str,
+        scale: f32,
+        win_w: f32,
+        win_h: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
+        if self.info_text_cache != text
+            || (self.info_layout_scale - scale).abs() > f32::EPSILON
+        {
+            self.info_text_cache = text.to_string();
+            self.info_layout_scale = scale;
+            let font = (15.0 * scale).clamp(13.0, 30.0);
+            self.info_line_h = font * 1.5;
+            let mut buf =
+                TextBuffer::new(&mut self.font_system, Metrics::new(font, self.info_line_h));
+            buf.set_wrap(&mut self.font_system, Wrap::None);
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Basic,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.info_text_buf = buf;
+        }
+        let pad_h = 16.0 * scale;
+        let pad_v = 12.0 * scale;
+        let margin = 16.0 * scale;
+        let text_w = self
+            .info_text_buf
+            .layout_runs()
+            .fold(0.0_f32, |m, r| m.max(r.line_w));
+        let rows = text.lines().count().max(1) as f32;
+        let bw = (text_w + 2.0 * pad_h).min(win_w - 2.0 * margin);
+        let bh = (rows * self.info_line_h + 2.0 * pad_v).min(win_h - 2.0 * margin);
+        (margin, margin, bw, bh, margin + pad_h, margin + pad_v)
+    }
+
     /// Lay out the centered status overlay (slideshow message, etc.).
     /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)` in physical pixels.
     fn layout_status(
@@ -1142,6 +1205,7 @@ impl Gpu {
         help: bool,
         confirm: Option<&str>,
         about: bool,
+        info: Option<&str>,
         scale: f32,
         logo: bool,
     ) -> bool {
@@ -1155,10 +1219,11 @@ impl Gpu {
 
         // ---- Collect positions for box draws and text areas ----
 
-        // Path overlay (bottom-left).
+        // Path overlay (bottom-left). Suppressed while the info panel is open — the path is
+        // already shown there, so the bottom-left overlay would be redundant.
         let mut show_overlay_box = false;
         let mut overlay_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        if let Some(text) = overlay {
+        if let Some(text) = overlay.filter(|_| info.is_none()) {
             overlay_coords = self.layout_overlay(text, scale, win_w, win_h);
             let (bx, by, bw, bh, _, _) = overlay_coords;
             self.queue.write_buffer(
@@ -1323,6 +1388,22 @@ impl Gpu {
             push_donate_hit!(about_donate_top);
         }
 
+        // Info overlay box (I key): translucent panel, top-left, current image's metadata.
+        let mut show_info_box = false;
+        let mut info_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(info_text) = info {
+            info_coords = self.layout_info(info_text, scale, win_w, win_h);
+            let (bx, by, bw, bh, _, _) = info_coords;
+            self.queue.write_buffer(
+                &self.info_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            show_info_box = true;
+        }
+
         // Explorer panel (left side).
         let mut show_explorer = false;
         let explorer_sel_y;
@@ -1438,7 +1519,8 @@ impl Gpu {
             || show_version
             || show_donate
             || show_help_donate
-            || show_about_box;
+            || show_about_box
+            || show_info_box;
         let text_ok = if need_text {
             self.viewport.update(
                 &self.queue,
@@ -1473,6 +1555,7 @@ impl Gpu {
             let v_buf = &self.version_text_buf as *const TextBuffer;
             let donate_ptr = &self.donate_text_buf as *const TextBuffer;
             let about_ptr = &self.about_text_buf as *const TextBuffer;
+            let info_ptr = &self.info_text_buf as *const TextBuffer;
             // explorer_item_bufs is a Vec; get raw pointers to each element.
             let e_ptrs: Vec<*const TextBuffer> = self
                 .explorer_item_bufs
@@ -1715,6 +1798,23 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
+            if show_info_box {
+                let (bx, by, bw, bh, tx, ty) = info_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*info_ptr },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + bw) as i32,
+                        bottom: (by + bh) as i32,
+                    },
+                    default_color: Color::rgb(235, 235, 240),
+                    custom_glyphs: &[],
+                });
+            }
             self.text_renderer
                 .prepare(
                     &self.device,
@@ -1841,6 +1941,13 @@ impl Gpu {
             if show_about_box {
                 pass.set_bind_group(0, &self.about_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.explorer_bg_bind, &[]); // same dark bg
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+
+            // 6c. Info overlay box (I key) — top-left, same translucent dark bg as help/about.
+            if show_info_box {
+                pass.set_bind_group(0, &self.info_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
 
@@ -2078,6 +2185,8 @@ struct App {
     help_visible: bool,
     /// Whether the About overlay is shown (A key).
     about_visible: bool,
+    /// Whether the info panel is shown (I key). Toggled; persists across navigation.
+    info_visible: bool,
     /// Pending default-app confirmation. `Some(true)` = set; `Some(false)` = unset.
     confirm_assoc: Option<bool>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
@@ -2119,6 +2228,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("C", "copy image to clipboard"),
     ("Shift+C", "copy file path to clipboard"),
     ("O", "toggle sort order (name / date)"),
+    ("I", "image info panel"),
     ("", ""),
     ("D", "set Glanvu as default app"),
     ("U", "restore previous defaults"),
@@ -2131,6 +2241,22 @@ fn mtime_string(path: &std::path::PathBuf) -> Option<String> {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let dt = chrono::DateTime::<chrono::Local>::from(mtime);
     Some(dt.format("%Y-%m-%d  %H:%M").to_string())
+}
+
+/// Human-readable byte count (e.g. "1.4 MB"). Used by the info overlay.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 impl App {
@@ -2194,6 +2320,30 @@ impl App {
 
     fn stop_slideshow(&mut self) {
         self.slideshow_next = None;
+    }
+
+    /// Compose the info-overlay body for the current image: filename, dimensions, format,
+    /// size, modified date. Returns `None` when there is no current image.
+    fn build_info_string(&self) -> Option<String> {
+        let path = self.nav.current_path()?;
+        let mut lines: Vec<String> = Vec::with_capacity(5);
+        lines.push(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("(unknown)")
+                .to_string(),
+        );
+        if let Some(img) = self.nav.current_image() {
+            lines.push(format!("{} × {} px", img.width, img.height));
+        }
+        if let Ok(meta) = glanvu_core::read_meta_path(path) {
+            lines.push(meta.format.name().to_string());
+            lines.push(human_size(meta.file_size));
+        }
+        if let Some(dt) = mtime_string(path) {
+            lines.push(dt);
+        }
+        Some(lines.join("\n"))
     }
 
     fn open_explorer(&mut self) {
@@ -2406,6 +2556,7 @@ impl App {
                 self.help_visible,
                 confirm_text,
                 self.about_visible,
+                None, // no image in empty mode → no info panel
                 scale,
                 true,
             );
@@ -2441,6 +2592,12 @@ impl App {
             Some(t) if now < t => Some(self.status_text.as_str()),
             _ => None,
         };
+        // Info panel body (I key) — computed here (App owns nav) and passed into the renderer.
+        let info = if self.info_visible {
+            self.build_info_string()
+        } else {
+            None
+        };
         let scale = self
             .window
             .as_ref()
@@ -2461,6 +2618,7 @@ impl App {
             self.help_visible,
             confirm_text,
             self.about_visible,
+            info.as_deref(),
             scale,
             false,
         );
@@ -2534,6 +2692,16 @@ impl ApplicationHandler for App {
                     self.help_visible = false;
                     self.redraw();
                     return;
+                }
+
+                // If the info panel is open, Escape closes it (rather than quitting). All other
+                // keys fall through so you can keep navigating with the panel open and it updates.
+                if self.info_visible {
+                    if let Key::Named(NamedKey::Escape) = event.logical_key.as_ref() {
+                        self.info_visible = false;
+                        self.redraw();
+                        return;
+                    }
                 }
 
                 // If the confirm overlay is up, Enter confirms, Esc cancels, anything else is ignored.
@@ -2772,10 +2940,18 @@ impl ApplicationHandler for App {
                     Key::Character("h") | Key::Character("H") | Key::Character("?") => {
                         self.help_visible = true;
                         self.about_visible = false;
+                        self.info_visible = false;
                         self.redraw();
                     }
                     Key::Character("a") | Key::Character("A") => {
                         self.about_visible = !self.about_visible;
+                        self.help_visible = false;
+                        self.info_visible = false;
+                        self.redraw();
+                    }
+                    Key::Character("i") | Key::Character("I") => {
+                        self.info_visible = !self.info_visible;
+                        self.about_visible = false;
                         self.help_visible = false;
                         self.redraw();
                     }
@@ -3138,6 +3314,7 @@ pub fn run(path: &str) -> ExitCode {
         status_until: None,
         explorer: None,
         help_visible: false,
+        info_visible: false,
         about_visible: false,
         confirm_assoc: None,
         last_grid_click: None,
@@ -3210,6 +3387,7 @@ pub fn run_empty() -> ExitCode {
         status_until: None,
         explorer: None,
         help_visible: false,
+        info_visible: false,
         about_visible: false,
         confirm_assoc: None,
         last_grid_click: None,
@@ -3223,5 +3401,20 @@ pub fn run_empty() -> ExitCode {
             eprintln!("glanvu: viewer error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_size;
+
+    #[test]
+    fn human_size_scales_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(1_048_576), "1.0 MB");
+        assert_eq!(human_size(1_073_741_824), "1.0 GB");
     }
 }
