@@ -37,8 +37,7 @@ jobs:
                --silent >/dev/null 2>&1; then
             report+="- ✅ **winget** — \`${VERSION}\` merged into microsoft/winget-pkgs"$'\n'
           else
-            # Not merged — find the open PR and surface anything blocking it (CLA re-prompts
-            # on every PR, so this turns that recurring manual step into a visible nudge).
+            # Not merged — find the open PR and surface anything genuinely blocking it.
             # Use the REST pulls endpoint with a head filter (immediate; the search API
             # lags behind freshly-created PRs).
             pr_json=$(gh api "repos/microsoft/winget-pkgs/pulls?state=open&head=juanyque:glanvu-${VERSION}" \
@@ -46,10 +45,17 @@ jobs:
             if [[ -n "$pr_json" && "$pr_json" != "null" ]]; then
               pr_num=$(echo "$pr_json" | jq -r '.number')
               pr_url=$(echo "$pr_json" | jq -r '.html_url')
+              head_sha=$(echo "$pr_json" | jq -r '.head.sha')
               pr_labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(", ")')
+              # The "Needs-CLA" label is applied transiently on every new PR, then cleared
+              # once the bot re-confirms the signature — so it is NOT a reliable signal.
+              # Key off the authoritative license/cla commit status instead: only "failure"
+              # means a signature is actually required.
+              cla_state=$(gh api "repos/microsoft/winget-pkgs/commits/${head_sha}/status" \
+                --jq '[.statuses[]? | select(.context=="license/cla")][0].state // ""' 2>/dev/null || true)
               extra=""
-              if echo "$pr_labels" | grep -q "Needs-CLA"; then
-                extra=" — **action needed: comment \`@microsoft-github-policy-service agree\` on the PR (CLA)**"
+              if [[ "$cla_state" == "failure" ]]; then
+                extra=" — **action needed: sign the CLA (comment \`@microsoft-github-policy-service agree\` on the PR)**"
               elif echo "$pr_labels" | grep -q "Changes-Requested"; then
                 extra=" — **changes requested by a reviewer**"
               fi
