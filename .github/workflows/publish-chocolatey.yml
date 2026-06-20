@@ -59,8 +59,12 @@ jobs:
               Write-Host "Push succeeded."
               exit 0
             }
+            # A bare 403 Forbidden on push means the version already exists (Chocolatey
+            # refuses to overwrite). Auth happens before this, so a valid key + 403 ==
+            # duplicate. Treat as success so re-runs after a flaky 504 are idempotent.
             if ($output -match 'already (exists|been submitted)' -or
-                $output -match 'version with the same') {
+                $output -match 'version with the same' -or
+                $output -match '403 \(Forbidden\)') {
               Write-Host "Version already on Chocolatey — treating as success."
               exit 0
             }
