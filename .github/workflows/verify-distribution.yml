@@ -1,0 +1,99 @@
+name: Verify distribution
+
+# "All workflows green" != "live for users": winget and Chocolatey both go through
+# external moderation queues that can take days. This job checks, daily, whether the
+# latest release actually propagated to every channel, and keeps a single tracking
+# issue open while anything is still pending (closing it automatically once live).
+on:
+  schedule:
+    - cron: "0 8 * * *" # daily at 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check each channel and manage the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          VERSION=$(gh release view --repo "$REPO" --json tagName --jq '.tagName' | sed 's/^v//')
+          [[ -z "$VERSION" ]] && { echo "No release found; nothing to verify."; exit 0; }
+          echo "Latest release: v$VERSION"
+
+          pending=()
+          report=""
+
+          # ── winget: manifest folder exists in microsoft/winget-pkgs once merged ──
+          if gh api "repos/microsoft/winget-pkgs/contents/manifests/g/Glanvu/Glanvu/${VERSION}" \
+               --silent >/dev/null 2>&1; then
+            report+="- ✅ **winget** — \`${VERSION}\` merged into microsoft/winget-pkgs"$'\n'
+          else
+            report+="- ⏳ **winget** — not merged yet (moderation queue)"$'\n'
+            pending+=("winget")
+          fi
+
+          # ── Chocolatey: approved+listed packages appear in the public OData feed ──
+          choco_url="https://community.chocolatey.org/api/v2/Packages(Id='glanvu',Version='${VERSION}')"
+          code=$(curl -s -o /dev/null -w "%{http_code}" -A "verify-distribution" "$choco_url" || echo "000")
+          if [[ "$code" == "200" ]]; then
+            report+="- ✅ **Chocolatey** — \`${VERSION}\` live on community.chocolatey.org"$'\n'
+          elif [[ "$code" == "404" ]]; then
+            report+="- ⏳ **Chocolatey** — not live yet (moderation queue)"$'\n'
+            pending+=("Chocolatey")
+          else
+            report+="- ❔ **Chocolatey** — could not verify (HTTP ${code}); check manually"$'\n'
+          fi
+
+          # ── Homebrew + Scoop are direct pushes (no moderation) — sanity-check the tap ──
+          if gh api "repos/glanvu/homebrew-glanvu/contents/Casks/glanvu.rb" --jq '.content' 2>/dev/null \
+               | base64 -d 2>/dev/null | grep -q "version \"${VERSION}\""; then
+            report+="- ✅ **Homebrew** — tap cask at \`${VERSION}\`"$'\n'
+          else
+            report+="- ⏳ **Homebrew** — tap cask not at \`${VERSION}\`"$'\n'
+            pending+=("Homebrew")
+          fi
+          if gh api "repos/glanvu/scoop-glanvu/contents/bucket/glanvu.json" --jq '.content' 2>/dev/null \
+               | base64 -d 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
+            report+="- ✅ **Scoop** — bucket at \`${VERSION}\`"$'\n'
+          else
+            report+="- ⏳ **Scoop** — bucket not at \`${VERSION}\`"$'\n'
+            pending+=("Scoop")
+          fi
+
+          echo "$report"
+
+          TITLE="[release-watch] v${VERSION} distribution status"
+          EXISTING=$(gh issue list --repo "$REPO" --state open --search "in:title $TITLE" \
+            --json number --jq '.[0].number' 2>/dev/null || true)
+
+          FOOTER="This issue closes automatically once every channel is live. Direct channels (Homebrew, Scoop) update on release; winget and Chocolatey clear external moderation."
+          printf -v BODY 'Automated distribution check for **v%s** (updated %s):\n\n%s\n%s' \
+            "$VERSION" "$(date -u +%Y-%m-%dT%H:%MZ)" "$report" "$FOOTER"
+
+          if [[ ${#pending[@]} -eq 0 ]]; then
+            if [[ -n "$EXISTING" ]]; then
+              printf -v CLOSEMSG '✅ All channels live for v%s. Closing.\n\n%s' "$VERSION" "$report"
+              gh issue comment "$EXISTING" --repo "$REPO" --body "$CLOSEMSG"
+              gh issue close "$EXISTING" --repo "$REPO"
+              echo "All live — closed tracking issue #${EXISTING}."
+            else
+              echo "All channels live for v${VERSION}; no tracking issue needed."
+            fi
+          else
+            if [[ -n "$EXISTING" ]]; then
+              gh issue edit "$EXISTING" --repo "$REPO" --body "$BODY"
+              echo "Updated tracking issue #${EXISTING} (pending: ${pending[*]})."
+            else
+              gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "release-watch"
+              echo "Opened tracking issue (pending: ${pending[*]})."
+            fi
+          fi
