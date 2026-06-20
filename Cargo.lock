@@ -715,7 +715,7 @@ checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
 
 [[package]]
 name = "glanvu"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "glanvu-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "image",
  "thiserror 2.0.18",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "glanvu-viewer-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "glanvu-core",
  "image",

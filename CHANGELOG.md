@@ -6,7 +6,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.2] — 2026-06-20
+## [0.5.3] — 2026-06-20
 
 Windows polish release: fixes the three issues Windows users hit on first launch.
 macOS and Linux behaviour is unchanged.
