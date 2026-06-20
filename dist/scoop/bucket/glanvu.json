@@ -5,7 +5,7 @@
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.3-windows-x86_64.zip",
+            "url": "https://github.com/glanvu/glanvu/releases/download/v0.5.3/Glanvu-0.5.3-windows-x86_64.zip",
             "hash": "fbeaa068d928702a82b644a13bdcfa733f4f533ac42015c999bbd64bd36a726c",
             "extract_dir": "Glanvu-0.5.3"
         }
@@ -21,7 +21,7 @@
         "architecture": {
             "64bit": {
                 "url": "https://github.com/glanvu/glanvu/releases/download/v$version/Glanvu-$version-windows-x86_64.zip",
-                "extract_dir": "Glanvu-0.5.3"
+                "extract_dir": "Glanvu-$version"
             }
         }
     }

@@ -56,14 +56,14 @@ The name is **glance + view** — a fast look.
 
 ## Install
 
-Pre-built binaries for v0.5.0 are available at [glanvu.com](https://glanvu.com) and
+Pre-built binaries for v0.5.3 are available at [glanvu.com](https://glanvu.com) and
 [GitHub Releases](https://github.com/glanvu/glanvu/releases):
 
 | Platform | Download |
 |---|---|
-| macOS (Apple Silicon) | [`Glanvu-0.5.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-macos-arm64.zip) |
-| Linux x86_64 | [`glanvu-0.5.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu-0.5.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/glanvu_0.5.0_amd64.deb) |
-| Windows x64 | [`Glanvu-0.5.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-windows-x86_64.zip) |
+| macOS (Apple Silicon) | [`Glanvu-0.5.3-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.3/Glanvu-0.5.3-macos-arm64.zip) |
+| Linux x86_64 | [`glanvu-0.5.3-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.5.3/glanvu-0.5.3-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.5.3/glanvu_0.5.3_amd64.deb) |
+| Windows x64 | [`Glanvu-0.5.3-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.3/Glanvu-0.5.3-windows-x86_64.zip) |
 
 Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
 see the [Roadmap](#roadmap).
@@ -147,7 +147,7 @@ viewer above is the foundation. Planned, in priority order:
 - **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images, multipage documents.
 - **Technical & 3D** — DICOM (medical), CAD drawings, 3D-printing formats (STL/OBJ/3MF/STEP/G-code)
   and general 3D models.
-- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.5.0).
+- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.5.3).
   Package managers in progress: Homebrew tap, Scoop bucket, AUR, winget, Chocolatey.
   Code signing and auto-update planned.
 - **Hosted (Phase 3)** — [glanvu.com](https://glanvu.com): web viewer, shareable links, and a

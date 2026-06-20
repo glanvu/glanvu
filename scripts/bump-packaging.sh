@@ -77,8 +77,11 @@ awk -v linux="$SHA_LINUX" -v arm="$SHA_MACOS_ARM" -v intel="$SHA_MACOS_X86" '
 echo "Updating Scoop..."
 p "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/"                        dist/scoop/bucket/glanvu.json
 p "s/\"hash\": \"[^\"]*\"/\"hash\": \"${SHA_WIN}\"/"                              dist/scoop/bucket/glanvu.json
-p "s/\"extract_dir\": \"Glanvu-[^\"]*\"/\"extract_dir\": \"Glanvu-${VERSION}\"/" dist/scoop/bucket/glanvu.json
-p "s|Glanvu-[0-9.]+-windows-x86_64|Glanvu-${VERSION}-windows-x86_64|g"           dist/scoop/bucket/glanvu.json
+# Main 64bit url: update BOTH the /download/vX/ path and the Glanvu-X filename.
+# The autoupdate url uses $version templating (v$version), so [0-9.]+ won't match it.
+p "s|download/v[0-9.]+/Glanvu-[0-9.]+-windows-x86_64|download/v${VERSION}/Glanvu-${VERSION}-windows-x86_64|g" dist/scoop/bucket/glanvu.json
+# extract_dir: only the literal (digit-prefixed) value; the autoupdate "Glanvu-$version" template is preserved.
+p "s/\"extract_dir\": \"Glanvu-[0-9][^\"]*\"/\"extract_dir\": \"Glanvu-${VERSION}\"/" dist/scoop/bucket/glanvu.json
 
 # ── AUR ───────────────────────────────────────────────────────────────────────
 echo "Updating AUR..."
@@ -110,6 +113,24 @@ p "s|releases/tag/v[0-9.]+|releases/tag/v${VERSION}|g"                          
 p "s|releases/tag/v[0-9.]+|releases/tag/v${VERSION}|g"                            dist/chocolatey/tools/VERIFICATION.txt
 p "s/Glanvu-[0-9.]+-windows-x86_64/Glanvu-${VERSION}-windows-x86_64/g"           dist/chocolatey/tools/VERIFICATION.txt
 p "s/[0-9A-F]{64}/${SHA_WIN_UP}/"                                                 dist/chocolatey/tools/VERIFICATION.txt
+
+# ── Website + README (version display + download links) ───────────────────────
+# Cloudflare Pages redeploys web/ on push to main, so bumping these keeps the
+# public download page in lockstep with the release.
+echo "Updating website + README..."
+for f in web/index.html README.md; do
+  # Download URLs: path + per-asset filename (macOS/Windows = Glanvu-, Linux = glanvu-/glanvu_).
+  p "s|releases/download/v[0-9.]+/|releases/download/v${VERSION}/|g" "$f"
+  p "s|Glanvu-[0-9.]+-macos|Glanvu-${VERSION}-macos|g"              "$f"
+  p "s|Glanvu-[0-9.]+-windows|Glanvu-${VERSION}-windows|g"          "$f"
+  p "s|glanvu-[0-9.]+-linux|glanvu-${VERSION}-linux|g"              "$f"
+  p "s|glanvu_[0-9.]+_amd64|glanvu_${VERSION}_amd64|g"              "$f"
+done
+# Version-display strings (targeted anchors to avoid touching unrelated versions).
+p "s|<code>v[0-9.]+</code>|<code>v${VERSION}</code>|"                    web/index.html
+p "s|v[0-9.]+ &nbsp;|v${VERSION} \&nbsp;|"                               web/index.html
+p "s|binaries for v[0-9.]+|binaries for v${VERSION}|"                    README.md
+p "s|Windows \(v[0-9.]+\)|Windows (v${VERSION})|"                        README.md
 
 echo ""
 echo "Done — all manifests at ${VERSION}."
