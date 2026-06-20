@@ -14,4 +14,8 @@
 *.rs.bk
 *.swp
 
+# Local-only artifacts (release zips built outside CI, Playwright MCP output)
+/Glanvu-*.zip
+/.playwright-mcp/
+
 # Note: Cargo.lock IS committed (this workspace ships a binary).

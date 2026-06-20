@@ -1,12 +1,17 @@
 name: Publish Chocolatey
 
+# Fires automatically when a GitHub release is published, and can also be run
+# manually for re-pushes. The dist/chocolatey manifest must already be bumped
+# (sha256 + version) on main — see bump-packaging.sh.
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version (e.g. 0.5.0)"
+        description: "Package version (e.g. 0.5.2)"
         required: true
-        default: "0.5.0"
+        default: "0.5.2"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -16,6 +21,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Always read the bumped manifest from main, not the tag tree.
+          ref: main
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Pack and push
         env:
@@ -24,6 +42,6 @@ jobs:
         run: |
           cd dist/chocolatey
           choco pack
-          choco push glanvu.${{ github.event.inputs.version }}.nupkg `
+          choco push glanvu.${{ steps.ver.outputs.version }}.nupkg `
             --source https://push.chocolatey.org/ `
             --api-key $env:CHOCO_API_KEY

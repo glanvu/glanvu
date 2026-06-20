@@ -6,7 +6,12 @@
 //! The OS owns the confirmation flow: it shows a permission dialog per UTType and
 //! manages state. We fire the requests and return immediately — no backup, no polling.
 //!
-//! Linux and Windows are stubbed until those installers land.
+//! Windows registers the app in `HKCU\Software\Classes` so it appears under "Open with"
+//! and as a selectable default, then opens the Settings → Default apps page. Windows
+//! protects the real default (UserChoice) behind a per-user hash, so — like macOS — the
+//! OS owns the final confirmation; we register and hand off to the system UI.
+//!
+//! Linux is stubbed until its installer lands.
 
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -108,7 +113,7 @@ fn print_help() {
          \n\
          Supported extensions: {}\n\
          \n\
-         macOS only for now (uses Launch Services). Install the app first: make install-app\n\
+         macOS uses Launch Services; Windows registers the app and opens Settings.\n\
          You can also press D / U inside the viewer to set / restore interactively.",
         SUPPORTED_EXTS.join(", ")
     );
@@ -298,15 +303,140 @@ mod platform {
     }
 }
 
-// ── non-macOS stubs ──────────────────────────────────────────────────────────
+// ── Windows implementation ────────────────────────────────────────────────────
 
-#[cfg(not(target_os = "macos"))]
+// Registers Glanvu under HKCU\Software\Classes so it shows up in "Open with" and as a
+// selectable default, then opens Settings → Default apps. Windows guards the actual
+// default (UserChoice) with a per-user hash, so the user confirms in the system UI.
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::{ExitCode, Mode, SUPPORTED_EXTS};
+    use std::io;
+
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+
+    const PROGID: &str = "Glanvu.Image";
+
+    fn exe_path() -> io::Result<String> {
+        Ok(std::env::current_exe()?.to_string_lossy().into_owned())
+    }
+
+    /// Write the registry entries that make Glanvu visible to the shell:
+    ///   1. A ProgID (`Glanvu.Image`) with an open command + icon.
+    ///   2. `Applications\glanvu.exe` + `SupportedTypes` → appears in the "Open with" list.
+    ///   3. `.<ext>\OpenWithProgids` → Glanvu offered for each supported extension.
+    fn register(exe: &str) -> io::Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let classes =
+            hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)?;
+
+        // 1) ProgID with open command + icon.
+        let (progid, _) = classes.create_subkey(PROGID)?;
+        progid.set_value("", &"Glanvu Image")?;
+        let (icon, _) = progid.create_subkey("DefaultIcon")?;
+        icon.set_value("", &format!("{exe},0"))?;
+        let (cmd, _) = progid.create_subkey(r"shell\open\command")?;
+        cmd.set_value("", &format!("\"{exe}\" \"%1\""))?;
+
+        // 2) Applications\glanvu.exe — surfaces the app in the "Open with" picker.
+        let (app, _) = classes.create_subkey(r"Applications\glanvu.exe")?;
+        let (app_cmd, _) = app.create_subkey(r"shell\open\command")?;
+        app_cmd.set_value("", &format!("\"{exe}\" \"%1\""))?;
+        let (supported, _) = app.create_subkey("SupportedTypes")?;
+        for ext in SUPPORTED_EXTS {
+            supported.set_value(format!(".{ext}"), &"")?;
+        }
+
+        // 3) Per-extension OpenWithProgids so Glanvu is offered for each type.
+        for ext in SUPPORTED_EXTS {
+            let (owp, _) = classes.create_subkey(format!(r".{ext}\OpenWithProgids"))?;
+            owp.set_value(PROGID, &"")?;
+        }
+        Ok(())
+    }
+
+    /// Remove Glanvu's per-extension OpenWithProgids entries. Windows then falls back
+    /// to the remaining handlers. The app stays in the "Open with" list (Applications key).
+    fn unregister_defaults() {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(classes) =
+            hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)
+        {
+            for ext in SUPPORTED_EXTS {
+                if let Ok(owp) = classes
+                    .open_subkey_with_flags(format!(r".{ext}\OpenWithProgids"), KEY_WRITE)
+                {
+                    let _ = owp.delete_value(PROGID);
+                }
+            }
+        }
+    }
+
+    /// Open Settings → Default apps. Windows blocks programmatic default changes
+    /// (UserChoice hash), so the user confirms there — mirrors the macOS permission flow.
+    fn open_default_apps_settings() {
+        let _ = open::that("ms-settings:defaultapps");
+    }
+
+    pub fn do_set() -> String {
+        let exe = match exe_path() {
+            Ok(e) => e,
+            Err(e) => return format!("Could not resolve glanvu.exe path: {e}"),
+        };
+        if let Err(e) = register(&exe) {
+            return format!("Could not register Glanvu in the registry: {e}");
+        }
+        open_default_apps_settings();
+        "Glanvu registered. In the Settings window that opened, choose Glanvu as the \
+         default for the image types you want."
+            .to_string()
+    }
+
+    pub fn do_unset() -> String {
+        unregister_defaults();
+        open_default_apps_settings();
+        "Removed Glanvu from the default-handler list. Pick another app in the Settings \
+         window if needed."
+            .to_string()
+    }
+
+    pub fn run(mode: Mode, exts: &[String]) -> ExitCode {
+        match mode {
+            Mode::List => {
+                let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+                println!("Current default ProgID per image type (Windows owns the real default):");
+                for ext in exts {
+                    let choice = hkcu
+                        .open_subkey(format!(
+                            r"Software\Classes\.{ext}\UserChoice"
+                        ))
+                        .ok()
+                        .and_then(|k| k.get_value::<String, _>("ProgId").ok())
+                        .unwrap_or_else(|| "(unset)".to_string());
+                    println!("  {ext:<6} → {choice}");
+                }
+                ExitCode::SUCCESS
+            }
+            Mode::Reset => {
+                println!("{}", do_unset());
+                ExitCode::SUCCESS
+            }
+            // Set/Unset are handled by the outer run() via do_set/do_unset.
+            Mode::Set | Mode::Unset => ExitCode::SUCCESS,
+        }
+    }
+}
+
+// ── Linux stub ────────────────────────────────────────────────────────────────
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 mod platform {
     use super::{ExitCode, Mode};
 
     const MSG: &str = "glanvu set-default: not yet supported on this platform.\n\
-         Default-app association is currently implemented for macOS only.\n\
-         Linux (xdg-mime) and Windows support will land with their installers.";
+         Default-app association is implemented for macOS and Windows.\n\
+         Linux (xdg-mime) support will land with its installer.";
 
     pub fn do_set() -> String {
         MSG.to_string()

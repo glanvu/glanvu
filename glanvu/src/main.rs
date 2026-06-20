@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// On Windows, release builds use the GUI subsystem so double-clicking the .exe (or
+// "Open with") does not spawn a console window. CLI subcommands reattach to the
+// parent terminal at startup (see `windows_console`), so `glanvu convert …` from a
+// shell still prints normally. Debug builds keep the console subsystem for dev ergonomics.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Glanvu entry point.
 //!
 //! Dispatch table:
@@ -19,7 +28,24 @@ use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// On Windows the binary is a GUI-subsystem app (no console allocated). When it is
+/// launched from a terminal for a CLI subcommand, attach to the parent process's
+/// console so stdout/stderr land there. Launched by double-click there is no parent
+/// console and the call fails silently — which is exactly what we want (no window).
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn windows_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: FFI call with a documented constant; a failed attach is non-fatal.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> ExitCode {
+    #[cfg(target_os = "windows")]
+    windows_console();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {

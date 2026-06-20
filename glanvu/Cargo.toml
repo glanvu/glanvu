@@ -33,5 +33,11 @@ winit = "0.30.13"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 
+# Windows-only: registry access for file association ("Open with" + set-default)
+# and the Win32 console API to reattach CLI output to a parent terminal.
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [lints]
 workspace = true

@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-06-20
+
+Windows polish release: fixes the three issues Windows users hit on first launch.
+macOS and Linux behaviour is unchanged.
+
+### Fixed
+
+- **Windows: no more stray console window.** Release builds now use the GUI
+  subsystem, so launching Glanvu (double-click or "Open with") no longer leaves a
+  `cmd`/console window open behind the viewer. CLI subcommands (`glanvu convert`,
+  `info`, `--help`) still print normally when run from a terminal — the process
+  reattaches to the parent console at startup.
+- **Windows: Glanvu now appears under "Open with".** The app registers itself in
+  `HKCU\Software\Classes` (Applications entry + `SupportedTypes` + per-extension
+  `OpenWithProgids`), so right-click → "Open with" lists Glanvu for image files.
+- **Windows: `set-default` / the `D` and `U` keys now work.** Glanvu registers a
+  ProgID and opens Settings → Default apps for confirmation. Windows guards the real
+  default behind a per-user hash, so — as on macOS — the OS owns the final step.
+
+### Added
+
+- **macOS Intel (x86_64) build.** A native Intel `.app` is now published alongside
+  the Apple Silicon build; Homebrew installs the right one automatically.
+
 ## [0.5.0] — 2026-06-15
 
 First public release. The core viewer and batch pipeline are complete and

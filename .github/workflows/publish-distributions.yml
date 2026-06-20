@@ -24,7 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          # Read from main, not the tag: the dist/ manifests are bumped (sha256 + version)
+          # AFTER the build creates the release assets, so the tag's tree is stale.
+          ref: main
 
       - name: Push cask and formula to homebrew-glanvu
         env:
@@ -58,7 +60,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          # Read from main, not the tag: the dist/ manifests are bumped (sha256 + version)
+          # AFTER the build creates the release assets, so the tag's tree is stale.
+          ref: main
 
       - name: Push manifest to scoop-glanvu
         env:
@@ -81,7 +85,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          # Read from main, not the tag: the dist/ manifests are bumped (sha256 + version)
+          # AFTER the build creates the release assets, so the tag's tree is stale.
+          ref: main
 
       - name: Create PR in juanyque/winget-pkgs fork
         env:
