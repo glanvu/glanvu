@@ -1,6 +1,6 @@
 name: Release
 
-# Triggered by a version tag push: git tag v0.5.0 && git push --tags
+# Triggered by a version tag push: git tag vX.Y.Z && git push --tags
 on:
   push:
     tags:

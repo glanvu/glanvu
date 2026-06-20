@@ -10,10 +10,10 @@ account + API key.
 
 ```powershell
 cd dist\chocolatey
-choco pack                                   # produces glanvu.0.5.0.nupkg
+choco pack                                   # produces glanvu.<version>.nupkg
 choco install glanvu -s . -y                 # local install test
 choco apikey --key <YOUR_KEY> --source https://push.chocolatey.org/
-choco push glanvu.0.5.0.nupkg --source https://push.chocolatey.org/
+choco push glanvu.<version>.nupkg --source https://push.chocolatey.org/
 ```
 
 The first push goes through Chocolatey's **moderation** queue (automated + human review);

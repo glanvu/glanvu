@@ -13,7 +13,7 @@ cd glanvu-bin
 cp /path/to/glanvu/dist/aur/PKGBUILD .
 cp /path/to/glanvu/dist/aur/.SRCINFO .
 git add PKGBUILD .SRCINFO
-git commit -m "Initial import: glanvu-bin 0.5.0"
+git commit -m "Initial import: glanvu-bin <version>"
 git push
 ```
 

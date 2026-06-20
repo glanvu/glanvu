@@ -10,18 +10,18 @@ self-hosted bucket.
 1. Validate locally (requires winget on Windows 10/11):
 
    ```powershell
-   winget validate --manifest dist\winget\manifests\g\Glanvu\Glanvu\0.5.0
-   winget install --manifest dist\winget\manifests\g\Glanvu\Glanvu\0.5.0   # test install
+   winget validate --manifest dist\winget\manifests\g\Glanvu\Glanvu\<version>
+   winget install --manifest dist\winget\manifests\g\Glanvu\Glanvu\<version>   # test install
    ```
 
 2. Fork `microsoft/winget-pkgs`, copy the version folder to the same path in the fork:
-   `manifests/g/Glanvu/Glanvu/0.5.0/`, and open a PR.
+   `manifests/g/Glanvu/Glanvu/<version>/`, and open a PR.
 
    Easiest path: use [`wingetcreate`](https://github.com/microsoft/winget-create):
 
    ```powershell
-   wingetcreate update Glanvu.Glanvu --version 0.5.0 `
-     --urls https://github.com/glanvu/glanvu/releases/download/v0.5.0/Glanvu-0.5.0-windows-x86_64.zip `
+   wingetcreate update Glanvu.Glanvu --version <version> `
+     --urls https://github.com/glanvu/glanvu/releases/download/v<version>/Glanvu-<version>-windows-x86_64.zip `
      --submit
    ```
 

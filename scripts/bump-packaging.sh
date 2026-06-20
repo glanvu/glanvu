@@ -111,6 +111,7 @@ p "s/'[0-9A-F]{64}'/'${SHA_WIN_UP}'/"                                           
 p "s|<version>[^<]*</version>|<version>${VERSION}</version>|"                     dist/chocolatey/glanvu.nuspec
 p "s|releases/tag/v[0-9.]+|releases/tag/v${VERSION}|g"                            dist/chocolatey/glanvu.nuspec
 p "s|releases/tag/v[0-9.]+|releases/tag/v${VERSION}|g"                            dist/chocolatey/tools/VERIFICATION.txt
+p "s|release view v[0-9.]+|release view v${VERSION}|g"                            dist/chocolatey/tools/VERIFICATION.txt
 p "s/Glanvu-[0-9.]+-windows-x86_64/Glanvu-${VERSION}-windows-x86_64/g"           dist/chocolatey/tools/VERIFICATION.txt
 p "s/[0-9A-F]{64}/${SHA_WIN_UP}/"                                                 dist/chocolatey/tools/VERIFICATION.txt
 

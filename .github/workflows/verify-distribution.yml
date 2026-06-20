@@ -37,7 +37,25 @@ jobs:
                --silent >/dev/null 2>&1; then
             report+="- ✅ **winget** — \`${VERSION}\` merged into microsoft/winget-pkgs"$'\n'
           else
-            report+="- ⏳ **winget** — not merged yet (moderation queue)"$'\n'
+            # Not merged — find the open PR and surface anything blocking it (CLA re-prompts
+            # on every PR, so this turns that recurring manual step into a visible nudge).
+            pr_json=$(gh pr list --repo microsoft/winget-pkgs --state open \
+              --search "in:title Glanvu.Glanvu ${VERSION}" \
+              --json number,url,labels --jq '.[0]' 2>/dev/null || true)
+            if [[ -n "$pr_json" && "$pr_json" != "null" ]]; then
+              pr_num=$(echo "$pr_json" | jq -r '.number')
+              pr_url=$(echo "$pr_json" | jq -r '.url')
+              pr_labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(", ")')
+              extra=""
+              if echo "$pr_labels" | grep -q "Needs-CLA"; then
+                extra=" — **action needed: comment \`@microsoft-github-policy-service agree\` on the PR (CLA)**"
+              elif echo "$pr_labels" | grep -q "Changes-Requested"; then
+                extra=" — **changes requested by a reviewer**"
+              fi
+              report+="- ⏳ **winget** — [PR #${pr_num}](${pr_url}) open (labels: ${pr_labels:-none})${extra}"$'\n'
+            else
+              report+="- ⏳ **winget** — not merged yet and no open PR found"$'\n'
+            fi
             pending+=("winget")
           fi
 

@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-06-20
+
+Packaging fixes, shipped end-to-end through the automated release pipeline. The
+application itself is unchanged from 0.5.3 — this release exists to deliver
+corrected distribution manifests cleanly.
+
+### Fixed
+
+- **Scoop:** corrected the Windows download URL. The `/download/vX/` path lagged
+  behind the bumped filename, producing a 404 on `scoop install`.
+- **winget:** declare the `Microsoft.VCRedist.2015+.x64` runtime dependency the
+  MSVC build links against (requested during winget validation).
+
 ## [0.5.3] — 2026-06-20
 
 Windows polish release: fixes the three issues Windows users hit on first launch.

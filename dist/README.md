@@ -6,7 +6,7 @@ is hand-maintained and versioned.
 
 ## Channels
 
-| Channel | Platform | Hosting | Publish method | Status (v0.5.0) |
+| Channel | Platform | Hosting | Publish method | Status |
 |---|---|---|---|---|
 | [`brew/`](brew/) | macOS + Linux | Self-hosted tap (`glanvu/homebrew-glanvu`) | Push cask + formula to tap repo | ✅ Published |
 | [`scoop/`](scoop/) | Windows | Self-hosted bucket (`glanvu/scoop-glanvu`) | Push manifest to bucket repo | ✅ Published |
