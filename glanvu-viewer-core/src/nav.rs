@@ -291,6 +291,22 @@ impl FolderNav {
         Some((added, removed))
     }
 
+    /// Reflect an on-disk rename in the playlist: replace `old` with `new`, move its cached image,
+    /// and re-sort so the entry lands in its new alphabetical position (the renamed image stays
+    /// current). No-op if `old` isn't in the playlist.
+    pub fn rename_path(&mut self, old: &Path, new: &Path, mode: SortMode) {
+        let Some(pos) = self.paths.iter().position(|p| p.as_path() == old) else {
+            return;
+        };
+        self.paths[pos] = new.to_path_buf();
+        if let Some(img) = self.cache.remove(old) {
+            self.cache.insert(new.to_path_buf(), img);
+        }
+        self.in_flight.remove(old);
+        // `index` still points at the renamed slot (= `new`); resort re-locates it by path.
+        self.resort(mode);
+    }
+
     pub fn resort(&mut self, mode: SortMode) {
         let current = self.current_path().cloned();
         sort_paths_by(&mut self.paths, mode);

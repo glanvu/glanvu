@@ -79,6 +79,65 @@ struct DonateHit {
     split_x: f32,
 }
 
+/// A minimal single-line text editor (used by the inline rename field). Operates on `char`s so
+/// cursor moves and edits never split a UTF-8 boundary.
+struct TextInput {
+    chars: Vec<char>,
+    cursor: usize, // 0..=chars.len()
+}
+
+impl TextInput {
+    fn new(s: &str) -> Self {
+        let chars: Vec<char> = s.chars().collect();
+        let cursor = chars.len();
+        Self { chars, cursor }
+    }
+    fn text(&self) -> String {
+        self.chars.iter().collect()
+    }
+    fn insert(&mut self, c: char) {
+        self.chars.insert(self.cursor, c);
+        self.cursor += 1;
+    }
+    fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.insert(c);
+        }
+    }
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.chars.remove(self.cursor);
+        }
+    }
+    fn delete(&mut self) {
+        if self.cursor < self.chars.len() {
+            self.chars.remove(self.cursor);
+        }
+    }
+    fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+    fn right(&mut self) {
+        if self.cursor < self.chars.len() {
+            self.cursor += 1;
+        }
+    }
+    fn home(&mut self) {
+        self.cursor = 0;
+    }
+    fn end(&mut self) {
+        self.cursor = self.chars.len();
+    }
+    /// The text with a caret marker inserted at the cursor, for display in the overlay.
+    fn display_with_caret(&self) -> String {
+        let mut s: String = self.chars[..self.cursor].iter().collect();
+        s.push('|');
+        s.extend(self.chars[self.cursor..].iter());
+        s
+    }
+}
+
 /// In-progress grid drag (left button held). Decides between a click (no movement) and a
 /// rubber-band marquee (moved past the threshold).
 struct GridDrag {
@@ -2319,6 +2378,10 @@ struct App {
     /// Pending delete confirmation: the image(s) to move to Trash (Delete/Backspace key).
     /// One path in single view; the grid selection (1..n) in grid view.
     confirm_delete: Option<Vec<PathBuf>>,
+    /// Inline rename editor (F2): the editable filename stem. `Some` while typing the new name.
+    rename: Option<TextInput>,
+    /// Pending rename confirmation: `(old_path, new_path)` awaiting Enter.
+    confirm_rename: Option<(PathBuf, PathBuf)>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
     last_grid_click: Option<(Instant, usize)>,
     /// Current sort order.
@@ -2359,6 +2422,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Shift+C", "copy file path to clipboard"),
     ("O", "toggle sort order (name / date)"),
     ("I", "image info panel"),
+    ("F2", "rename image"),
     ("Del / Backspace", "move image to Trash"),
     ("", ""),
     ("D", "set Glanvu as default app"),
@@ -2372,6 +2436,11 @@ fn mtime_string(path: &std::path::PathBuf) -> Option<String> {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let dt = chrono::DateTime::<chrono::Local>::from(mtime);
     Some(dt.format("%Y-%m-%d  %H:%M").to_string())
+}
+
+/// The file name of `p` as a string, or "(unknown)" — used in overlay/status text.
+fn file_name_str(p: &Path) -> &str {
+    p.file_name().and_then(|n| n.to_str()).unwrap_or("(unknown)")
 }
 
 /// Human-readable byte count (e.g. "1.4 MB"). Used by the info overlay.
@@ -2493,6 +2562,99 @@ impl App {
         Some(format!(
             "Move to Trash?\n\n{body}\n\nEnter = delete   Esc = cancel"
         ))
+    }
+
+    /// Text of the single active modal overlay (only one can be up at a time), or `None`.
+    /// Priority: rename editor → rename confirm → delete confirm → set-default confirm.
+    fn modal_text(&self) -> Option<String> {
+        if let Some(ed) = &self.rename {
+            return Some(format!(
+                "Rename\n\n{}\n\nEnter = continue   Esc = cancel",
+                ed.display_with_caret()
+            ));
+        }
+        if let Some((old, new)) = &self.confirm_rename {
+            let newn = file_name_str(new);
+            return Some(if new.exists() {
+                format!(
+                    "Rename to:\n\n{newn}\n\n{newn} already exists\nand will be moved to Trash\n\nEnter = rename   Esc = cancel"
+                )
+            } else {
+                format!(
+                    "Rename?\n\n{}\n→  {newn}\n\nEnter = rename   Esc = cancel",
+                    file_name_str(old)
+                )
+            });
+        }
+        if let Some(t) = self.delete_confirm_text() {
+            return Some(t);
+        }
+        self.confirm_assoc
+            .map(|set| confirm_overlay_text(set).to_string())
+    }
+
+    /// Open the inline rename editor for the current image (F2), pre-filled with its stem.
+    fn begin_rename(&mut self) {
+        let Some(path) = self.nav.current_path() else {
+            return;
+        };
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        self.rename = Some(TextInput::new(stem));
+        self.redraw();
+    }
+
+    /// Validate the typed name and move to the confirmation step (or cancel on no-op).
+    fn finish_rename_edit(&mut self, new_stem: String) {
+        self.rename = None;
+        let Some(old) = self.nav.current_path().cloned() else {
+            self.redraw();
+            return;
+        };
+        let new_stem = new_stem.trim();
+        let old_stem = old.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if new_stem.is_empty() || new_stem == old_stem {
+            self.show_status("Rename cancelled");
+            self.redraw();
+            return;
+        }
+        // Keep the original extension; only the stem is editable.
+        let new_name = match old.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("{new_stem}.{ext}"),
+            None => new_stem.to_string(),
+        };
+        let new = old.with_file_name(new_name);
+        if new == old {
+            self.show_status("Rename cancelled");
+            self.redraw();
+            return;
+        }
+        self.confirm_rename = Some((old, new));
+        self.redraw();
+    }
+
+    /// Perform the on-disk rename (trashing the target first if it already exists), then update
+    /// the playlist so the renamed image stays current.
+    fn do_rename(&mut self, old: PathBuf, new: PathBuf) {
+        if new.exists() {
+            if let Err(e) = trash::delete(&new) {
+                self.show_status(&format!("Rename failed: {e}"));
+                self.redraw();
+                return;
+            }
+        }
+        if let Err(e) = std::fs::rename(&old, &new) {
+            self.show_status(&format!("Rename failed: {e}"));
+            self.redraw();
+            return;
+        }
+        self.nav.rename_path(&old, &new, self.sort_mode);
+        if self.mode == ViewMode::Grid {
+            self.update_title_grid();
+        } else if let Some(res) = self.nav.show_index(self.nav.index) {
+            self.apply_nav_result(res);
+        }
+        self.show_status(&format!("Renamed to {}", file_name_str(&new)));
+        self.redraw();
     }
 
     /// Move the given image(s) to the system Trash (recycle bin) — never a permanent delete.
@@ -2857,7 +3019,7 @@ impl App {
 
         if self.mode == ViewMode::Grid {
             // Compute overlay text + scale before borrowing gpu (both read &self).
-            let confirm = self.delete_confirm_text();
+            let confirm = self.modal_text();
             let scale = self
                 .window
                 .as_ref()
@@ -2897,8 +3059,8 @@ impl App {
         } else {
             None
         };
-        // Delete-confirmation body — computed before borrowing gpu (it's a &self method).
-        let delete_text = self.delete_confirm_text();
+        // Active modal overlay text — computed before borrowing gpu (it's a &self method).
+        let modal_text = self.modal_text();
         let scale = self
             .window
             .as_ref()
@@ -2907,10 +3069,7 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let win = (gpu.config.width as f32, gpu.config.height as f32);
         let explorer_ref = self.explorer.as_ref();
-        // Delete confirmation takes precedence over the set-default confirmation (mutually exclusive).
-        let confirm_text = delete_text
-            .as_deref()
-            .or_else(|| self.confirm_assoc.map(confirm_overlay_text));
+        let confirm_text = modal_text.as_deref();
         let presented = gpu.render(
             Uniforms {
                 mvp: mvp(self.img_size, win, &self.state),
@@ -3057,6 +3216,89 @@ impl ApplicationHandler for App {
                         }
                         Key::Named(NamedKey::Escape) => {
                             self.confirm_delete = None;
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // Inline rename editor (F2): typed keys edit the name; Enter advances to confirm.
+                if self.rename.is_some() {
+                    match event.logical_key.as_ref() {
+                        Key::Named(NamedKey::Enter) => {
+                            if let Some(ed) = self.rename.take() {
+                                self.finish_rename_edit(ed.text());
+                            }
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.rename = None;
+                            self.show_status("Rename cancelled");
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.backspace();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Delete) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.delete();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.left();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.right();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Home) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.home();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::End) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.end();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.insert(' ');
+                            }
+                            self.redraw();
+                        }
+                        Key::Character(s) => {
+                            if let Some(ed) = self.rename.as_mut() {
+                                ed.insert_str(s);
+                            }
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // Rename confirmation: Enter performs the rename, Esc cancels.
+                if let Some((old, new)) = self.confirm_rename.clone() {
+                    match event.logical_key.as_ref() {
+                        Key::Named(NamedKey::Enter) => {
+                            self.confirm_rename = None;
+                            self.do_rename(old, new);
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.confirm_rename = None;
+                            self.show_status("Rename cancelled");
                             self.redraw();
                         }
                         _ => {}
@@ -3314,6 +3556,8 @@ impl ApplicationHandler for App {
                             self.redraw();
                         }
                     }
+                    // F2: rename the current image (inline editor → confirmation).
+                    Key::Named(NamedKey::F2) => self.begin_rename(),
                     Key::Named(NamedKey::Space)
                     | Key::Named(NamedKey::F11)
                     | Key::Character("f")
@@ -3741,6 +3985,8 @@ pub fn run(path: &str) -> ExitCode {
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,
+        rename: None,
+        confirm_rename: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
@@ -3817,6 +4063,8 @@ pub fn run_empty() -> ExitCode {
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,
+        rename: None,
+        confirm_rename: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
@@ -3833,7 +4081,32 @@ pub fn run_empty() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::human_size;
+    use super::{human_size, TextInput};
+
+    #[test]
+    fn text_input_edits_and_caret() {
+        let mut t = TextInput::new("photo");
+        assert_eq!(t.text(), "photo");
+        assert_eq!(t.cursor, 5); // cursor starts at end
+        t.backspace();
+        assert_eq!(t.text(), "phot");
+        t.insert('o');
+        assert_eq!(t.text(), "photo");
+        t.home();
+        t.insert('X'); // insert at start
+        assert_eq!(t.text(), "Xphoto");
+        assert_eq!(t.cursor, 1);
+        t.delete(); // delete char after cursor ('p')
+        assert_eq!(t.text(), "Xhoto");
+        t.right();
+        t.insert('_'); // "Xh_oto"
+        assert_eq!(t.text(), "Xh_oto");
+        t.home();
+        assert_eq!(t.display_with_caret(), "|Xh_oto");
+        t.end();
+        t.right(); // no-op past end
+        assert_eq!(t.cursor, t.text().chars().count());
+    }
 
     #[test]
     fn human_size_scales_units() {
