@@ -211,6 +211,26 @@ impl FolderNav {
         }
     }
 
+    /// Remove the current image from the playlist (after it has been trashed/deleted on disk),
+    /// evict it from the cache, then show a neighbour. Staying at the same index shows the
+    /// *next* image; if the removed one was last, it clamps to the new last (the previous image).
+    /// Returns `None` when no images remain — the caller should switch to the empty state.
+    pub fn remove_current(&mut self) -> Option<ShowResult> {
+        if self.paths.is_empty() {
+            return None;
+        }
+        let removed = self.paths.remove(self.index);
+        self.cache.remove(&removed);
+        self.in_flight.remove(&removed);
+        if self.paths.is_empty() {
+            self.index = 0;
+            return None;
+        }
+        let target = self.index.min(self.paths.len() - 1);
+        self.index = target; // keep index valid even if the decode below fails
+        self.show_index(target)
+    }
+
     /// Re-sort the playlist and stay on the current image.
     pub fn resort(&mut self, mode: SortMode) {
         let current = self.current_path().cloned();

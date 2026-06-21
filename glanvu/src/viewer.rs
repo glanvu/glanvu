@@ -2189,6 +2189,8 @@ struct App {
     info_visible: bool,
     /// Pending default-app confirmation. `Some(true)` = set; `Some(false)` = unset.
     confirm_assoc: Option<bool>,
+    /// Pending delete confirmation: the image to move to Trash (Delete/Backspace key).
+    confirm_delete: Option<PathBuf>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
     last_grid_click: Option<(Instant, usize)>,
     /// Current sort order.
@@ -2229,6 +2231,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Shift+C", "copy file path to clipboard"),
     ("O", "toggle sort order (name / date)"),
     ("I", "image info panel"),
+    ("Del / Backspace", "move image to Trash"),
     ("", ""),
     ("D", "set Glanvu as default app"),
     ("U", "restore previous defaults"),
@@ -2344,6 +2347,51 @@ impl App {
             lines.push(dt);
         }
         Some(lines.join("\n"))
+    }
+
+    /// Body text for the delete confirmation modal (shows the filename being trashed).
+    fn delete_confirm_text(&self) -> Option<String> {
+        let path = self.confirm_delete.as_ref()?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("this image");
+        Some(format!(
+            "Move to Trash?\n\n{name}\n\nEnter = delete   Esc = cancel"
+        ))
+    }
+
+    /// Move the current image to the system Trash (recycle bin), then show a neighbour —
+    /// or switch to the empty state if it was the last image. Never deletes permanently.
+    fn delete_current_to_trash(&mut self) {
+        let Some(path) = self.nav.current_path().cloned() else {
+            self.redraw();
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        if let Err(e) = trash::delete(&path) {
+            self.show_status(&format!("Trash failed: {e}"));
+            self.redraw();
+            return;
+        }
+        match self.nav.remove_current() {
+            Some(res) => {
+                self.show_status(&format!("Moved to Trash: {name}"));
+                self.apply_nav_result(res);
+            }
+            None => {
+                self.mode = ViewMode::Empty;
+                self.show_status("Moved to Trash — no images left");
+                if let Some(w) = &self.window {
+                    w.set_title("Glanvu");
+                }
+                self.redraw();
+            }
+        }
     }
 
     fn open_explorer(&mut self) {
@@ -2598,6 +2646,8 @@ impl App {
         } else {
             None
         };
+        // Delete-confirmation body — computed before borrowing gpu (it's a &self method).
+        let delete_text = self.delete_confirm_text();
         let scale = self
             .window
             .as_ref()
@@ -2606,7 +2656,10 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let win = (gpu.config.width as f32, gpu.config.height as f32);
         let explorer_ref = self.explorer.as_ref();
-        let confirm_text = self.confirm_assoc.map(confirm_overlay_text);
+        // Delete confirmation takes precedence over the set-default confirmation (mutually exclusive).
+        let confirm_text = delete_text
+            .as_deref()
+            .or_else(|| self.confirm_assoc.map(confirm_overlay_text));
         let presented = gpu.render(
             Uniforms {
                 mvp: mvp(self.img_size, win, &self.state),
@@ -2724,6 +2777,22 @@ impl ApplicationHandler for App {
                         }
                         Key::Named(NamedKey::Escape) => {
                             self.confirm_assoc = None;
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // If the delete confirmation is up, Enter trashes the image, Esc cancels.
+                if self.confirm_delete.is_some() {
+                    match event.logical_key.as_ref() {
+                        Key::Named(NamedKey::Enter) => {
+                            self.confirm_delete = None;
+                            self.delete_current_to_trash();
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.confirm_delete = None;
                             self.redraw();
                         }
                         _ => {}
@@ -2962,6 +3031,14 @@ impl ApplicationHandler for App {
                     Key::Character("u") | Key::Character("U") => {
                         self.confirm_assoc = Some(false);
                         self.redraw();
+                    }
+                    // Delete / Backspace (the latter is the main "delete" key on Mac keyboards):
+                    // confirm, then move the current image to the system Trash.
+                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
+                        if let Some(path) = self.nav.current_path() {
+                            self.confirm_delete = Some(path.clone());
+                            self.redraw();
+                        }
                     }
                     Key::Named(NamedKey::Space)
                     | Key::Named(NamedKey::F11)
@@ -3317,6 +3394,7 @@ pub fn run(path: &str) -> ExitCode {
         info_visible: false,
         about_visible: false,
         confirm_assoc: None,
+        confirm_delete: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
@@ -3390,6 +3468,7 @@ pub fn run_empty() -> ExitCode {
         info_visible: false,
         about_visible: false,
         confirm_assoc: None,
+        confirm_delete: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
