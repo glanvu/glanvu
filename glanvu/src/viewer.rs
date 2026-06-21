@@ -138,6 +138,33 @@ impl TextInput {
     }
 }
 
+/// In-progress quick-open search ("find by name", `/` or Ctrl/Cmd+F). Holds the query editor plus
+/// the current ranked matches (playlist indices) and which match row is highlighted.
+struct FindState {
+    /// The query text editor (same inline editor as rename).
+    input: TextInput,
+    /// Ranked playlist indices matching the query (best-first), capped to `FIND_LIMIT`.
+    matches: Vec<usize>,
+    /// Highlighted row: index into `matches`.
+    sel: usize,
+}
+
+/// Maximum number of find matches shown in the modal at once.
+const FIND_LIMIT: usize = 8;
+
+impl FindState {
+    /// Re-rank `matches` against the current query over `paths`, keeping the highlighted row in
+    /// bounds. Consumes and returns `self` so callers can swap it back in one move.
+    fn recompute_for(mut self, paths: &[PathBuf]) -> Self {
+        let names: Vec<&str> = paths.iter().map(|p| file_name_str(p)).collect();
+        self.matches = glanvu_viewer_core::find::search(&self.input.text(), &names, FIND_LIMIT);
+        if self.sel >= self.matches.len() {
+            self.sel = self.matches.len().saturating_sub(1);
+        }
+        self
+    }
+}
+
 /// In-progress grid drag (left button held). Decides between a click (no movement) and a
 /// rubber-band marquee (moved past the threshold).
 struct GridDrag {
@@ -2382,6 +2409,8 @@ struct App {
     rename: Option<TextInput>,
     /// Pending rename confirmation: `(old_path, new_path)` awaiting Enter.
     confirm_rename: Option<(PathBuf, PathBuf)>,
+    /// Quick-open search (`/` or Ctrl/Cmd+F). `Some` while the find modal is open.
+    find: Option<FindState>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
     last_grid_click: Option<(Instant, usize)>,
     /// Current sort order.
@@ -2409,6 +2438,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Home / End", "first · last image"),
     ("Tab / G", "thumbnail grid"),
     ("Enter", "directory explorer"),
+    ("F  ·  /", "find image by name"),
     ("S", "slideshow"),
     ("", ""),
     ("+ / − / wheel", "zoom in · out"),
@@ -2416,7 +2446,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("0", "fit to window"),
     ("1", "actual size (1:1)"),
     ("T", "turn (rotate) 90°"),
-    ("Space / F / F11", "fullscreen"),
+    ("Space / F11", "fullscreen"),
     ("", ""),
     ("C", "copy image to clipboard"),
     ("Shift+C", "copy file path to clipboard"),
@@ -2566,8 +2596,11 @@ impl App {
     }
 
     /// Text of the single active modal overlay (only one can be up at a time), or `None`.
-    /// Priority: rename editor → rename confirm → delete confirm → set-default confirm.
+    /// Priority: find → rename editor → rename confirm → delete confirm → set-default confirm.
     fn modal_text(&self) -> Option<String> {
+        if let Some(t) = self.find_text() {
+            return Some(t);
+        }
         if let Some(ed) = &self.rename {
             return Some(format!(
                 "Rename\n\n{}\n\nEnter = continue   Esc = cancel",
@@ -2631,6 +2664,65 @@ impl App {
         }
         self.confirm_rename = Some((old, new));
         self.redraw();
+    }
+
+    // --- Quick-open search (find by name) ---
+
+    /// Open the find modal, seeded with an empty query (initial list = first images in order).
+    fn begin_find(&mut self) {
+        let st = FindState {
+            input: TextInput::new(""),
+            matches: Vec::new(),
+            sel: 0,
+        };
+        self.find = Some(st.recompute_for(&self.nav.paths));
+        self.redraw();
+    }
+
+    /// Re-rank matches for the current query and clamp the highlighted row.
+    fn find_recompute(&mut self) {
+        if let Some(st) = self.find.take() {
+            self.find = Some(st.recompute_for(&self.nav.paths));
+        }
+    }
+
+    /// Open the currently highlighted match (works from single or grid mode → single view).
+    fn find_open_selected(&mut self) {
+        let idx = self
+            .find
+            .as_ref()
+            .and_then(|st| st.matches.get(st.sel).copied());
+        self.find = None;
+        if let Some(idx) = idx {
+            self.enter_single(idx);
+        } else {
+            self.redraw();
+        }
+    }
+
+    /// Body text of the find modal: header, query line with caret, the ranked match list (the
+    /// highlighted row marked with `▶`), and the key hints. Reuses the shared modal box.
+    fn find_text(&self) -> Option<String> {
+        let st = self.find.as_ref()?;
+        let mut out = format!("Find image\n\n  {}\n\n", st.input.display_with_caret());
+        if st.matches.is_empty() {
+            out.push_str("(no matches)");
+        } else {
+            for (row, &idx) in st.matches.iter().enumerate() {
+                let name = self
+                    .nav
+                    .paths
+                    .get(idx)
+                    .map(|p| file_name_str(p))
+                    .unwrap_or("(unknown)");
+                let marker = if row == st.sel { "▶ " } else { "   " };
+                out.push_str(marker);
+                out.push_str(name);
+                out.push('\n');
+            }
+        }
+        out.push_str("\n↑↓ select   Enter = open   Esc = cancel");
+        Some(out)
     }
 
     /// Perform the on-disk rename (trashing the target first if it already exists), then update
@@ -3385,6 +3477,80 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                // Quick-open search (find by name): typed keys edit the query and re-rank matches;
+                // Up/Down move the highlight; Enter opens the highlighted match; Esc closes.
+                if self.find.is_some() {
+                    match event.logical_key.as_ref() {
+                        Key::Named(NamedKey::Escape) => {
+                            self.find = None;
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Enter) => self.find_open_selected(),
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(st) = self.find.as_mut() {
+                                if !st.matches.is_empty() {
+                                    st.sel = (st.sel + 1) % st.matches.len();
+                                }
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(st) = self.find.as_mut() {
+                                if !st.matches.is_empty() {
+                                    st.sel = (st.sel + st.matches.len() - 1) % st.matches.len();
+                                }
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.backspace();
+                                st.sel = 0;
+                            }
+                            self.find_recompute();
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Delete) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.delete();
+                                st.sel = 0;
+                            }
+                            self.find_recompute();
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.left();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.right();
+                            }
+                            self.redraw();
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.insert(' ');
+                                st.sel = 0;
+                            }
+                            self.find_recompute();
+                            self.redraw();
+                        }
+                        Key::Character(s) => {
+                            if let Some(st) = self.find.as_mut() {
+                                st.input.insert_str(s);
+                                st.sel = 0;
+                            }
+                            self.find_recompute();
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
                 // Empty mode: Esc/Q to quit, Enter to open a file, H for help.
                 if self.mode == ViewMode::Empty {
                     match event.logical_key.as_ref() {
@@ -3451,6 +3617,10 @@ impl ApplicationHandler for App {
                             }
                         }
                         Key::Character("q") | Key::Character("Q") => event_loop.exit(),
+                        // Find by name: `F` or `/`.
+                        Key::Character("f") | Key::Character("F") | Key::Character("/") => {
+                            self.begin_find()
+                        }
                         Key::Named(NamedKey::Enter) => {
                             let sel = self.grid.sel;
                             self.enter_single(sel);
@@ -3603,6 +3773,10 @@ impl ApplicationHandler for App {
                 match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character("q") | Key::Character("Q") => event_loop.exit(),
+                    // Find by name: `F` or `/` (fullscreen is on Space / F11 only).
+                    Key::Character("f") | Key::Character("F") | Key::Character("/") => {
+                        self.begin_find()
+                    }
                     Key::Character("h") | Key::Character("H") | Key::Character("?") => {
                         self.help_visible = true;
                         self.about_visible = false;
@@ -3643,10 +3817,7 @@ impl ApplicationHandler for App {
                     }
                     // F5: force a full refresh (re-scan + drop all caches).
                     Key::Named(NamedKey::F5) => self.force_refresh(),
-                    Key::Named(NamedKey::Space)
-                    | Key::Named(NamedKey::F11)
-                    | Key::Character("f")
-                    | Key::Character("F") => {
+                    Key::Named(NamedKey::Space) | Key::Named(NamedKey::F11) => {
                         self.toggle_fullscreen();
                         self.flash_overlay();
                         self.redraw();
@@ -4073,6 +4244,7 @@ pub fn run(path: &str) -> ExitCode {
         confirm_delete: None,
         rename: None,
         confirm_rename: None,
+        find: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
@@ -4151,6 +4323,7 @@ pub fn run_empty() -> ExitCode {
         confirm_delete: None,
         rename: None,
         confirm_rename: None,
+        find: None,
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
