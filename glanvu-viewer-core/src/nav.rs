@@ -10,9 +10,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use glanvu_core::DecodedImage;
+
+/// A cached decoded image plus the file modification time it was decoded from, so the viewer can
+/// notice when the file changed on disk (external edit, git revert) and re-decode it.
+struct CacheEntry {
+    img: DecodedImage,
+    mtime: Option<SystemTime>,
+}
+
+fn file_mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
 
 /// How many neighbors on each side to keep decoded / prefetched.
 pub const PREFETCH_RADIUS: usize = 2;
@@ -55,7 +66,7 @@ pub struct ShowResult {
 pub struct FolderNav {
     pub paths: Vec<PathBuf>,
     pub index: usize,
-    cache: HashMap<PathBuf, DecodedImage>,
+    cache: HashMap<PathBuf, CacheEntry>,
     in_flight: HashSet<PathBuf>,
     prefetch_tx: Sender<PathBuf>,
     prefetch_rx: Receiver<(PathBuf, DecodedImage)>,
@@ -82,7 +93,14 @@ impl FolderNav {
             }
         });
         let mut cache = HashMap::new();
-        cache.insert(initial_path, initial);
+        let initial_mtime = file_mtime(&initial_path);
+        cache.insert(
+            initial_path,
+            CacheEntry {
+                img: initial,
+                mtime: initial_mtime,
+            },
+        );
         FolderNav {
             paths,
             index: start_index,
@@ -100,14 +118,39 @@ impl FolderNav {
 
     /// The decoded image currently on screen (None before the first `show_index`).
     pub fn current_image(&self) -> Option<&DecodedImage> {
-        self.cache.get(self.paths.get(self.index)?)
+        self.cache.get(self.paths.get(self.index)?).map(|e| &e.img)
+    }
+
+    /// Drop cache entries whose file changed on disk (modification time differs) so they re-decode
+    /// on the next show. Cheap — the cache only holds the current image and a couple of prefetch
+    /// neighbours. Returns the evicted paths so the caller can refresh dependent state (e.g. GPU
+    /// thumbnails). Catches external edits / git reverts of files you're actively viewing.
+    pub fn evict_stale(&mut self) -> Vec<PathBuf> {
+        let stale: Vec<PathBuf> = self
+            .cache
+            .iter()
+            .filter(|(p, e)| file_mtime(p) != e.mtime)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in &stale {
+            self.cache.remove(p);
+            self.in_flight.remove(p);
+        }
+        stale
+    }
+
+    /// Drop the entire decode cache (manual full refresh / F5); the next show re-decodes.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
+        self.in_flight.clear();
     }
 
     /// Pull any results from the background worker into the cache.
     pub fn drain_prefetch(&mut self) {
         while let Ok((path, image)) = self.prefetch_rx.try_recv() {
             self.in_flight.remove(&path);
-            self.cache.insert(path, image);
+            let mtime = file_mtime(&path);
+            self.cache.insert(path, CacheEntry { img: image, mtime });
         }
     }
 
@@ -151,7 +194,8 @@ impl FolderNav {
         if !cache_hit {
             match glanvu_core::decode_path(&path) {
                 Ok(img) => {
-                    self.cache.insert(path.clone(), img);
+                    let mtime = file_mtime(&path);
+                    self.cache.insert(path.clone(), CacheEntry { img, mtime });
                 }
                 Err(e) => {
                     eprintln!("glanvu: skipping {}: {e}", path.display());
@@ -163,7 +207,7 @@ impl FolderNav {
         self.index = idx;
         self.prune_and_prefetch();
 
-        let img = self.cache.get(&path)?;
+        let img = &self.cache.get(&path)?.img;
         Some(ShowResult {
             img_size: (img.width, img.height),
             path,
@@ -433,11 +477,18 @@ mod tests {
 
     #[test]
     fn sync_paths_follows_external_rename_of_current() {
-        // Currently on 0001 (index 1 of 0000..0002).
-        let (mut nav, dir) = make_nav(3, 1);
+        // Distinct (count, start) from other tests so the temp dir doesn't collide under parallel runs.
+        // Currently on 0001 (index 1 of 0000..0004).
+        let (mut nav, dir) = make_nav(5, 1);
         // External rename 0001 -> 0009: one removed, one added.
         let renamed = dir.join("0009.png");
-        let new_paths = vec![dir.join("0000.png"), dir.join("0002.png"), renamed.clone()];
+        let new_paths = vec![
+            dir.join("0000.png"),
+            dir.join("0002.png"),
+            dir.join("0003.png"),
+            dir.join("0004.png"),
+            renamed.clone(),
+        ];
         let change = nav.sync_paths(new_paths, SortMode::NameAsc).unwrap();
         assert_eq!(change, (1, 1));
         // The view follows the renamed file rather than jumping to a neighbour.

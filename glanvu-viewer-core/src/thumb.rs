@@ -130,6 +130,20 @@ impl ThumbnailCache {
     pub fn is_pending(&self, path: &Path) -> bool {
         self.in_flight.contains(path)
     }
+
+    /// Forget the cached thumbnail for `path` so the next `request` regenerates it (used when the
+    /// file changed on disk).
+    pub fn invalidate(&mut self, path: &Path) {
+        self.mem.remove(path);
+        self.in_flight.remove(path);
+    }
+
+    /// Drop every cached thumbnail (manual full refresh / F5). Pending generations are forgotten;
+    /// they will simply be ignored when they arrive.
+    pub fn clear(&mut self) {
+        self.mem.clear();
+        self.in_flight.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------

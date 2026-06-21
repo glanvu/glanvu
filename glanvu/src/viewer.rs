@@ -2423,6 +2423,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("O", "toggle sort order (name / date)"),
     ("I", "image info panel"),
     ("R / F2", "rename image"),
+    ("F5", "refresh from disk"),
     ("Del / Backspace", "move image to Trash"),
     ("", ""),
     ("D", "set Glanvu as default app"),
@@ -2719,9 +2720,26 @@ impl App {
         };
         let cur_before = self.nav.current_path().cloned();
         let scanned = glanvu_core::list_images(&dir);
-        let Some((added, removed)) = self.nav.sync_paths(scanned, self.sort_mode) else {
-            return; // nothing changed
-        };
+        // Path-level diff (files added/removed) + content-level diff (files whose bytes changed,
+        // detected by mtime — cheap, the decode cache holds only ~5 images).
+        let path_change = self.nav.sync_paths(scanned, self.sort_mode);
+        let stale = self.nav.evict_stale();
+        if path_change.is_none() && stale.is_empty() {
+            return; // nothing changed on disk
+        }
+
+        // Content-changed files: drop their GPU thumbnail + forget the cached thumb so the grid
+        // regenerates them fresh.
+        if !stale.is_empty() {
+            if let Some(gpu) = self.gpu.as_mut() {
+                for p in &stale {
+                    gpu.thumb_binds.remove(p);
+                }
+            }
+            for p in &stale {
+                self.thumbs.invalidate(p);
+            }
+        }
 
         if self.nav.paths.is_empty() {
             self.mode = ViewMode::Empty;
@@ -2731,6 +2749,11 @@ impl App {
             self.redraw();
             return;
         }
+
+        // The shown image needs a re-decode if its path changed OR its content was evicted.
+        let cur_after = self.nav.current_path().cloned();
+        let current_dirty =
+            cur_after != cur_before || cur_after.as_ref().is_some_and(|p| stale.contains(p));
 
         match self.mode {
             ViewMode::Grid => {
@@ -2745,20 +2768,76 @@ impl App {
                 self.update_title_grid();
             }
             ViewMode::Single => {
-                if self.nav.current_path().cloned() == cur_before {
-                    // Current image survived — just refresh the title (index/total changed).
-                    if let Some(p) = self.nav.current_path().cloned() {
-                        self.update_title(self.nav.index, self.nav.paths.len(), &p);
+                if current_dirty {
+                    if let Some(res) = self.nav.show_index(self.nav.index) {
+                        self.apply_nav_result(res);
                     }
-                } else if let Some(res) = self.nav.show_index(self.nav.index) {
-                    // Current image vanished — show the neighbour that took its place.
-                    self.apply_nav_result(res);
+                } else if let Some(p) = self.nav.current_path().cloned() {
+                    self.update_title(self.nav.index, self.nav.paths.len(), &p);
                 }
             }
             ViewMode::Empty => {}
         }
 
-        self.show_status(&format!("Folder updated  +{added} −{removed}"));
+        let (added, removed) = path_change.unwrap_or((0, 0));
+        let mut parts: Vec<String> = Vec::new();
+        if added > 0 {
+            parts.push(format!("+{added}"));
+        }
+        if removed > 0 {
+            parts.push(format!("−{removed}"));
+        }
+        if !stale.is_empty() {
+            parts.push(format!("~{}", stale.len()));
+        }
+        self.show_status(&format!("Folder updated  {}", parts.join(" ")));
+        self.redraw();
+    }
+
+    /// Manual full refresh (F5): drop every cached decode + thumbnail and re-scan the directory,
+    /// then re-show everything fresh. The hands-down way to reconcile any external change.
+    fn force_refresh(&mut self) {
+        self.nav.clear_cache();
+        self.thumbs.clear();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.thumb_binds.clear();
+        }
+        if let Some(dir) = self
+            .nav
+            .current_path()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+        {
+            let _ = self.nav.sync_paths(glanvu_core::list_images(&dir), self.sort_mode);
+        }
+        if self.nav.paths.is_empty() {
+            self.mode = ViewMode::Empty;
+            if let Some(w) = &self.window {
+                w.set_title("Glanvu");
+            }
+            self.redraw();
+            return;
+        }
+        match self.mode {
+            ViewMode::Grid => {
+                let n = self.nav.paths.len();
+                self.grid.sel = self.grid.sel.min(n - 1);
+                self.grid.clear_to_cursor();
+                for p in &self.nav.paths.clone() {
+                    self.thumbs.request(p);
+                }
+                let (win_w, win_h) = self.win_size();
+                self.grid.scroll_to_sel(n, win_w, win_h);
+                self.update_title_grid();
+            }
+            ViewMode::Single => {
+                if let Some(res) = self.nav.show_index(self.nav.index) {
+                    self.apply_nav_result(res);
+                }
+            }
+            ViewMode::Empty => {}
+        }
+        self.show_status("Refreshed");
         self.redraw();
     }
 
@@ -3393,6 +3472,8 @@ impl ApplicationHandler for App {
                             self.grid.toggle(sel);
                             self.redraw();
                         }
+                        // F5: force a full refresh (re-scan + drop all caches).
+                        Key::Named(NamedKey::F5) => self.force_refresh(),
                         Key::Named(NamedKey::ArrowRight) => self.grid_move(1, 0),
                         Key::Named(NamedKey::ArrowLeft) => self.grid_move(-1, 0),
                         Key::Named(NamedKey::ArrowDown) => self.grid_move(0, 1),
@@ -3560,6 +3641,8 @@ impl ApplicationHandler for App {
                     Key::Character("r") | Key::Character("R") | Key::Named(NamedKey::F2) => {
                         self.begin_rename()
                     }
+                    // F5: force a full refresh (re-scan + drop all caches).
+                    Key::Named(NamedKey::F5) => self.force_refresh(),
                     Key::Named(NamedKey::Space)
                     | Key::Named(NamedKey::F11)
                     | Key::Character("f")
