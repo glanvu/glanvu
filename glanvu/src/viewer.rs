@@ -2101,6 +2101,7 @@ impl Gpu {
         paths: &[PathBuf],
         grid: &GridState,
         confirm: Option<&str>,
+        status: Option<&str>,
         scale: f32,
     ) -> bool {
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
@@ -2221,7 +2222,19 @@ impl Gpu {
         };
         let _ = slot; // silence unused-assignment after the last allocation
 
-        // Delete-confirmation modal over the grid. Prepared before the pass (box uniform + text).
+        // Overlays drawn on top of the grid: the delete-confirmation modal and the transient
+        // status toast (e.g. "Sorted by name"). Both are laid out and prepared before the pass.
+        // The raw-pointer trick decouples the text-buffer borrows from the `&mut self` borrows
+        // taken by `layout_*`/`prepare` (distinct fields, deref'd only during prepare below).
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        let mut areas: Vec<TextArea> = Vec::new();
+
         let mut show_confirm = false;
         if let Some(text) = confirm {
             let (bx, by, bw, bh, tx, ty) = self.layout_confirm(text, scale, win_w, win_h);
@@ -2232,16 +2245,8 @@ impl Gpu {
                     mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
                 }),
             );
-            self.viewport.update(
-                &self.queue,
-                Resolution {
-                    width: self.config.width,
-                    height: self.config.height,
-                },
-            );
-            // SAFETY: raw pointer to a distinct field, deref'd only during prepare below.
             let c_buf = &self.confirm_text_buf as *const TextBuffer;
-            let area = TextArea {
+            areas.push(TextArea {
                 buffer: unsafe { &*c_buf },
                 left: tx,
                 top: ty,
@@ -2254,17 +2259,48 @@ impl Gpu {
                 },
                 default_color: Color::rgb(240, 240, 245),
                 custom_glyphs: &[],
-            };
+            });
+            show_confirm = true;
+        }
+
+        let mut show_status = false;
+        if let Some(text) = status {
+            let (bx, by, bw, bh, tx, ty) = self.layout_status(text, scale, win_w, win_h);
+            self.queue.write_buffer(
+                &self.status_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            let s_buf = &self.status_text_buf as *const TextBuffer;
+            areas.push(TextArea {
+                buffer: unsafe { &*s_buf },
+                left: tx,
+                top: ty,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: by as i32,
+                    right: (bx + bw) as i32,
+                    bottom: (by + bh) as i32,
+                },
+                default_color: Color::rgb(240, 240, 245),
+                custom_glyphs: &[],
+            });
+            show_status = true;
+        }
+
+        if !areas.is_empty() {
             let _ = self.text_renderer.prepare(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [area],
+                areas,
                 &mut self.swash_cache,
             );
-            show_confirm = true;
         }
 
         // Single render pass: clear + draw all tiles.
@@ -2334,11 +2370,19 @@ impl Gpu {
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
 
-            // Delete-confirmation modal box + text, drawn on top of the grid.
+            // Overlay boxes (delete-confirmation modal + status toast) and their text, on top
+            // of the grid.
             if show_confirm {
                 pass.set_bind_group(0, &self.confirm_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.explorer_bg_bind, &[]); // translucent dark bg
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+            if show_status {
+                pass.set_bind_group(0, &self.status_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.box_texture_bind, &[]); // semi-transparent box bg
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+            if show_confirm || show_status {
                 let _ = self
                     .text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass);
@@ -2970,6 +3014,44 @@ impl App {
         self.redraw();
     }
 
+    /// Cycle the sort order from grid view (O), preserving the multi-selection, cursor, and anchor
+    /// across the reorder. The playlist indices change on resort, so everything is remembered by
+    /// path and remapped to the new positions afterwards. Thumbnails are keyed by path and survive.
+    fn grid_cycle_sort(&mut self) {
+        if self.nav.paths.is_empty() {
+            return;
+        }
+        // Remember selection / cursor / anchor by path (indices are about to change).
+        let sel_path = self.nav.paths.get(self.grid.sel).cloned();
+        let anchor_path = self.nav.paths.get(self.grid.anchor).cloned();
+        let selected_paths: Vec<PathBuf> = self
+            .grid
+            .selected
+            .iter()
+            .filter_map(|&i| self.nav.paths.get(i).cloned())
+            .collect();
+
+        self.sort_mode = self.sort_mode.next();
+        self.nav.resort(self.sort_mode);
+
+        // Remap to the new indices by path.
+        self.grid.selected = selected_paths
+            .iter()
+            .filter_map(|p| self.nav.paths.iter().position(|q| q == p))
+            .collect();
+        if let Some(i) = sel_path.and_then(|p| self.nav.paths.iter().position(|q| *q == p)) {
+            self.grid.sel = i;
+        }
+        self.grid.anchor = anchor_path
+            .and_then(|p| self.nav.paths.iter().position(|q| *q == p))
+            .unwrap_or(self.grid.sel);
+
+        let (win_w, win_h) = self.win_size();
+        self.grid.scroll_to_sel(self.nav.paths.len(), win_w, win_h);
+        self.show_status(self.sort_mode.label());
+        self.redraw();
+    }
+
     fn open_explorer(&mut self) {
         if let Some(path) = self.nav.current_path() {
             let mut exp = ExplorerState::for_path(&path.clone());
@@ -3191,6 +3273,11 @@ impl App {
         if self.mode == ViewMode::Grid {
             // Compute overlay text + scale before borrowing gpu (both read &self).
             let confirm = self.modal_text();
+            let now = Instant::now();
+            let status = match self.status_until {
+                Some(t) if now < t => Some(self.status_text.clone()),
+                _ => None,
+            };
             let scale = self
                 .window
                 .as_ref()
@@ -3198,7 +3285,8 @@ impl App {
                 .unwrap_or(1.0);
             let paths = self.nav.paths.clone(); // clone needed to split borrow from gpu
             let Some(gpu) = self.gpu.as_mut() else { return };
-            let presented = gpu.render_grid(&paths, &self.grid, confirm.as_deref(), scale);
+            let presented =
+                gpu.render_grid(&paths, &self.grid, confirm.as_deref(), status.as_deref(), scale);
             if !presented {
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -3621,6 +3709,8 @@ impl ApplicationHandler for App {
                         Key::Character("f") | Key::Character("F") | Key::Character("/") => {
                             self.begin_find()
                         }
+                        // Toggle sort order (name / date), keeping the selection.
+                        Key::Character("o") | Key::Character("O") => self.grid_cycle_sort(),
                         Key::Named(NamedKey::Enter) => {
                             let sel = self.grid.sel;
                             self.enter_single(sel);
