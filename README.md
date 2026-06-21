@@ -194,6 +194,12 @@ cargo fmt --all --check
 
 The workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
+## Credits
+
+Sample images used in the screenshots are by various authors via
+[Pixabay](https://pixabay.com) (Pixabay Content License), sourced from
+[yavuzceliker/sample-images](https://github.com/yavuzceliker/sample-images).
+
 ## License
 
 [Apache-2.0](LICENSE).
