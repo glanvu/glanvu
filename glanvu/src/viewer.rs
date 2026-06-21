@@ -15,7 +15,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache as GlyphCache, Color, FontSystem, Metrics, Resolution,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -419,6 +419,26 @@ fn make_uniform_bind(
 // Gpu struct
 // ---------------------------------------------------------------------------
 
+/// Computed positions (physical px) for the help overlay's title, two section columns, centered
+/// footer block, and donate line. Produced by `layout_help`, consumed by the renderer.
+struct HelpLayout {
+    bx: f32,
+    by: f32,
+    bw: f32,
+    bh: f32,
+    title_x: f32,
+    title_y: f32,
+    col_top: f32,
+    l_keys_x: f32,
+    l_desc_x: f32,
+    r_keys_x: f32,
+    r_desc_x: f32,
+    footer_top: f32,
+    f_keys_x: f32,
+    f_desc_x: f32,
+    donate_top: f32,
+}
+
 struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -454,10 +474,22 @@ struct Gpu {
     // (descriptions). Two buffers so the columns align by real font metrics, not by padding spaces.
     help_uniform_buf: wgpu::Buffer,
     help_uniform_bind: wgpu::BindGroup,
-    help_keys_buf: TextBuffer,
-    help_desc_buf: TextBuffer,
+    // Help overlay = centered title + two side-by-side section columns (left/right) + a centered
+    // footer block. Each column/footer is a keys buffer (rich text, accent-coloured headers) and a
+    // description buffer.
+    help_title_buf: TextBuffer,
+    help_l_keys_buf: TextBuffer,
+    help_l_desc_buf: TextBuffer,
+    help_r_keys_buf: TextBuffer,
+    help_r_desc_buf: TextBuffer,
+    help_f_keys_buf: TextBuffer,
+    help_f_desc_buf: TextBuffer,
     help_layout_scale: f32,
     help_line_h: f32,
+    /// Line count of the taller of the two columns, and of the footer block (for box height +
+    /// donate placement).
+    help_col_lines: usize,
+    help_footer_lines: usize,
     // Confirmation overlay (D key: set/unset default app). Single-column centered text.
     confirm_uniform_buf: wgpu::Buffer,
     confirm_uniform_bind: wgpu::BindGroup,
@@ -774,8 +806,13 @@ impl Gpu {
             make_uniform_bind(&device, &uniform_layout_solo, &status_uniform_buf);
         let help_uniform_buf = make_uniform_buffer(&device);
         let help_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &help_uniform_buf);
-        let help_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_title_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_l_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_l_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_r_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_r_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_f_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_f_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
         let confirm_uniform_buf = make_uniform_buffer(&device);
         let confirm_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &confirm_uniform_buf);
@@ -850,10 +887,17 @@ impl Gpu {
             status_overlay_text: String::new(),
             help_uniform_buf,
             help_uniform_bind,
-            help_keys_buf,
-            help_desc_buf,
+            help_title_buf,
+            help_l_keys_buf,
+            help_l_desc_buf,
+            help_r_keys_buf,
+            help_r_desc_buf,
+            help_f_keys_buf,
+            help_f_desc_buf,
             help_layout_scale: -1.0,
             help_line_h: 22.0,
+            help_col_lines: 0,
+            help_footer_lines: 0,
             findbar_uniform_buf,
             findbar_uniform_bind,
             findbar_text_buf,
@@ -1212,76 +1256,167 @@ impl Gpu {
         (bx, by, bw, bh, bx + pad_h, by + pad_v)
     }
 
-    /// Lay out the centered multi-line help overlay. Returns box + text rect (physical px).
-    /// Lay out the two-column help overlay. Returns
-    /// `(box_x, box_y, box_w, box_h, keys_x, text_y, desc_x)`.
-    ///
-    /// The left column is keys + title, the right column is descriptions. Both are aligned by real
-    /// font metrics: `desc_x` is `keys_x` plus the measured width of the widest key plus a gap.
-    fn layout_help(
-        &mut self,
-        scale: f32,
-        win_w: f32,
-        win_h: f32,
-    ) -> (f32, f32, f32, f32, f32, f32, f32) {
-        // Title occupies line 0, blank line 1, then HELP_ROWS from line 2. Blank (key,desc) pairs
-        // become blank lines in both columns so the two buffers stay vertically aligned.
+    /// Build one help block (`keys` rich-text buffer + `desc` buffer) from a slice of rows, with a
+    /// blank line inserted before each section except the first. Returns the two buffers and the
+    /// line count. Section headers render in the accent colour.
+    fn build_help_block(&mut self, rows: &[HelpRow], font: f32) -> (TextBuffer, TextBuffer, usize) {
+        let accent = Attrs::new()
+            .weight(Weight::BOLD)
+            .color(Color::rgb(125, 178, 255));
+        let plain = Attrs::new();
+
+        let mut lines: Vec<(String, bool, String)> = Vec::with_capacity(rows.len() + 2);
+        let mut first_section = true;
+        for row in rows {
+            match row {
+                Section(name) => {
+                    if !first_section {
+                        lines.push((String::new(), false, String::new()));
+                    }
+                    first_section = false;
+                    lines.push(((*name).to_string(), true, String::new()));
+                }
+                Keys(k, d) => lines.push(((*k).to_string(), false, (*d).to_string())),
+            }
+        }
+        let line_h = font * 1.5;
+
+        let mut keys = TextBuffer::new(&mut self.font_system, Metrics::new(font, line_h));
+        keys.set_wrap(&mut self.font_system, Wrap::None);
+        keys.set_size(&mut self.font_system, None, None);
+        let spans: Vec<(String, bool)> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, (k, hdr, _))| {
+                let s = if i + 1 < lines.len() {
+                    format!("{k}\n")
+                } else {
+                    k.clone()
+                };
+                (s, *hdr)
+            })
+            .collect();
+        keys.set_rich_text(
+            &mut self.font_system,
+            spans
+                .iter()
+                .map(|(s, hdr)| (s.as_str(), if *hdr { accent.clone() } else { plain.clone() })),
+            &plain,
+            Shaping::Basic,
+            None,
+        );
+        keys.shape_until_scroll(&mut self.font_system, false);
+
+        let desc_str: String = lines
+            .iter()
+            .map(|(_, _, d)| d.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut desc = TextBuffer::new(&mut self.font_system, Metrics::new(font, line_h));
+        desc.set_wrap(&mut self.font_system, Wrap::None);
+        desc.set_size(&mut self.font_system, None, None);
+        desc.set_text(&mut self.font_system, &desc_str, &plain, Shaping::Basic, None);
+        desc.shape_until_scroll(&mut self.font_system, false);
+
+        (keys, desc, lines.len())
+    }
+
+    /// Lay out the help overlay: centered title, a left and right column of sections side by side,
+    /// and a centered footer block below them. Returns the box + every text origin.
+    fn layout_help(&mut self, scale: f32, win_w: f32, win_h: f32) -> HelpLayout {
+        let font = (15.0 * scale).clamp(13.0, 30.0);
         if (self.help_layout_scale - scale).abs() > f32::EPSILON {
             self.help_layout_scale = scale;
-            let font = (15.0 * scale).clamp(13.0, 30.0);
             self.help_line_h = font * 1.5;
 
-            let mut keys = String::from(HELP_TITLE);
-            keys.push_str("\n\n");
-            let mut desc = String::from("\n\n");
-            for (i, (k, d)) in HELP_ROWS.iter().enumerate() {
-                if i > 0 {
-                    keys.push('\n');
-                    desc.push('\n');
-                }
-                keys.push_str(k);
-                desc.push_str(d);
-            }
+            // Title (centered, bold, bright).
+            let mut title = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.5));
+            title.set_wrap(&mut self.font_system, Wrap::None);
+            title.set_size(&mut self.font_system, None, None);
+            title.set_rich_text(
+                &mut self.font_system,
+                [(HELP_TITLE, Attrs::new().weight(Weight::BOLD))],
+                &Attrs::new(),
+                Shaping::Basic,
+                None,
+            );
+            title.shape_until_scroll(&mut self.font_system, false);
+            self.help_title_buf = title;
 
-            let mut make = |s: &str| {
-                let mut buf =
-                    TextBuffer::new(&mut self.font_system, Metrics::new(font, self.help_line_h));
-                buf.set_wrap(&mut self.font_system, Wrap::None);
-                buf.set_size(&mut self.font_system, None, None);
-                buf.set_text(
-                    &mut self.font_system,
-                    s,
-                    &Attrs::new(),
-                    Shaping::Basic,
-                    None,
-                );
-                buf.shape_until_scroll(&mut self.font_system, false);
-                buf
-            };
-            self.help_keys_buf = make(&keys);
-            self.help_desc_buf = make(&desc);
+            let (lk, ld, lc) = self.build_help_block(HELP_LEFT, font);
+            self.help_l_keys_buf = lk;
+            self.help_l_desc_buf = ld;
+            let (rk, rd, rc) = self.build_help_block(HELP_RIGHT, font);
+            self.help_r_keys_buf = rk;
+            self.help_r_desc_buf = rd;
+            let (fk, fd, fc) = self.build_help_block(HELP_FOOTER, font);
+            self.help_f_keys_buf = fk;
+            self.help_f_desc_buf = fd;
+            self.help_col_lines = lc.max(rc);
+            self.help_footer_lines = fc;
         }
 
-        let pad_h = 28.0 * scale;
+        let lh = self.help_line_h;
+        let pad_h = 30.0 * scale;
         let pad_v = 22.0 * scale;
-        let gap = 36.0 * scale;
-        let keys_w = self
-            .help_keys_buf
-            .layout_runs()
-            .fold(0.0_f32, |m, r| m.max(r.line_w));
-        let desc_w = self
-            .help_desc_buf
-            .layout_runs()
-            .fold(0.0_f32, |m, r| m.max(r.line_w));
-        // Rows = title + blank + HELP_ROWS, plus one extra row at the bottom for the donate footer
-        // (kept INSIDE the dark box).
-        let lines = (HELP_ROWS.len() + 2) as f32;
-        let bw = (keys_w + gap + desc_w + 2.0 * pad_h).min(win_w - 40.0);
-        let bh = ((lines + 1.0) * self.help_line_h + 2.0 * pad_v).min(win_h - 40.0);
+        let kd_gap = 24.0 * scale; // keys → desc gap within a block
+        let col_gap = 52.0 * scale; // left column → right column gap
+        let width = |b: &TextBuffer| b.layout_runs().fold(0.0_f32, |m, r| m.max(r.line_w));
+
+        let lkw = width(&self.help_l_keys_buf);
+        let ldw = width(&self.help_l_desc_buf);
+        let rkw = width(&self.help_r_keys_buf);
+        let rdw = width(&self.help_r_desc_buf);
+        let fkw = width(&self.help_f_keys_buf);
+        let fdw = width(&self.help_f_desc_buf);
+        let title_w = width(&self.help_title_buf);
+
+        let lcol_w = lkw + kd_gap + ldw;
+        let rcol_w = rkw + kd_gap + rdw;
+        let cols_w = lcol_w + col_gap + rcol_w;
+        let footer_w = fkw + kd_gap + fdw;
+        let content_w = cols_w.max(footer_w).max(title_w);
+
+        // Vertical: title + blank, columns, blank, footer, blank + donate row.
+        let total_lines =
+            2.0 + self.help_col_lines as f32 + 1.0 + self.help_footer_lines as f32 + 1.0;
+        let bw = (content_w + 2.0 * pad_h).min(win_w - 40.0);
+        let bh = (total_lines * lh + 2.0 * pad_v).min(win_h - 40.0);
         let bx = ((win_w - bw) / 2.0).max(0.0);
         let by = ((win_h - bh) / 2.0).max(0.0);
-        let keys_x = bx + pad_h;
-        (bx, by, bw, bh, keys_x, by + pad_v, keys_x + keys_w + gap)
+        let cx = bx + bw / 2.0;
+
+        let cols_left = cx - cols_w / 2.0;
+        let l_keys_x = cols_left;
+        let l_desc_x = l_keys_x + lkw + kd_gap;
+        let r_keys_x = cols_left + lcol_w + col_gap;
+        let r_desc_x = r_keys_x + rkw + kd_gap;
+
+        let title_x = cx - title_w / 2.0;
+        let title_y = by + pad_v;
+        let col_top = title_y + 2.0 * lh;
+        let footer_top = col_top + (self.help_col_lines as f32 + 1.0) * lh;
+        let f_keys_x = cx - footer_w / 2.0;
+        let f_desc_x = f_keys_x + fkw + kd_gap;
+        let donate_top = footer_top + self.help_footer_lines as f32 * lh;
+
+        HelpLayout {
+            bx,
+            by,
+            bw,
+            bh,
+            title_x,
+            title_y,
+            col_top,
+            l_keys_x,
+            l_desc_x,
+            r_keys_x,
+            r_desc_x,
+            footer_top,
+            f_keys_x,
+            f_desc_x,
+            donate_top,
+        }
     }
 
     /// Lay out the confirmation overlay (D key). Single-column centered text.
@@ -1460,33 +1595,27 @@ impl Gpu {
         let mut show_help_donate = false;
         let mut help_donate_coords = (0.0_f32, 0.0_f32);
 
-        // Help overlay (centered, two columns).
+        // Help overlay (centered title + two section columns + centered footer block).
         let mut show_help_box = false;
-        let mut help_coords = (
-            0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32,
-        );
+        let mut help_layout: Option<HelpLayout> = None;
         if help {
-            help_coords = self.layout_help(scale, win_w, win_h);
-            let (bx, by, bw, bh, _, ty, _) = help_coords;
+            let hl = self.layout_help(scale, win_w, win_h);
             self.queue.write_buffer(
                 &self.help_uniform_buf,
                 0,
                 bytemuck::bytes_of(&Uniforms {
-                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                    mvp: rect_mvp(hl.bw, hl.bh, hl.bx, hl.by, win_w, win_h),
                 }),
             );
             show_help_box = true;
-            // Donate footer: centered, in the extra row reserved INSIDE the box (one help_line_h
-            // below the last help row). `ty` is the text top (by + pad_v); the help text occupies
-            // `lines` rows, so the donate row starts at ty + lines * help_line_h.
-            let lines = (HELP_ROWS.len() + 2) as f32;
-            let donate_top = ty + lines * self.help_line_h + (self.help_line_h - don_lh) / 2.0;
+            // Donate footer sits one row below the footer block (its row is reserved in the box).
+            let donate_top = hl.donate_top + (self.help_line_h - don_lh) / 2.0;
             help_donate_coords = (donate_left, donate_top);
-            // Only show help donate if not obscured by the about overlay.
-            show_help_donate = !about;
+            show_help_donate = !about; // hide if obscured by the about overlay
             if show_help_donate {
                 push_donate_hit!(donate_top);
             }
+            help_layout = Some(hl);
         }
 
         // Confirmation overlay (D key: set/unset default app).
@@ -1714,8 +1843,13 @@ impl Gpu {
             let p_buf = &self.text_buffer as *const TextBuffer;
             let d_buf = &self.date_text_buf as *const TextBuffer;
             let s_buf = &self.status_text_buf as *const TextBuffer;
-            let hk_buf = &self.help_keys_buf as *const TextBuffer;
-            let hd_buf = &self.help_desc_buf as *const TextBuffer;
+            let h_title = &self.help_title_buf as *const TextBuffer;
+            let h_lk = &self.help_l_keys_buf as *const TextBuffer;
+            let h_ld = &self.help_l_desc_buf as *const TextBuffer;
+            let h_rk = &self.help_r_keys_buf as *const TextBuffer;
+            let h_rd = &self.help_r_desc_buf as *const TextBuffer;
+            let h_fk = &self.help_f_keys_buf as *const TextBuffer;
+            let h_fd = &self.help_f_desc_buf as *const TextBuffer;
             let c_buf = &self.confirm_text_buf as *const TextBuffer;
             let v_buf = &self.version_text_buf as *const TextBuffer;
             let donate_ptr = &self.donate_text_buf as *const TextBuffer;
@@ -1779,33 +1913,34 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
-            if show_help_box {
-                let (bx, by, bw, bh, keys_x, ty, desc_x) = help_coords;
+            if let Some(hl) = &help_layout {
                 let bounds = TextBounds {
-                    left: bx as i32,
-                    top: by as i32,
-                    right: (bx + bw) as i32,
-                    bottom: (by + bh) as i32,
+                    left: hl.bx as i32,
+                    top: hl.by as i32,
+                    right: (hl.bx + hl.bw) as i32,
+                    bottom: (hl.by + hl.bh) as i32,
                 };
-                // Left column: keys + title (brighter). Right column: descriptions (dimmer).
-                areas.push(TextArea {
-                    buffer: unsafe { &*hk_buf },
-                    left: keys_x,
-                    top: ty,
-                    scale: 1.0,
-                    bounds,
-                    default_color: Color::rgb(245, 245, 250),
-                    custom_glyphs: &[],
-                });
-                areas.push(TextArea {
-                    buffer: unsafe { &*hd_buf },
-                    left: desc_x,
-                    top: ty,
-                    scale: 1.0,
-                    bounds,
-                    default_color: Color::rgb(180, 185, 195),
-                    custom_glyphs: &[],
-                });
+                let bright = Color::rgb(245, 245, 250); // title + keys
+                let dim = Color::rgb(180, 185, 195); // descriptions
+                // Helper to push a (buffer, left, top, color) text area within the help box bounds.
+                let mut push = |ptr: *const TextBuffer, left: f32, top: f32, color: Color| {
+                    areas.push(TextArea {
+                        buffer: unsafe { &*ptr },
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds,
+                        default_color: color,
+                        custom_glyphs: &[],
+                    });
+                };
+                push(h_title, hl.title_x, hl.title_y, bright);
+                push(h_lk, hl.l_keys_x, hl.col_top, bright);
+                push(h_ld, hl.l_desc_x, hl.col_top, dim);
+                push(h_rk, hl.r_keys_x, hl.col_top, bright);
+                push(h_rd, hl.r_desc_x, hl.col_top, dim);
+                push(h_fk, hl.f_keys_x, hl.footer_top, bright);
+                push(h_fd, hl.f_desc_x, hl.footer_top, dim);
             }
             if show_confirm_box {
                 let (bx, by, bw, bh, tx, ty) = confirm_coords;
@@ -2576,36 +2711,55 @@ fn confirm_overlay_text(set: bool) -> &'static str {
 
 const HELP_TITLE: &str = "Glanvu — keyboard shortcuts";
 
-/// Two-column cheatsheet rows: `(keys, description)`. An empty pair renders as a blank
-/// separator line in both columns.
-const HELP_ROWS: &[(&str, &str)] = &[
-    ("Arrows", "previous · next image"),
-    ("Home / End", "first · last image"),
-    ("Tab / G", "thumbnail grid"),
-    ("Enter", "directory explorer"),
-    ("F  ·  /", "find image by name"),
-    ("S", "slideshow"),
-    ("", ""),
-    ("+ / − / wheel", "zoom in · out"),
-    ("drag", "pan"),
-    ("0", "fit to window"),
-    ("1", "actual size (1:1)"),
-    ("T", "turn (rotate) 90°"),
-    ("Space / F11", "fullscreen"),
-    ("", ""),
-    ("C", "copy image to clipboard"),
-    ("Shift+C", "copy file path to clipboard"),
-    ("O", "toggle sort order (name / date)"),
-    ("I", "image info panel"),
-    ("R / F2", "rename image"),
-    ("F5", "refresh from disk"),
-    ("Del / Backspace", "move image to Trash"),
-    ("", ""),
-    ("D", "set Glanvu as default app"),
-    ("U", "restore previous defaults"),
-    ("A", "about Glanvu"),
-    ("H / ?", "show / hide this help"),
-    ("Esc / Q", "close · quit"),
+/// A row of the help cheatsheet: either a section header or a `keys → description` pair.
+enum HelpRow {
+    /// Section title, rendered in an accent colour with a blank line before it.
+    Section(&'static str),
+    /// `(keys, description)` shown across the two columns.
+    Keys(&'static str, &'static str),
+}
+
+use HelpRow::{Keys, Section};
+
+/// The help overlay lays out three blocks: a left column ([`HELP_LEFT`]) and right column
+/// ([`HELP_RIGHT`]) of sections side by side, with [`HELP_FOOTER`] centered below them. The layout
+/// inserts a blank line before each section automatically.
+const HELP_LEFT: &[HelpRow] = &[
+    Section("Navigate"),
+    Keys("Arrows", "previous · next image"),
+    Keys("Home / End", "first · last image"),
+    Keys("F  ·  /", "find by name"),
+    Keys("Enter", "directory explorer"),
+    Keys("Tab / G", "thumbnail grid"),
+    Section("View"),
+    Keys("+ / − / wheel", "zoom in · out"),
+    Keys("drag", "pan"),
+    Keys("0  ·  1", "fit  ·  actual size (1:1)"),
+    Keys("T", "turn (rotate) 90°"),
+    Keys("Space / F11", "fullscreen"),
+    Keys("S", "slideshow"),
+];
+
+const HELP_RIGHT: &[HelpRow] = &[
+    Section("Organize"),
+    Keys("O", "sort order (name / date)"),
+    Keys("I", "image info"),
+    Keys("R", "rename"),
+    Keys("C  ·  Shift+C", "copy image · copy path"),
+    Keys("F5", "refresh from disk"),
+    Keys("Del / Backspace", "move to Trash"),
+    Section("Grid selection"),
+    Keys("Shift+click / arrows", "select range"),
+    Keys("Ctrl/⌘+click · Space", "toggle one"),
+    Keys("Ctrl/⌘+A · drag", "select all · rubber-band"),
+];
+
+const HELP_FOOTER: &[HelpRow] = &[
+    Section("App"),
+    Keys("D  ·  U", "set · restore default app"),
+    Keys("A", "about Glanvu"),
+    Keys("H / ?", "show / hide this help"),
+    Keys("Esc / Q", "close · quit"),
 ];
 
 fn mtime_string(path: &std::path::PathBuf) -> Option<String> {
