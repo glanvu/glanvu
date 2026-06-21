@@ -2543,6 +2543,63 @@ impl App {
         self.redraw();
     }
 
+    /// Re-scan the current image's directory and reconcile the playlist with what's on disk
+    /// (files added/removed externally — e.g. recovered from Trash, new screenshots). Preserves
+    /// the current image when it survives; shows a neighbour or the empty state if it vanished.
+    fn rescan_directory(&mut self) {
+        let Some(dir) = self
+            .nav
+            .current_path()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+        else {
+            return;
+        };
+        let cur_before = self.nav.current_path().cloned();
+        let scanned = glanvu_core::list_images(&dir);
+        let Some((added, removed)) = self.nav.sync_paths(scanned, self.sort_mode) else {
+            return; // nothing changed
+        };
+
+        if self.nav.paths.is_empty() {
+            self.mode = ViewMode::Empty;
+            if let Some(w) = &self.window {
+                w.set_title("Glanvu");
+            }
+            self.redraw();
+            return;
+        }
+
+        match self.mode {
+            ViewMode::Grid => {
+                let n = self.nav.paths.len();
+                self.grid.sel = self.grid.sel.min(n - 1);
+                self.grid.clear_to_cursor();
+                for p in &self.nav.paths.clone() {
+                    self.thumbs.request(p);
+                }
+                let (win_w, win_h) = self.win_size();
+                self.grid.scroll_to_sel(n, win_w, win_h);
+                self.update_title_grid();
+            }
+            ViewMode::Single => {
+                if self.nav.current_path().cloned() == cur_before {
+                    // Current image survived — just refresh the title (index/total changed).
+                    if let Some(p) = self.nav.current_path().cloned() {
+                        self.update_title(self.nav.index, self.nav.paths.len(), &p);
+                    }
+                } else if let Some(res) = self.nav.show_index(self.nav.index) {
+                    // Current image vanished — show the neighbour that took its place.
+                    self.apply_nav_result(res);
+                }
+            }
+            ViewMode::Empty => {}
+        }
+
+        self.show_status(&format!("Folder updated  +{added} −{removed}"));
+        self.redraw();
+    }
+
     /// Move the grid cursor by `(dc, dr)` cells, then update the selection: Shift extends the
     /// range from the anchor, otherwise it becomes a single selection.
     fn grid_move(&mut self, dc: isize, dr: isize) {
@@ -2918,6 +2975,14 @@ impl ApplicationHandler for App {
 
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
+            }
+
+            // Regaining focus → reconcile the playlist with the directory (files may have been
+            // added/removed in another app, e.g. recovered from Trash or new screenshots).
+            WindowEvent::Focused(true) => {
+                if matches!(self.mode, ViewMode::Single | ViewMode::Grid) {
+                    self.rescan_directory();
+                }
             }
 
             WindowEvent::Resized(size) => {

@@ -257,6 +257,40 @@ impl FolderNav {
     }
 
     /// Re-sort the playlist and stay on the current image.
+    /// Reconcile the playlist with a freshly-scanned set of paths (files added/removed on disk
+    /// while the app wasn't looking). Applies `mode` ordering, preserves the current image when it
+    /// survives (else clamps to a neighbour), and evicts cache entries for vanished files.
+    /// Returns `(added, removed)` counts, or `None` if nothing changed.
+    pub fn sync_paths(&mut self, mut new_paths: Vec<PathBuf>, mode: SortMode) -> Option<(usize, usize)> {
+        sort_paths_by(&mut new_paths, mode);
+        if new_paths == self.paths {
+            return None;
+        }
+        let new_set: HashSet<&PathBuf> = new_paths.iter().collect();
+        let old_set: HashSet<&PathBuf> = self.paths.iter().collect();
+        let added = new_paths.iter().filter(|p| !old_set.contains(*p)).count();
+        let removed = self.paths.iter().filter(|p| !new_set.contains(*p)).count();
+        if added == 0 && removed == 0 {
+            return None; // only a reordering (e.g. mtime change under DateDesc) — ignore
+        }
+
+        let current = self.current_path().cloned();
+        let present: HashSet<PathBuf> = new_paths.iter().cloned().collect();
+        self.cache.retain(|k, _| present.contains(k));
+        self.in_flight.retain(|k| present.contains(k));
+
+        self.paths = new_paths;
+        self.index = match current {
+            Some(c) => self
+                .paths
+                .iter()
+                .position(|p| *p == c)
+                .unwrap_or_else(|| self.index.min(self.paths.len().saturating_sub(1))),
+            None => 0,
+        };
+        Some((added, removed))
+    }
+
     pub fn resort(&mut self, mode: SortMode) {
         let current = self.current_path().cloned();
         sort_paths_by(&mut self.paths, mode);
@@ -341,6 +375,32 @@ mod tests {
         let (mut nav, dir) = make_nav(4, 2);
         assert_eq!(nav.first().unwrap().index, 0);
         assert_eq!(nav.last().unwrap().index, 3);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_paths_adds_removes_and_keeps_current() {
+        // nav over 0000..0002, currently on 0001.
+        let (mut nav, dir) = make_nav(3, 1);
+        let cur = nav.current_path().cloned().unwrap();
+
+        // New scan: drop 0000, keep 0001+0002, add 0003.
+        let p3 = dir.join("0003.png");
+        let new_paths = vec![
+            dir.join("0001.png"),
+            dir.join("0002.png"),
+            p3.clone(),
+        ];
+        let change = nav.sync_paths(new_paths, SortMode::NameAsc).unwrap();
+        assert_eq!(change, (1, 1)); // +0003, -0000
+        assert_eq!(nav.paths.len(), 3);
+        // Current image (0001) preserved, now at index 0.
+        assert_eq!(nav.current_path(), Some(&cur));
+        assert_eq!(nav.index, 0);
+
+        // Re-syncing the identical set is a no-op.
+        let same = vec![dir.join("0001.png"), dir.join("0002.png"), p3];
+        assert_eq!(nav.sync_paths(same, SortMode::NameAsc), None);
         let _ = fs::remove_dir_all(dir);
     }
 
