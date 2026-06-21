@@ -273,6 +273,14 @@ impl FolderNav {
         if added == 0 && removed == 0 {
             return None; // only a reordering (e.g. mtime change under DateDesc) — ignore
         }
+        // Heuristic: exactly one file gone and one new in a single rescan is almost certainly an
+        // external rename. Capture the new path so we can keep following it if it was the current
+        // image (whose old path just vanished).
+        let renamed_to: Option<PathBuf> = if added == 1 && removed == 1 {
+            new_paths.iter().find(|p| !old_set.contains(*p)).cloned()
+        } else {
+            None
+        };
 
         let current = self.current_path().cloned();
         let present: HashSet<PathBuf> = new_paths.iter().cloned().collect();
@@ -281,11 +289,14 @@ impl FolderNav {
 
         self.paths = new_paths;
         self.index = match current {
-            Some(c) => self
-                .paths
-                .iter()
-                .position(|p| *p == c)
-                .unwrap_or_else(|| self.index.min(self.paths.len().saturating_sub(1))),
+            Some(c) => self.paths.iter().position(|p| *p == c).unwrap_or_else(|| {
+                // Current image's path is gone. If this rescan looks like a rename, follow the
+                // renamed file; otherwise fall back to the nearest valid index.
+                renamed_to
+                    .as_ref()
+                    .and_then(|r| self.paths.iter().position(|p| p == r))
+                    .unwrap_or_else(|| self.index.min(self.paths.len().saturating_sub(1)))
+            }),
             None => 0,
         };
         Some((added, removed))
@@ -417,6 +428,20 @@ mod tests {
         // Re-syncing the identical set is a no-op.
         let same = vec![dir.join("0001.png"), dir.join("0002.png"), p3];
         assert_eq!(nav.sync_paths(same, SortMode::NameAsc), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_paths_follows_external_rename_of_current() {
+        // Currently on 0001 (index 1 of 0000..0002).
+        let (mut nav, dir) = make_nav(3, 1);
+        // External rename 0001 -> 0009: one removed, one added.
+        let renamed = dir.join("0009.png");
+        let new_paths = vec![dir.join("0000.png"), dir.join("0002.png"), renamed.clone()];
+        let change = nav.sync_paths(new_paths, SortMode::NameAsc).unwrap();
+        assert_eq!(change, (1, 1));
+        // The view follows the renamed file rather than jumping to a neighbour.
+        assert_eq!(nav.current_path(), Some(&renamed));
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -2415,14 +2415,14 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("drag", "pan"),
     ("0", "fit to window"),
     ("1", "actual size (1:1)"),
-    ("R", "rotate 90°"),
+    ("T", "turn (rotate) 90°"),
     ("Space / F / F11", "fullscreen"),
     ("", ""),
     ("C", "copy image to clipboard"),
     ("Shift+C", "copy file path to clipboard"),
     ("O", "toggle sort order (name / date)"),
     ("I", "image info panel"),
-    ("F2", "rename image"),
+    ("R / F2", "rename image"),
     ("Del / Backspace", "move image to Trash"),
     ("", ""),
     ("D", "set Glanvu as default app"),
@@ -3556,8 +3556,10 @@ impl ApplicationHandler for App {
                             self.redraw();
                         }
                     }
-                    // F2: rename the current image (inline editor → confirmation).
-                    Key::Named(NamedKey::F2) => self.begin_rename(),
+                    // R (or F2): rename the current image (inline editor → confirmation).
+                    Key::Character("r") | Key::Character("R") | Key::Named(NamedKey::F2) => {
+                        self.begin_rename()
+                    }
                     Key::Named(NamedKey::Space)
                     | Key::Named(NamedKey::F11)
                     | Key::Character("f")
@@ -3566,7 +3568,8 @@ impl ApplicationHandler for App {
                         self.flash_overlay();
                         self.redraw();
                     }
-                    Key::Character("r") | Key::Character("R") => {
+                    // T: turn (rotate) 90° clockwise.
+                    Key::Character("t") | Key::Character("T") => {
                         self.state.quarter_turns = (self.state.quarter_turns + 1) % 4;
                         self.redraw();
                     }
