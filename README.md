@@ -32,7 +32,15 @@ The name is **glance + view** — a fast look.
   drawn on the GPU (wgpu). No system C libraries, no surprises.
 - **Keyboard-first navigation** — walk a whole folder with the arrow keys; zoom, pan, rotate, fit,
   and go fullscreen without touching the mouse. Press **H** any time for the full cheatsheet.
-- **Thumbnail grid** — press **Tab** for a fast, scrollable overview of the folder.
+- **Find by name** — press **F** (or **/**) for a fuzzy search across the folder: a floating match
+  list in single view, or a live thumbnail filter in the grid.
+- **Thumbnail grid** — press **Tab** for a fast, scrollable overview, with multi-selection
+  (Shift / Ctrl-⌘ click, rubber-band drag) for batch actions.
+- **File info** — press **I** for a floating panel with the image's dimensions, format, size and
+  date.
+- **Manage files in place** — **rename** (`R`) and **move to Trash** (`Delete`, single or a whole
+  grid selection), each behind a confirmation. Glanvu also notices files added, removed or changed
+  on disk and refreshes itself (or press **F5**).
 - **Directory explorer** — press **Enter** to browse folders and jump between images.
 - **Slideshow** — press **S** to start an auto-advancing slideshow.
 - **Batch convert** — a real CLI pipeline: convert, resize, crop, rotate, re-quality and rename
@@ -44,9 +52,13 @@ The name is **glance + view** — a fast look.
 
 <div align="center">
 
-| Directory explorer (`Enter`) | Thumbnail grid (`Tab`) |
+| File info (`I`) | Find by name (`F` / `/`) |
 |:---:|:---:|
-| <img src="web/assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer" width="410"> | <img src="web/assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid" width="410"> |
+| <img src="web/assets/images/screenshot-info.jpg" alt="Glanvu file-info overlay" width="410"> | <img src="web/assets/images/screenshot-find.jpg" alt="Glanvu find-by-name filter in the grid" width="410"> |
+
+| Thumbnail grid + selection (`Tab`) | Directory explorer (`Enter`) |
+|:---:|:---:|
+| <img src="web/assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid with multi-selection" width="410"> | <img src="web/assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer" width="410"> |
 
 | Slideshow (`S`) | Keyboard help (`H` / `?`) |
 |:---:|:---:|

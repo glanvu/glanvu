@@ -125,7 +125,23 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
             </div>
             <h3>Thumbnail grid</h3>
-            <p>Press <kbd>Tab</kbd> for a scrollable overview of the whole folder. Navigate with arrow keys, jump to any image instantly.</p>
+            <p>Press <kbd>Tab</kbd> for a scrollable overview of the whole folder, with multi-selection (Shift / Ctrl-⌘ click, rubber-band drag) for batch actions.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </div>
+            <h3>Find by name</h3>
+            <p>Press <kbd>F</kbd> for a fuzzy search across the folder — a floating match list in single view, or a live thumbnail filter in the grid.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+            </div>
+            <h3>Manage in place</h3>
+            <p>Rename (<kbd>R</kbd>) and move to Trash (<kbd>Delete</kbd>) — single or a whole selection — each behind a confirmation. Glanvu tracks changes on disk and refreshes itself.</p>
           </div>
 
           <div class="feature-card">
@@ -165,26 +181,38 @@
         </header>
         <div class="screenshots-grid">
           <figure class="screenshot-item">
-            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-explorer.jpg','Glanvu directory explorer panel')" aria-label="View full size: Directory explorer">
-              <img src="assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer panel" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-info.jpg','Glanvu file-info overlay')" aria-label="View full size: File info">
+              <img src="assets/images/screenshot-info.jpg" alt="Glanvu file-info overlay" loading="lazy" width="1200" height="855">
             </button>
-            <figcaption>Directory explorer &nbsp;<kbd>Enter</kbd></figcaption>
+            <figcaption>File info &nbsp;<kbd>I</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
-            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-grid.jpg','Glanvu thumbnail grid view')" aria-label="View full size: Thumbnail grid">
-              <img src="assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid view" loading="lazy" width="1100" height="700">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-find.jpg','Glanvu find-by-name filter in the grid')" aria-label="View full size: Find by name">
+              <img src="assets/images/screenshot-find.jpg" alt="Glanvu find-by-name filter in the grid" loading="lazy" width="1200" height="855">
+            </button>
+            <figcaption>Find by name &nbsp;<kbd>F</kbd></figcaption>
+          </figure>
+          <figure class="screenshot-item">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-grid.jpg','Glanvu thumbnail grid with multi-selection')" aria-label="View full size: Thumbnail grid">
+              <img src="assets/images/screenshot-grid.jpg" alt="Glanvu thumbnail grid with multi-selection" loading="lazy" width="1200" height="855">
             </button>
             <figcaption>Thumbnail grid &nbsp;<kbd>Tab</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
+            <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-explorer.jpg','Glanvu directory explorer panel')" aria-label="View full size: Directory explorer">
+              <img src="assets/images/screenshot-explorer.jpg" alt="Glanvu directory explorer panel" loading="lazy" width="1200" height="855">
+            </button>
+            <figcaption>Directory explorer &nbsp;<kbd>Enter</kbd></figcaption>
+          </figure>
+          <figure class="screenshot-item">
             <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-slideshow.jpg','Glanvu slideshow mode')" aria-label="View full size: Slideshow">
-              <img src="assets/images/screenshot-slideshow.jpg" alt="Glanvu slideshow mode" loading="lazy" width="1100" height="700">
+              <img src="assets/images/screenshot-slideshow.jpg" alt="Glanvu slideshow mode" loading="lazy" width="1200" height="855">
             </button>
             <figcaption>Slideshow &nbsp;<kbd>S</kbd></figcaption>
           </figure>
           <figure class="screenshot-item">
             <button class="screenshot-btn" onclick="openLightbox('assets/images/screenshot-help.jpg','Glanvu keyboard shortcut help overlay')" aria-label="View full size: Keyboard help">
-              <img src="assets/images/screenshot-help.jpg" alt="Glanvu keyboard shortcut help overlay" loading="lazy" width="1100" height="700">
+              <img src="assets/images/screenshot-help.jpg" alt="Glanvu keyboard shortcut help overlay" loading="lazy" width="1200" height="855">
             </button>
             <figcaption>Full cheatsheet &nbsp;<kbd>H</kbd></figcaption>
           </figure>

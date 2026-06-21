@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-21
+
+A feature release for the viewer: file management (rename, delete to Trash),
+search, multi-selection, and folder awareness — plus a redesigned help overlay.
+
+### Added
+
+- **Find by name** (`F` or `/`) — fuzzy subsequence search within the folder. In
+  single view it shows a floating list of the best matches; in the grid it is a
+  live filter: a search bar plus only the matching thumbnails, with a 2D cursor.
+  `Enter` opens the highlighted image, `Esc` clears.
+- **File-info overlay** (`I`) — a translucent top-left panel with the current
+  image's name, dimensions, format, size and modified date. Stays open while you
+  navigate.
+- **Move to Trash** (`Delete` / `Backspace`) — sends the image to the system
+  recycle bin (not a permanent delete), behind a confirmation modal.
+- **Grid multi-selection** — `Shift`+click/arrows for a range, `Ctrl`/`⌘`+click
+  or `Space` to toggle one, `Ctrl`/`⌘`+`A` to select all, and click-and-drag for
+  a rubber-band marquee. `Delete` moves the whole selection to Trash.
+- **Rename** (`R`) — inline editor pre-filled with the current name; a name
+  collision moves the displaced file to Trash after confirmation.
+- **Folder awareness** — the playlist re-scans on window focus, picking up files
+  added or removed externally and detecting content changes (by mtime). `F5`
+  forces a full refresh (re-scan + drop all caches).
+- **Sort in the grid** (`O`) — toggle name/date order from the grid while keeping
+  the current selection.
+
+### Changed
+
+- **Help overlay** redesigned into a compact two-column layout with labelled,
+  colour-accented sections (Navigate, View, Organize, Grid selection, App), and
+  now documents the grid selection shortcuts.
+- **Rotate** moved to `T` (turn); `R` is now rename.
+
 ## [0.5.4] — 2026-06-20
 
 Packaging fixes, shipped end-to-end through the automated release pipeline. The
