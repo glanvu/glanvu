@@ -5,6 +5,7 @@
 //! Folder navigation and prefetch live in `nav::FolderNav`; this module owns only the GPU state
 //! (`Gpu`), the view/transform state (`ViewState`), and the winit event loop (`App`).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use arboard::Clipboard;
@@ -1982,7 +1983,15 @@ impl Gpu {
     }
 
     /// Render the thumbnail grid. Returns whether a frame was presented.
-    pub fn render_grid(&mut self, paths: &[PathBuf], grid: &GridState) -> bool {
+    // Raw-pointer borrow of confirm_text_buf during text prepare, mirroring `render`.
+    #[allow(unsafe_code)]
+    pub fn render_grid(
+        &mut self,
+        paths: &[PathBuf],
+        grid: &GridState,
+        confirm: Option<&str>,
+        scale: f32,
+    ) -> bool {
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
         let n = paths.len();
 
@@ -2028,9 +2037,12 @@ impl Gpu {
             }
             let bg_slot = slot;
             slot += 1;
-            // selection ring (slightly larger quad, only for selected tile)
-            let sel_slot = if i == grid.sel && slot < TILE_POOL {
-                let out = SEL_OUTSET;
+            // selection ring: drawn for every selected tile; the cursor gets a thicker ring
+            // so it stays distinguishable within a multi-selection.
+            let is_cursor = i == grid.sel;
+            let ring = is_cursor || grid.selected.contains(&i);
+            let sel_slot = if ring && slot < TILE_POOL {
+                let out = if is_cursor { SEL_OUTSET * 2.5 } else { SEL_OUTSET };
                 self.queue.write_buffer(
                     &self.tile_bufs[slot],
                     0,
@@ -2076,6 +2088,52 @@ impl Gpu {
                 sel: sel_slot,
                 content: content_slot,
             });
+        }
+
+        // Delete-confirmation modal over the grid. Prepared before the pass (box uniform + text).
+        let mut show_confirm = false;
+        if let Some(text) = confirm {
+            let (bx, by, bw, bh, tx, ty) = self.layout_confirm(text, scale, win_w, win_h);
+            self.queue.write_buffer(
+                &self.confirm_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            self.viewport.update(
+                &self.queue,
+                Resolution {
+                    width: self.config.width,
+                    height: self.config.height,
+                },
+            );
+            // SAFETY: raw pointer to a distinct field, deref'd only during prepare below.
+            let c_buf = &self.confirm_text_buf as *const TextBuffer;
+            let area = TextArea {
+                buffer: unsafe { &*c_buf },
+                left: tx,
+                top: ty,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: by as i32,
+                    right: (bx + bw) as i32,
+                    bottom: (by + bh) as i32,
+                },
+                default_color: Color::rgb(240, 240, 245),
+                custom_glyphs: &[],
+            };
+            let _ = self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [area],
+                &mut self.swash_cache,
+            );
+            show_confirm = true;
         }
 
         // Single render pass: clear + draw all tiles.
@@ -2137,9 +2195,22 @@ impl Gpu {
                     pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
                 }
             }
+
+            // Delete-confirmation modal box + text, drawn on top of the grid.
+            if show_confirm {
+                pass.set_bind_group(0, &self.confirm_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]); // translucent dark bg
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+                let _ = self
+                    .text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        if show_confirm {
+            self.atlas.trim();
+        }
         true
     }
 }
@@ -2187,10 +2258,13 @@ struct App {
     about_visible: bool,
     /// Whether the info panel is shown (I key). Toggled; persists across navigation.
     info_visible: bool,
+    /// Current keyboard modifier state (for grid range/toggle selection).
+    modifiers: ModifiersState,
     /// Pending default-app confirmation. `Some(true)` = set; `Some(false)` = unset.
     confirm_assoc: Option<bool>,
-    /// Pending delete confirmation: the image to move to Trash (Delete/Backspace key).
-    confirm_delete: Option<PathBuf>,
+    /// Pending delete confirmation: the image(s) to move to Trash (Delete/Backspace key).
+    /// One path in single view; the grid selection (1..n) in grid view.
+    confirm_delete: Option<Vec<PathBuf>>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
     last_grid_click: Option<(Instant, usize)>,
     /// Current sort order.
@@ -2349,49 +2423,107 @@ impl App {
         Some(lines.join("\n"))
     }
 
-    /// Body text for the delete confirmation modal (shows the filename being trashed).
+    /// Body text for the delete confirmation modal. Shows the filename for a single image,
+    /// or a count for a group.
     fn delete_confirm_text(&self) -> Option<String> {
-        let path = self.confirm_delete.as_ref()?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("this image");
+        let paths = self.confirm_delete.as_ref()?;
+        let body = match paths.as_slice() {
+            [] => return None,
+            [one] => one
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("this image")
+                .to_string(),
+            many => format!("{} images", many.len()),
+        };
         Some(format!(
-            "Move to Trash?\n\n{name}\n\nEnter = delete   Esc = cancel"
+            "Move to Trash?\n\n{body}\n\nEnter = delete   Esc = cancel"
         ))
     }
 
-    /// Move the current image to the system Trash (recycle bin), then show a neighbour —
-    /// or switch to the empty state if it was the last image. Never deletes permanently.
-    fn delete_current_to_trash(&mut self) {
-        let Some(path) = self.nav.current_path().cloned() else {
-            self.redraw();
-            return;
-        };
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
-        if let Err(e) = trash::delete(&path) {
-            self.show_status(&format!("Trash failed: {e}"));
-            self.redraw();
-            return;
-        }
-        match self.nav.remove_current() {
-            Some(res) => {
-                self.show_status(&format!("Moved to Trash: {name}"));
-                self.apply_nav_result(res);
-            }
-            None => {
-                self.mode = ViewMode::Empty;
-                self.show_status("Moved to Trash — no images left");
-                if let Some(w) = &self.window {
-                    w.set_title("Glanvu");
+    /// Move the given image(s) to the system Trash (recycle bin) — never a permanent delete.
+    /// Removes them from the playlist, then re-shows: a neighbour in single view, a clamped
+    /// cursor in the grid, or the empty state if the folder is now exhausted.
+    fn delete_paths_to_trash(&mut self, paths: Vec<PathBuf>) {
+        let mut trashed: HashSet<PathBuf> = HashSet::new();
+        let mut failed = 0usize;
+        for p in &paths {
+            match trash::delete(p) {
+                Ok(()) => {
+                    trashed.insert(p.clone());
                 }
-                self.redraw();
+                Err(_) => failed += 1,
             }
         }
+        if trashed.is_empty() {
+            self.show_status("Trash failed");
+            self.redraw();
+            return;
+        }
+        let removed = self.nav.remove_paths(&trashed);
+
+        if self.nav.paths.is_empty() {
+            self.mode = ViewMode::Empty;
+            if let Some(w) = &self.window {
+                w.set_title("Glanvu");
+            }
+            self.redraw();
+        } else if self.mode == ViewMode::Grid {
+            let n = self.nav.paths.len();
+            self.grid.sel = self.grid.sel.min(n - 1);
+            self.grid.clear_to_cursor();
+            let (win_w, win_h) = self.win_size();
+            self.grid.scroll_to_sel(n, win_w, win_h);
+            self.update_title_grid();
+            self.redraw();
+        } else if let Some(res) = self.nav.show_index(self.nav.index) {
+            self.apply_nav_result(res);
+        }
+
+        let msg = if failed == 0 {
+            format!("Moved {removed} to Trash")
+        } else {
+            format!("Moved {removed} to Trash · {failed} failed")
+        };
+        self.show_status(&msg);
+        self.redraw();
+    }
+
+    /// Move the grid cursor by `(dc, dr)` cells, then update the selection: Shift extends the
+    /// range from the anchor, otherwise it becomes a single selection.
+    fn grid_move(&mut self, dc: isize, dr: isize) {
+        let (win_w, win_h) = self.win_size();
+        let n = self.nav.paths.len();
+        if n == 0 {
+            return;
+        }
+        self.grid.move_sel(dc, dr, n, win_w);
+        let to = self.grid.sel;
+        if self.modifiers.shift_key() {
+            self.grid.select_range(to);
+        } else {
+            self.grid.select_single(to);
+        }
+        self.grid.scroll_to_sel(n, win_w, win_h);
+        self.redraw();
+    }
+
+    /// Jump the grid cursor to an absolute index (Home/End), applying the same Shift/plain
+    /// selection rule as `grid_move`.
+    fn grid_set_cursor(&mut self, idx: usize) {
+        let (win_w, win_h) = self.win_size();
+        let n = self.nav.paths.len();
+        if n == 0 {
+            return;
+        }
+        let idx = idx.min(n - 1);
+        if self.modifiers.shift_key() {
+            self.grid.select_range(idx);
+        } else {
+            self.grid.select_single(idx);
+        }
+        self.grid.scroll_to_sel(n, win_w, win_h);
+        self.redraw();
     }
 
     fn open_explorer(&mut self) {
@@ -2469,7 +2601,8 @@ impl App {
     fn enter_grid(&mut self) {
         self.stop_slideshow();
         self.mode = ViewMode::Grid;
-        self.grid.sel = self.nav.index;
+        // Start with the current image as the sole selection (fresh each time the grid opens).
+        self.grid.select_single(self.nav.index);
         let (win_w, win_h) = self.win_size();
         self.grid.scroll_to_sel(self.nav.paths.len(), win_w, win_h);
         // Request thumbnails for all paths (worker handles dedup).
@@ -2612,9 +2745,16 @@ impl App {
         }
 
         if self.mode == ViewMode::Grid {
-            let Some(gpu) = self.gpu.as_mut() else { return };
+            // Compute overlay text + scale before borrowing gpu (both read &self).
+            let confirm = self.delete_confirm_text();
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor() as f32)
+                .unwrap_or(1.0);
             let paths = self.nav.paths.clone(); // clone needed to split borrow from gpu
-            let presented = gpu.render_grid(&paths, &self.grid);
+            let Some(gpu) = self.gpu.as_mut() else { return };
+            let presented = gpu.render_grid(&paths, &self.grid, confirm.as_deref(), scale);
             if !presented {
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -2722,6 +2862,10 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
@@ -2784,12 +2928,13 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // If the delete confirmation is up, Enter trashes the image, Esc cancels.
+                // If the delete confirmation is up, Enter trashes the image(s), Esc cancels.
                 if self.confirm_delete.is_some() {
                     match event.logical_key.as_ref() {
                         Key::Named(NamedKey::Enter) => {
-                            self.confirm_delete = None;
-                            self.delete_current_to_trash();
+                            if let Some(paths) = self.confirm_delete.take() {
+                                self.delete_paths_to_trash(paths);
+                            }
                         }
                         Key::Named(NamedKey::Escape) => {
                             self.confirm_delete = None;
@@ -2852,14 +2997,20 @@ impl ApplicationHandler for App {
                 }
                 // In grid mode, arrows navigate tiles and Enter opens the selection.
                 if self.mode == ViewMode::Grid {
-                    let (win_w, win_h) = self.win_size();
                     let n = self.nav.paths.len();
+                    let cmd_ctrl =
+                        self.modifiers.control_key() || self.modifiers.super_key();
                     match event.logical_key.as_ref() {
-                        Key::Named(NamedKey::Escape)
-                        | Key::Character("q")
-                        | Key::Character("Q") => {
-                            event_loop.exit();
+                        // Esc collapses a multi-selection to the cursor first; only then quits.
+                        Key::Named(NamedKey::Escape) => {
+                            if self.grid.selected.len() > 1 {
+                                self.grid.clear_to_cursor();
+                                self.redraw();
+                            } else {
+                                event_loop.exit();
+                            }
                         }
+                        Key::Character("q") | Key::Character("Q") => event_loop.exit(),
                         Key::Named(NamedKey::Enter) => {
                             let sel = self.grid.sel;
                             self.enter_single(sel);
@@ -2870,37 +3021,41 @@ impl ApplicationHandler for App {
                             self.enter_single(sel);
                             self.toggle_slideshow();
                         }
-                        Key::Named(NamedKey::ArrowRight) => {
-                            self.grid.move_sel(1, 0, n, win_w);
-                            self.grid.scroll_to_sel(n, win_w, win_h);
+                        // Ctrl/Cmd+A selects everything.
+                        Key::Character("a") | Key::Character("A") if cmd_ctrl => {
+                            self.grid.select_all(n);
                             self.redraw();
                         }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            self.grid.move_sel(-1, 0, n, win_w);
-                            self.grid.scroll_to_sel(n, win_w, win_h);
+                        // Space toggles the cursor tile's selection (keyboard equivalent of Ctrl+click).
+                        Key::Named(NamedKey::Space) => {
+                            let sel = self.grid.sel;
+                            self.grid.toggle(sel);
                             self.redraw();
                         }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            self.grid.move_sel(0, 1, n, win_w);
-                            self.grid.scroll_to_sel(n, win_w, win_h);
-                            self.redraw();
-                        }
-                        Key::Named(NamedKey::ArrowUp) => {
-                            self.grid.move_sel(0, -1, n, win_w);
-                            self.grid.scroll_to_sel(n, win_w, win_h);
-                            self.redraw();
-                        }
-                        Key::Named(NamedKey::Home) => {
-                            self.grid.sel = 0;
-                            self.grid.scroll_to_sel(n, win_w, win_h);
-                            self.redraw();
-                        }
+                        Key::Named(NamedKey::ArrowRight) => self.grid_move(1, 0),
+                        Key::Named(NamedKey::ArrowLeft) => self.grid_move(-1, 0),
+                        Key::Named(NamedKey::ArrowDown) => self.grid_move(0, 1),
+                        Key::Named(NamedKey::ArrowUp) => self.grid_move(0, -1),
+                        Key::Named(NamedKey::Home) => self.grid_set_cursor(0),
                         Key::Named(NamedKey::End) => {
-                            if n > 0 {
-                                self.grid.sel = n - 1;
+                            self.grid_set_cursor(n.saturating_sub(1))
+                        }
+                        // Delete / Backspace: confirm, then trash the selection (or the cursor).
+                        Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
+                            let mut idxs: Vec<usize> = if self.grid.selected.is_empty() {
+                                vec![self.grid.sel]
+                            } else {
+                                self.grid.selected.iter().copied().collect()
+                            };
+                            idxs.sort_unstable();
+                            let paths: Vec<PathBuf> = idxs
+                                .iter()
+                                .filter_map(|&i| self.nav.paths.get(i).cloned())
+                                .collect();
+                            if !paths.is_empty() {
+                                self.confirm_delete = Some(paths);
+                                self.redraw();
                             }
-                            self.grid.scroll_to_sel(n, win_w, win_h);
-                            self.redraw();
                         }
                         _ => {}
                     }
@@ -3036,7 +3191,7 @@ impl ApplicationHandler for App {
                     // confirm, then move the current image to the system Trash.
                     Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
                         if let Some(path) = self.nav.current_path() {
-                            self.confirm_delete = Some(path.clone());
+                            self.confirm_delete = Some(vec![path.clone()]);
                             self.redraw();
                         }
                     }
@@ -3144,16 +3299,28 @@ impl ApplicationHandler for App {
                             self.grid
                                 .hit_test(self.cursor.x as f32, self.cursor.y as f32, win_w, n)
                         {
+                            let shift = self.modifiers.shift_key();
+                            let cmd_ctrl =
+                                self.modifiers.control_key() || self.modifiers.super_key();
                             let now = Instant::now();
-                            let is_double = self.last_grid_click.is_some_and(|(t, prev)| {
-                                prev == idx && now.duration_since(t).as_millis() < 400
-                            });
+                            // A modifier click is always a selection gesture, never a double-open.
+                            let is_double = !shift
+                                && !cmd_ctrl
+                                && self.last_grid_click.is_some_and(|(t, prev)| {
+                                    prev == idx && now.duration_since(t).as_millis() < 400
+                                });
                             if is_double {
                                 self.last_grid_click = None;
                                 self.enter_single(idx);
                             } else {
                                 self.last_grid_click = Some((now, idx));
-                                self.grid.sel = idx;
+                                if shift {
+                                    self.grid.select_range(idx);
+                                } else if cmd_ctrl {
+                                    self.grid.toggle(idx);
+                                } else {
+                                    self.grid.select_single(idx);
+                                }
                                 self.redraw();
                             }
                         }
@@ -3392,6 +3559,7 @@ pub fn run(path: &str) -> ExitCode {
         explorer: None,
         help_visible: false,
         info_visible: false,
+        modifiers: ModifiersState::empty(),
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,
@@ -3466,6 +3634,7 @@ pub fn run_empty() -> ExitCode {
         explorer: None,
         help_visible: false,
         info_visible: false,
+        modifiers: ModifiersState::empty(),
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,

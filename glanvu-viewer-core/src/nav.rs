@@ -231,6 +231,31 @@ impl FolderNav {
         self.show_index(target)
     }
 
+    /// Remove every path in `victims` from the playlist and caches (for group delete). Keeps the
+    /// current image selected if it survived, otherwise clamps `index` to a valid position.
+    /// Returns the number actually removed. Does not decode — the caller re-shows `index`.
+    pub fn remove_paths(&mut self, victims: &HashSet<PathBuf>) -> usize {
+        if victims.is_empty() {
+            return 0;
+        }
+        let current = self.paths.get(self.index).cloned();
+        let before = self.paths.len();
+        self.paths.retain(|p| !victims.contains(p));
+        for p in victims {
+            self.cache.remove(p);
+            self.in_flight.remove(p);
+        }
+        self.index = match current {
+            // Current survived → keep showing it (find its new position).
+            Some(c) if !victims.contains(&c) => {
+                self.paths.iter().position(|p| *p == c).unwrap_or(0)
+            }
+            // Current was removed (or none) → clamp to a valid neighbour.
+            _ => self.index.min(self.paths.len().saturating_sub(1)),
+        };
+        before - self.paths.len()
+    }
+
     /// Re-sort the playlist and stay on the current image.
     pub fn resort(&mut self, mode: SortMode) {
         let current = self.current_path().cloned();

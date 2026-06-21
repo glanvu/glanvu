@@ -5,6 +5,8 @@
 //! The grid displays thumbnails in a scrollable tile grid. Each cell is CELL_W × CELL_H pixels;
 //! the selection is shown by drawing a slightly larger colored quad behind the thumbnail.
 
+use std::collections::HashSet;
+
 /// Thumbnail cell dimensions in logical pixels. Actual thumbnails may be smaller (portrait/square
 /// images); they are centered within the cell.
 pub const CELL_W: f32 = 168.0; // THUMB_W + 8px padding
@@ -19,15 +21,66 @@ pub const SEL_OUTSET: f32 = 3.0;
 /// Grid selection and scroll state.
 #[derive(Debug, Clone)]
 pub struct GridState {
-    /// Currently selected tile index (into the playlist).
+    /// Cursor tile (keyboard focus / last clicked). Always a valid playlist index.
     pub sel: usize,
+    /// Multi-selection set (the tiles a group action like delete applies to). Contains at
+    /// least the cursor after any plain move; may be empty after a Ctrl/Cmd toggle.
+    pub selected: HashSet<usize>,
+    /// Range anchor for Shift selection (set whenever the cursor moves without Shift).
+    pub anchor: usize,
     /// Vertical scroll offset in physical pixels.
     pub scroll_y: f32,
 }
 
 impl GridState {
     pub fn new(sel: usize) -> Self {
-        GridState { sel, scroll_y: 0.0 }
+        GridState {
+            sel,
+            selected: HashSet::from([sel]),
+            anchor: sel,
+            scroll_y: 0.0,
+        }
+    }
+
+    /// Single-select tile `i`: it becomes the only selection, the cursor, and the anchor.
+    pub fn select_single(&mut self, i: usize) {
+        self.selected.clear();
+        self.selected.insert(i);
+        self.sel = i;
+        self.anchor = i;
+    }
+
+    /// Toggle tile `i` in the selection (Ctrl/Cmd). Moves the cursor + anchor to `i`.
+    pub fn toggle(&mut self, i: usize) {
+        if !self.selected.insert(i) {
+            self.selected.remove(&i);
+        }
+        self.sel = i;
+        self.anchor = i;
+    }
+
+    /// Select the contiguous range between the anchor and `to` (Shift). Cursor moves to `to`;
+    /// the anchor is preserved so the range can be re-extended.
+    pub fn select_range(&mut self, to: usize) {
+        let (lo, hi) = if self.anchor <= to {
+            (self.anchor, to)
+        } else {
+            (to, self.anchor)
+        };
+        self.selected = (lo..=hi).collect();
+        self.sel = to;
+    }
+
+    /// Select every tile in the playlist (Ctrl/Cmd+A).
+    pub fn select_all(&mut self, n: usize) {
+        self.selected = (0..n).collect();
+    }
+
+    /// Collapse the selection back to just the cursor (first Esc).
+    pub fn clear_to_cursor(&mut self) {
+        self.selected.clear();
+        self.selected.insert(self.sel);
+        self.anchor = self.sel;
     }
 
     /// Number of columns that fit in `win_w`.
@@ -154,6 +207,29 @@ mod tests {
         // First tile should be at (MARGIN, MARGIN).
         let hit = g.hit_test(MARGIN + CELL_W / 2.0, MARGIN + CELL_H / 2.0, 1000.0, 5);
         assert_eq!(hit, Some(0));
+    }
+
+    #[test]
+    fn selection_single_toggle_range() {
+        let mut g = GridState::new(2);
+        assert_eq!(g.selected, HashSet::from([2]));
+        // Ctrl-toggle adds/removes.
+        g.toggle(5);
+        assert_eq!(g.selected, HashSet::from([2, 5]));
+        g.toggle(5);
+        assert_eq!(g.selected, HashSet::from([2]));
+        // Single-select collapses to one.
+        g.select_single(3);
+        assert_eq!(g.selected, HashSet::from([3]));
+        assert_eq!(g.anchor, 3);
+        // Shift-range from anchor 3 to 6 (inclusive), cursor follows.
+        g.select_range(6);
+        assert_eq!(g.selected, HashSet::from([3, 4, 5, 6]));
+        assert_eq!(g.sel, 6);
+        assert_eq!(g.anchor, 3); // anchor preserved
+        // Range the other direction re-extends from the same anchor.
+        g.select_range(1);
+        assert_eq!(g.selected, HashSet::from([1, 2, 3]));
     }
 
     #[test]
