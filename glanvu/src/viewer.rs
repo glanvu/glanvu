@@ -31,7 +31,7 @@ use glanvu_core::DecodedImage;
 use glanvu_viewer_core::explorer::{
     ExplorerState, FONT as EXPLORER_FONT, LINE_H as EXPLORER_LINE_H, PANEL_W,
 };
-use glanvu_viewer_core::grid::{GridState, CELL_H, CELL_W, GAP, SEL_OUTSET};
+use glanvu_viewer_core::grid::{GridState, CELL_H, CELL_W, GAP, MARGIN, SEL_OUTSET};
 use glanvu_viewer_core::nav::{locate, FolderNav};
 use glanvu_viewer_core::thumb::{ThumbnailCache, THUMB_H, THUMB_W};
 
@@ -138,31 +138,52 @@ impl TextInput {
     }
 }
 
-/// In-progress quick-open search ("find by name", `/` or Ctrl/Cmd+F). Holds the query editor plus
-/// the current ranked matches (playlist indices) and which match row is highlighted.
+/// In-progress quick-open search ("find by name", `F` or `/`).
+///
+/// Two presentations share this state. In **single** view it drives a floating modal list of the
+/// top matches. In **grid** view it drives a *live filter*: the grid shows only the matching
+/// thumbnails (re-packed), with a search bar across the top and the cursor on the highlighted
+/// match. The state is the same; only `limit` (list is capped, filter shows all) and `scroll_y`
+/// (filter only) differ.
 struct FindState {
     /// The query text editor (same inline editor as rename).
     input: TextInput,
-    /// Ranked playlist indices matching the query (best-first), capped to `FIND_LIMIT`.
+    /// Ranked playlist indices matching the query (best-first), capped to `limit`.
     matches: Vec<usize>,
-    /// Highlighted row: index into `matches`.
+    /// Highlighted match: index into `matches`.
     sel: usize,
+    /// Max matches to keep: `FIND_LIMIT` for the single-view list, `usize::MAX` for the grid filter.
+    limit: usize,
+    /// Vertical scroll offset for the grid filter (physical px). Unused in single view.
+    scroll_y: f32,
 }
 
-/// Maximum number of find matches shown in the modal at once.
+/// Maximum number of find matches shown in the single-view modal list at once.
 const FIND_LIMIT: usize = 8;
 
 impl FindState {
-    /// Re-rank `matches` against the current query over `paths`, keeping the highlighted row in
+    /// Re-rank `matches` against the current query over `paths`, keeping the highlighted match in
     /// bounds. Consumes and returns `self` so callers can swap it back in one move.
     fn recompute_for(mut self, paths: &[PathBuf]) -> Self {
         let names: Vec<&str> = paths.iter().map(|p| file_name_str(p)).collect();
-        self.matches = glanvu_viewer_core::find::search(&self.input.text(), &names, FIND_LIMIT);
+        self.matches = glanvu_viewer_core::find::search(&self.input.text(), &names, self.limit);
         if self.sel >= self.matches.len() {
             self.sel = self.matches.len().saturating_sub(1);
         }
         self
     }
+
+    /// The playlist index of the highlighted match, if any.
+    fn current(&self) -> Option<usize> {
+        self.matches.get(self.sel).copied()
+    }
+}
+
+/// Height (physical px) of the grid-filter search bar for a given DPI scale. Shared by the renderer
+/// (`layout_find_bar`) and the scroll math (`find_scroll_to_cursor`) so they stay in agreement.
+fn find_bar_height(scale: f32) -> f32 {
+    let font = (16.0 * scale).clamp(14.0, 32.0);
+    font * 1.4 + 2.0 * (8.0 * scale)
 }
 
 /// In-progress grid drag (left button held). Decides between a click (no movement) and a
@@ -443,6 +464,11 @@ struct Gpu {
     confirm_text_buf: TextBuffer,
     confirm_layout_cache: String,
     confirm_line_h: f32,
+    // Grid-filter search bar (find by name): full-width strip across the top of the grid.
+    findbar_uniform_buf: wgpu::Buffer,
+    findbar_uniform_bind: wgpu::BindGroup,
+    findbar_text_buf: TextBuffer,
+    findbar_layout_cache: String,
     // Grid renderer: pre-allocated pool of per-tile uniform bufs + bind groups.
     tile_bufs: Vec<wgpu::Buffer>,
     tile_binds: Vec<wgpu::BindGroup>,
@@ -754,6 +780,10 @@ impl Gpu {
         let confirm_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &confirm_uniform_buf);
         let confirm_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let findbar_uniform_buf = make_uniform_buffer(&device);
+        let findbar_uniform_bind =
+            make_uniform_bind(&device, &uniform_layout_solo, &findbar_uniform_buf);
+        let findbar_text_buf = TextBuffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         let donate_text_buf = TextBuffer::new(&mut font_system, Metrics::new(13.0, 17.0));
         let about_uniform_buf = make_uniform_buffer(&device);
         let about_uniform_bind =
@@ -824,6 +854,10 @@ impl Gpu {
             help_desc_buf,
             help_layout_scale: -1.0,
             help_line_h: 22.0,
+            findbar_uniform_buf,
+            findbar_uniform_bind,
+            findbar_text_buf,
+            findbar_layout_cache: String::new(),
             confirm_uniform_buf,
             confirm_uniform_bind,
             confirm_text_buf,
@@ -1291,6 +1325,25 @@ impl Gpu {
         let bx = ((win_w - bw) / 2.0).max(0.0);
         let by = ((win_h - bh) / 2.0).max(0.0);
         (bx, by, bw, bh, bx + pad_h, by + pad_v)
+    }
+
+    /// Lay out the grid-filter search bar: a full-width strip across the top, text left-aligned.
+    /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`. Height must match `find_bar_height`.
+    fn layout_find_bar(&mut self, text: &str, scale: f32, win_w: f32) -> (f32, f32, f32, f32, f32, f32) {
+        if self.findbar_layout_cache != text {
+            self.findbar_layout_cache = text.to_string();
+            let font = (16.0 * scale).clamp(14.0, 32.0);
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.4));
+            buf.set_wrap(&mut self.font_system, Wrap::None);
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(&mut self.font_system, text, &Attrs::new(), Shaping::Advanced, None);
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.findbar_text_buf = buf;
+        }
+        let pad_h = 14.0 * scale;
+        let pad_v = 8.0 * scale;
+        let bh = find_bar_height(scale);
+        (0.0, 0.0, win_w, bh, pad_h, pad_v)
     }
 
     /// Render one frame in single-image mode.
@@ -2102,10 +2155,18 @@ impl Gpu {
         grid: &GridState,
         confirm: Option<&str>,
         status: Option<&str>,
+        find_bar: Option<&str>,
         scale: f32,
     ) -> bool {
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
         let n = paths.len();
+        // When the find filter is active a search bar occupies the top of the grid; push the tiles
+        // down by its height (plus a gap) so the first row is not hidden behind it.
+        let top_inset = if find_bar.is_some() {
+            find_bar_height(scale) + GAP
+        } else {
+            0.0
+        };
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -2120,9 +2181,14 @@ impl Gpu {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Collect visible tiles and write all transforms before the render pass.
+        // Collect visible tiles and write all transforms before the render pass. The cull accounts
+        // for `top_inset` (the find bar) so tiles at the top/bottom edges are not wrongly dropped.
         let visible: Vec<usize> = (0..n)
-            .filter(|&i| grid.is_visible(i, win_w, win_h))
+            .filter(|&i| {
+                let (_, y) = grid.cell_origin(i, win_w);
+                let y = y + top_inset;
+                y + CELL_H > 0.0 && y < win_h
+            })
             .collect();
 
         let mut slot = 0usize;
@@ -2137,6 +2203,7 @@ impl Gpu {
 
         for &i in &visible {
             let (cx, cy) = grid.cell_origin(i, win_w);
+            let cy = cy + top_inset; // shift below the find search bar (0.0 when not filtering)
             // bg quad
             if slot < TILE_POOL {
                 self.queue.write_buffer(
@@ -2291,6 +2358,34 @@ impl Gpu {
             show_status = true;
         }
 
+        let mut show_find_bar = false;
+        if let Some(text) = find_bar {
+            let (bx, by, bw, bh, tx, ty) = self.layout_find_bar(text, scale, win_w);
+            self.queue.write_buffer(
+                &self.findbar_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            let f_buf = &self.findbar_text_buf as *const TextBuffer;
+            areas.push(TextArea {
+                buffer: unsafe { &*f_buf },
+                left: tx,
+                top: ty,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: by as i32,
+                    right: (bx + bw) as i32,
+                    bottom: (by + bh) as i32,
+                },
+                default_color: Color::rgb(240, 240, 245),
+                custom_glyphs: &[],
+            });
+            show_find_bar = true;
+        }
+
         if !areas.is_empty() {
             let _ = self.text_renderer.prepare(
                 &self.device,
@@ -2382,7 +2477,13 @@ impl Gpu {
                 pass.set_bind_group(1, &self.box_texture_bind, &[]); // semi-transparent box bg
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
-            if show_confirm || show_status {
+            // Find-filter search bar (top strip), drawn last so it sits above any tile under it.
+            if show_find_bar {
+                pass.set_bind_group(0, &self.findbar_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]); // near-opaque dark bg
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+            if show_confirm || show_status || show_find_bar {
                 let _ = self
                     .text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass);
@@ -2390,7 +2491,7 @@ impl Gpu {
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
-        if show_confirm {
+        if show_confirm || show_find_bar {
             self.atlas.trim();
         }
         true
@@ -2712,30 +2813,39 @@ impl App {
 
     // --- Quick-open search (find by name) ---
 
-    /// Open the find modal, seeded with an empty query (initial list = first images in order).
+    /// Open find, seeded with an empty query. In single view this is a floating match list (capped
+    /// at `FIND_LIMIT`); in grid view it is a live filter showing every match (`usize::MAX`).
     fn begin_find(&mut self) {
+        let limit = if self.mode == ViewMode::Grid {
+            usize::MAX
+        } else {
+            FIND_LIMIT
+        };
         let st = FindState {
             input: TextInput::new(""),
             matches: Vec::new(),
             sel: 0,
+            limit,
+            scroll_y: 0.0,
         };
         self.find = Some(st.recompute_for(&self.nav.paths));
         self.redraw();
     }
 
-    /// Re-rank matches for the current query and clamp the highlighted row.
+    /// Re-rank matches for the current query and clamp the highlighted match. In the grid filter
+    /// the highlight resets to the best match, so keep it scrolled into view.
     fn find_recompute(&mut self) {
         if let Some(st) = self.find.take() {
             self.find = Some(st.recompute_for(&self.nav.paths));
         }
+        if self.mode == ViewMode::Grid {
+            self.find_scroll_to_cursor();
+        }
     }
 
-    /// Open the currently highlighted match (works from single or grid mode → single view).
+    /// Open the currently highlighted match (works from single or grid → single view).
     fn find_open_selected(&mut self) {
-        let idx = self
-            .find
-            .as_ref()
-            .and_then(|st| st.matches.get(st.sel).copied());
+        let idx = self.find.as_ref().and_then(|st| st.current());
         self.find = None;
         if let Some(idx) = idx {
             self.enter_single(idx);
@@ -2744,8 +2854,68 @@ impl App {
         }
     }
 
-    /// Body text of the find modal: header, query line with caret, the ranked match list (the
-    /// highlighted row marked with `▶`), and the key hints. Reuses the shared modal box.
+    /// Close the grid filter (Esc): drop the query and return to the full grid, selecting and
+    /// scrolling to whichever match was highlighted so the user sees where it is.
+    fn find_close_grid(&mut self) {
+        let found = self.find.as_ref().and_then(|st| st.current());
+        self.find = None;
+        if let Some(idx) = found {
+            self.grid.select_single(idx);
+            let (win_w, win_h) = self.win_size();
+            self.grid.scroll_to_sel(self.nav.paths.len(), win_w, win_h);
+        }
+        self.redraw();
+    }
+
+    /// Move the grid-filter cursor by `(dc, dr)` columns/rows over the matches, then scroll to it.
+    fn find_grid_move(&mut self, dc: isize, dr: isize) {
+        let (win_w, _) = self.win_size();
+        let cols = GridState::col_count(win_w) as isize;
+        if let Some(st) = self.find.as_mut() {
+            let n = st.matches.len() as isize;
+            if n == 0 {
+                return;
+            }
+            st.sel = (st.sel as isize + dc + dr * cols).clamp(0, n - 1) as usize;
+        }
+        self.find_scroll_to_cursor();
+        self.redraw();
+    }
+
+    /// Keep the highlighted grid-filter tile visible, accounting for the top search bar.
+    fn find_scroll_to_cursor(&mut self) {
+        let (win_w, win_h) = self.win_size();
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let inset = find_bar_height(scale) + GAP;
+        let cols = GridState::col_count(win_w).max(1);
+        if let Some(st) = self.find.as_mut() {
+            let n = st.matches.len();
+            if n == 0 {
+                st.scroll_y = 0.0;
+                return;
+            }
+            let row = st.sel / cols;
+            // Tile position in grid space (before scroll); the renderer adds `inset` on top.
+            let cell_top = MARGIN + row as f32 * (CELL_H + GAP) + inset;
+            let cell_bot = cell_top + CELL_H;
+            if cell_top - st.scroll_y < inset {
+                st.scroll_y = cell_top - inset;
+            } else if cell_bot - st.scroll_y > win_h - MARGIN {
+                st.scroll_y = cell_bot - (win_h - MARGIN);
+            }
+            let rows = n.div_ceil(cols);
+            let content_h = MARGIN * 2.0 + rows as f32 * (CELL_H + GAP) - GAP + inset;
+            let max_scroll = (content_h - win_h).max(0.0);
+            st.scroll_y = st.scroll_y.clamp(0.0, max_scroll);
+        }
+    }
+
+    /// Body text of the single-view find modal: header, query line with caret, the ranked match
+    /// list (highlighted row marked with `▶`), and key hints. Reuses the shared modal box.
     fn find_text(&self) -> Option<String> {
         let st = self.find.as_ref()?;
         let mut out = format!("Find image\n\n  {}\n\n", st.input.display_with_caret());
@@ -2767,6 +2937,17 @@ impl App {
         }
         out.push_str("\n↑↓ select   Enter = open   Esc = cancel");
         Some(out)
+    }
+
+    /// Top search-bar text for the grid filter (query with caret + match count).
+    fn find_bar_text(&self) -> Option<String> {
+        let st = self.find.as_ref()?;
+        let n = st.matches.len();
+        let word = if n == 1 { "match" } else { "matches" };
+        Some(format!(
+            "Find:  {}     {n} {word}     ↵ open   Esc clear",
+            st.input.display_with_caret()
+        ))
     }
 
     /// Perform the on-disk rename (trashing the target first if it already exists), then update
@@ -3271,8 +3452,6 @@ impl App {
         }
 
         if self.mode == ViewMode::Grid {
-            // Compute overlay text + scale before borrowing gpu (both read &self).
-            let confirm = self.modal_text();
             let now = Instant::now();
             let status = match self.status_until {
                 Some(t) if now < t => Some(self.status_text.clone()),
@@ -3283,10 +3462,42 @@ impl App {
                 .as_ref()
                 .map(|w| w.scale_factor() as f32)
                 .unwrap_or(1.0);
+
+            // Find filter active: render only the matched thumbnails, re-packed, with a top search
+            // bar and the cursor on the highlighted match. A throwaway GridState drives the layout
+            // (sel = highlighted match, its own scroll) so the real grid/selection is untouched.
+            if let Some(st) = &self.find {
+                let view_paths: Vec<PathBuf> = st
+                    .matches
+                    .iter()
+                    .filter_map(|&i| self.nav.paths.get(i).cloned())
+                    .collect();
+                let mut fgrid = GridState::new(st.sel.min(view_paths.len().saturating_sub(1)));
+                fgrid.scroll_y = st.scroll_y;
+                let bar = self.find_bar_text();
+                let Some(gpu) = self.gpu.as_mut() else { return };
+                let presented =
+                    gpu.render_grid(&view_paths, &fgrid, None, status.as_deref(), bar.as_deref(), scale);
+                if !presented {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                return;
+            }
+
+            // Compute overlay text + scale before borrowing gpu (both read &self).
+            let confirm = self.modal_text();
             let paths = self.nav.paths.clone(); // clone needed to split borrow from gpu
             let Some(gpu) = self.gpu.as_mut() else { return };
-            let presented =
-                gpu.render_grid(&paths, &self.grid, confirm.as_deref(), status.as_deref(), scale);
+            let presented = gpu.render_grid(
+                &paths,
+                &self.grid,
+                confirm.as_deref(),
+                status.as_deref(),
+                None,
+                scale,
+            );
             if !presented {
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -3565,30 +3776,65 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // Quick-open search (find by name): typed keys edit the query and re-rank matches;
-                // Up/Down move the highlight; Enter opens the highlighted match; Esc closes.
+                // Find by name. Typed keys edit the query and re-rank. In single view the arrows
+                // walk the floating list (Up/Down) and edit the caret (Left/Right); in the grid
+                // filter all four arrows move the cursor over the matched tiles. Enter opens the
+                // highlighted match; Esc closes (in grid, selecting the match in the full grid).
                 if self.find.is_some() {
+                    let in_grid = self.mode == ViewMode::Grid;
                     match event.logical_key.as_ref() {
                         Key::Named(NamedKey::Escape) => {
-                            self.find = None;
-                            self.redraw();
+                            if in_grid {
+                                self.find_close_grid();
+                            } else {
+                                self.find = None;
+                                self.redraw();
+                            }
                         }
                         Key::Named(NamedKey::Enter) => self.find_open_selected(),
                         Key::Named(NamedKey::ArrowDown) => {
-                            if let Some(st) = self.find.as_mut() {
-                                if !st.matches.is_empty() {
-                                    st.sel = (st.sel + 1) % st.matches.len();
+                            if in_grid {
+                                self.find_grid_move(0, 1);
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    if !st.matches.is_empty() {
+                                        st.sel = (st.sel + 1) % st.matches.len();
+                                    }
                                 }
+                                self.redraw();
                             }
-                            self.redraw();
                         }
                         Key::Named(NamedKey::ArrowUp) => {
-                            if let Some(st) = self.find.as_mut() {
-                                if !st.matches.is_empty() {
-                                    st.sel = (st.sel + st.matches.len() - 1) % st.matches.len();
+                            if in_grid {
+                                self.find_grid_move(0, -1);
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    if !st.matches.is_empty() {
+                                        st.sel = (st.sel + st.matches.len() - 1) % st.matches.len();
+                                    }
                                 }
+                                self.redraw();
                             }
-                            self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            if in_grid {
+                                self.find_grid_move(-1, 0);
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.input.left();
+                                }
+                                self.redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            if in_grid {
+                                self.find_grid_move(1, 0);
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.input.right();
+                                }
+                                self.redraw();
+                            }
                         }
                         Key::Named(NamedKey::Backspace) => {
                             if let Some(st) = self.find.as_mut() {
@@ -3604,18 +3850,6 @@ impl ApplicationHandler for App {
                                 st.sel = 0;
                             }
                             self.find_recompute();
-                            self.redraw();
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            if let Some(st) = self.find.as_mut() {
-                                st.input.left();
-                            }
-                            self.redraw();
-                        }
-                        Key::Named(NamedKey::ArrowRight) => {
-                            if let Some(st) = self.find.as_mut() {
-                                st.input.right();
-                            }
                             self.redraw();
                         }
                         Key::Named(NamedKey::Space) => {
@@ -3987,7 +4221,25 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
                 };
                 if dy != 0.0 {
-                    if self.mode == ViewMode::Grid {
+                    if self.mode == ViewMode::Grid && self.find.is_some() {
+                        // Scroll the filtered view (its own scroll, accounting for the search bar).
+                        let (win_w, win_h) = self.win_size();
+                        let scale = self
+                            .window
+                            .as_ref()
+                            .map(|w| w.scale_factor() as f32)
+                            .unwrap_or(1.0);
+                        let inset = find_bar_height(scale) + GAP;
+                        let cols = GridState::col_count(win_w).max(1);
+                        if let Some(st) = self.find.as_mut() {
+                            let rows = st.matches.len().div_ceil(cols);
+                            let content_h =
+                                MARGIN * 2.0 + rows as f32 * (CELL_H + GAP) - GAP + inset;
+                            let max_s = (content_h - win_h).max(0.0);
+                            st.scroll_y -= dy * (CELL_H + GAP) * 0.5;
+                            st.scroll_y = st.scroll_y.clamp(0.0, max_s);
+                        }
+                    } else if self.mode == ViewMode::Grid {
                         let (win_w, win_h) = self.win_size();
                         let n = self.nav.paths.len();
                         self.grid.scroll_y -= dy * (CELL_H + GAP) * 0.5;
@@ -4001,6 +4253,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // While the grid filter is open, navigation is keyboard-driven; ignore grid clicks
+                // (their hit-testing assumes the full, un-filtered playlist layout).
+                if self.mode == ViewMode::Grid && self.find.is_some() {
+                    return;
+                }
                 if button == MouseButton::Left {
                     if self.mode == ViewMode::Grid {
                         if state == ElementState::Pressed {
