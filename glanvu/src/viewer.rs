@@ -79,6 +79,21 @@ struct DonateHit {
     split_x: f32,
 }
 
+/// In-progress grid drag (left button held). Decides between a click (no movement) and a
+/// rubber-band marquee (moved past the threshold).
+struct GridDrag {
+    /// Press position in screen coords.
+    start: (f32, f32),
+    /// Selection to union the marquee with (the prior selection for Ctrl/Cmd-additive drags).
+    base: HashSet<usize>,
+    /// Ctrl/Cmd held at press → additive selection.
+    additive: bool,
+    /// Shift held at press → range-click on release, no marquee.
+    range: bool,
+    /// Whether the pointer moved far enough to become a marquee.
+    moved: bool,
+}
+
 const SHADER: &str = r#"
 struct Uniforms { mvp: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -348,6 +363,7 @@ struct Gpu {
     // Solid-color textures for grid UI elements.
     cell_bg_bind: wgpu::BindGroup,     // dark cell background
     sel_bind: wgpu::BindGroup,         // selection ring (blue)
+    marquee_bind: wgpu::BindGroup,     // rubber-band rectangle fill (translucent blue)
     placeholder_bind: wgpu::BindGroup, // thumbnail not yet ready (mid-grey)
     // Date overlay (bottom-right, mirrors the path overlay on the left).
     date_uniform_buf: wgpu::Buffer,
@@ -592,6 +608,14 @@ impl Gpu {
             rgba: vec![60, 120, 220, 230],
         };
         let sel_bind = build_texture_bind(&device, &queue, &texture_layout, &sampler, srgb, &sel);
+        // Rubber-band fill: same blue but mostly transparent so thumbnails show through.
+        let marquee = DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![80, 140, 230, 64],
+        };
+        let marquee_bind =
+            build_texture_bind(&device, &queue, &texture_layout, &sampler, srgb, &marquee);
         let ph = DecodedImage {
             width: 1,
             height: 1,
@@ -723,6 +747,7 @@ impl Gpu {
             tile_binds,
             cell_bg_bind,
             sel_bind,
+            marquee_bind,
             placeholder_bind,
             date_uniform_buf,
             date_uniform_bind,
@@ -2090,6 +2115,26 @@ impl Gpu {
             });
         }
 
+        // Rubber-band rectangle quad (drawn translucent over the tiles).
+        let marquee_slot = match grid.marquee {
+            Some((x0, y0, x1, y1)) if slot < TILE_POOL => {
+                let (lx, ty) = (x0.min(x1), y0.min(y1));
+                let (mw, mh) = ((x0 - x1).abs(), (y0 - y1).abs());
+                self.queue.write_buffer(
+                    &self.tile_bufs[slot],
+                    0,
+                    bytemuck::bytes_of(&Uniforms {
+                        mvp: rect_mvp(mw, mh, lx, ty, win_w, win_h),
+                    }),
+                );
+                let s = slot;
+                slot += 1;
+                Some(s)
+            }
+            _ => None,
+        };
+        let _ = slot; // silence unused-assignment after the last allocation
+
         // Delete-confirmation modal over the grid. Prepared before the pass (box uniform + text).
         let mut show_confirm = false;
         if let Some(text) = confirm {
@@ -2196,6 +2241,13 @@ impl Gpu {
                 }
             }
 
+            // Rubber-band rectangle (translucent fill) over the tiles.
+            if let Some(ms) = marquee_slot {
+                pass.set_bind_group(0, &self.tile_binds[ms], &[]);
+                pass.set_bind_group(1, &self.marquee_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+
             // Delete-confirmation modal box + text, drawn on top of the grid.
             if show_confirm {
                 pass.set_bind_group(0, &self.confirm_uniform_bind, &[]);
@@ -2260,6 +2312,8 @@ struct App {
     info_visible: bool,
     /// Current keyboard modifier state (for grid range/toggle selection).
     modifiers: ModifiersState,
+    /// In-progress grid drag (rubber-band selection), `None` when the button is up.
+    grid_drag: Option<GridDrag>,
     /// Pending default-app confirmation. `Some(true)` = set; `Some(false)` = unset.
     confirm_assoc: Option<bool>,
     /// Pending delete confirmation: the image(s) to move to Trash (Delete/Backspace key).
@@ -3292,36 +3346,70 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
-                    if self.mode == ViewMode::Grid && state == ElementState::Pressed {
-                        let (win_w, _) = self.win_size();
-                        let n = self.nav.paths.len();
-                        if let Some(idx) =
-                            self.grid
-                                .hit_test(self.cursor.x as f32, self.cursor.y as f32, win_w, n)
-                        {
-                            let shift = self.modifiers.shift_key();
+                    if self.mode == ViewMode::Grid {
+                        if state == ElementState::Pressed {
+                            // Begin a potential drag. Selection is applied on release (click) or
+                            // on move (marquee), so a plain press doesn't disturb the selection yet.
                             let cmd_ctrl =
                                 self.modifiers.control_key() || self.modifiers.super_key();
-                            let now = Instant::now();
-                            // A modifier click is always a selection gesture, never a double-open.
-                            let is_double = !shift
-                                && !cmd_ctrl
-                                && self.last_grid_click.is_some_and(|(t, prev)| {
-                                    prev == idx && now.duration_since(t).as_millis() < 400
-                                });
-                            if is_double {
-                                self.last_grid_click = None;
-                                self.enter_single(idx);
-                            } else {
-                                self.last_grid_click = Some((now, idx));
-                                if shift {
-                                    self.grid.select_range(idx);
-                                } else if cmd_ctrl {
-                                    self.grid.toggle(idx);
+                            self.grid_drag = Some(GridDrag {
+                                start: (self.cursor.x as f32, self.cursor.y as f32),
+                                base: if cmd_ctrl {
+                                    self.grid.selected.clone()
                                 } else {
-                                    self.grid.select_single(idx);
-                                }
+                                    HashSet::new()
+                                },
+                                additive: cmd_ctrl,
+                                range: self.modifiers.shift_key(),
+                                moved: false,
+                            });
+                        } else if let Some(drag) = self.grid_drag.take() {
+                            if drag.moved {
+                                // Marquee finished — selection was updated live during the drag.
+                                self.grid.marquee = None;
                                 self.redraw();
+                            } else {
+                                // No movement → treat as a click at the release position.
+                                let (win_w, _) = self.win_size();
+                                let n = self.nav.paths.len();
+                                let hit = self.grid.hit_test(
+                                    self.cursor.x as f32,
+                                    self.cursor.y as f32,
+                                    win_w,
+                                    n,
+                                );
+                                match hit {
+                                    Some(idx) => {
+                                        let now = Instant::now();
+                                        let is_double = !drag.range
+                                            && !drag.additive
+                                            && self.last_grid_click.is_some_and(|(t, prev)| {
+                                                prev == idx
+                                                    && now.duration_since(t).as_millis() < 400
+                                            });
+                                        if is_double {
+                                            self.last_grid_click = None;
+                                            self.enter_single(idx);
+                                        } else {
+                                            self.last_grid_click = Some((now, idx));
+                                            if drag.range {
+                                                self.grid.select_range(idx);
+                                            } else if drag.additive {
+                                                self.grid.toggle(idx);
+                                            } else {
+                                                self.grid.select_single(idx);
+                                            }
+                                            self.redraw();
+                                        }
+                                    }
+                                    // Click on empty space (no modifier) clears the selection.
+                                    None => {
+                                        if !drag.range && !drag.additive {
+                                            self.grid.selected.clear();
+                                            self.redraw();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -3410,6 +3498,30 @@ impl ApplicationHandler for App {
                     self.state.pan.0 += (position.x - self.cursor.x) as f32;
                     self.state.pan.1 -= (position.y - self.cursor.y) as f32;
                     self.redraw();
+                } else if self.mode == ViewMode::Grid && self.grid_drag.is_some() {
+                    // Rubber-band selection: once the pointer leaves a small dead-zone, the press
+                    // becomes a marquee that live-selects every tile inside the dragged rectangle.
+                    let (start, base, range, moved) = {
+                        let d = self.grid_drag.as_ref().unwrap();
+                        (d.start, d.base.clone(), d.range, d.moved)
+                    };
+                    if !range {
+                        let (cx, cy) = (position.x as f32, position.y as f32);
+                        let dist = ((cx - start.0).powi(2) + (cy - start.1).powi(2)).sqrt();
+                        if moved || dist > 6.0 {
+                            let (win_w, _) = self.win_size();
+                            let n = self.nav.paths.len();
+                            let tiles = self.grid.tiles_in_rect(start.0, start.1, cx, cy, win_w, n);
+                            let mut sel = base;
+                            sel.extend(tiles);
+                            self.grid.selected = sel;
+                            self.grid.marquee = Some((start.0, start.1, cx, cy));
+                            if let Some(d) = self.grid_drag.as_mut() {
+                                d.moved = true;
+                            }
+                            self.redraw();
+                        }
+                    }
                 }
                 self.cursor = position;
             }
@@ -3560,6 +3672,7 @@ pub fn run(path: &str) -> ExitCode {
         help_visible: false,
         info_visible: false,
         modifiers: ModifiersState::empty(),
+        grid_drag: None,
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,
@@ -3635,6 +3748,7 @@ pub fn run_empty() -> ExitCode {
         help_visible: false,
         info_visible: false,
         modifiers: ModifiersState::empty(),
+        grid_drag: None,
         about_visible: false,
         confirm_assoc: None,
         confirm_delete: None,

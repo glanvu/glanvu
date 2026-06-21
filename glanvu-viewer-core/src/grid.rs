@@ -30,6 +30,9 @@ pub struct GridState {
     pub anchor: usize,
     /// Vertical scroll offset in physical pixels.
     pub scroll_y: f32,
+    /// Active rubber-band rectangle in screen coords `(x0, y0, x1, y1)` while drag-selecting.
+    /// `None` when not dragging; the renderer draws it as a translucent box.
+    pub marquee: Option<(f32, f32, f32, f32)>,
 }
 
 impl GridState {
@@ -39,7 +42,29 @@ impl GridState {
             selected: HashSet::from([sel]),
             anchor: sel,
             scroll_y: 0.0,
+            marquee: None,
         }
+    }
+
+    /// Indices of all tiles whose cell intersects the screen-space rectangle (any corner order).
+    /// Used for rubber-band (drag) selection.
+    pub fn tiles_in_rect(
+        &self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        win_w: f32,
+        n: usize,
+    ) -> Vec<usize> {
+        let (lx, rx) = (x0.min(x1), x0.max(x1));
+        let (ty, by) = (y0.min(y1), y0.max(y1));
+        (0..n)
+            .filter(|&i| {
+                let (cx, cy) = self.cell_origin(i, win_w);
+                cx < rx && cx + CELL_W > lx && cy < by && cy + CELL_H > ty
+            })
+            .collect()
     }
 
     /// Single-select tile `i`: it becomes the only selection, the cursor, and the anchor.
@@ -230,6 +255,24 @@ mod tests {
         // Range the other direction re-extends from the same anchor.
         g.select_range(1);
         assert_eq!(g.selected, HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn tiles_in_rect_covers_dragged_cells() {
+        let g = GridState::new(0);
+        // A rectangle from inside tile 0 to inside tile 1 (same row) covers both.
+        let hits = g.tiles_in_rect(
+            MARGIN + CELL_W / 2.0,
+            MARGIN + CELL_H / 2.0,
+            MARGIN + CELL_W + GAP + CELL_W / 2.0,
+            MARGIN + CELL_H / 2.0,
+            1000.0,
+            5,
+        );
+        assert!(hits.contains(&0) && hits.contains(&1));
+        // A tiny rect inside tile 0 only hits tile 0.
+        let one = g.tiles_in_rect(MARGIN + 2.0, MARGIN + 2.0, MARGIN + 4.0, MARGIN + 4.0, 1000.0, 5);
+        assert_eq!(one, vec![0]);
     }
 
     #[test]
