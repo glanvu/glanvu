@@ -68,14 +68,14 @@ The name is **glance + view** — a fast look.
 
 ## Install
 
-Pre-built binaries for v0.5.4 are available at [glanvu.com](https://glanvu.com) and
+Pre-built binaries for v0.6.0 are available at [glanvu.com](https://glanvu.com) and
 [GitHub Releases](https://github.com/glanvu/glanvu/releases):
 
 | Platform | Download |
 |---|---|
-| macOS (Apple Silicon) | [`Glanvu-0.5.4-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.4/Glanvu-0.5.4-macos-arm64.zip) |
-| Linux x86_64 | [`glanvu-0.5.4-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.5.4/glanvu-0.5.4-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.5.4/glanvu_0.5.4_amd64.deb) |
-| Windows x64 | [`Glanvu-0.5.4-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.5.4/Glanvu-0.5.4-windows-x86_64.zip) |
+| macOS (Apple Silicon) | [`Glanvu-0.6.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.6.0/Glanvu-0.6.0-macos-arm64.zip) |
+| Linux x86_64 | [`glanvu-0.6.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.6.0/glanvu-0.6.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.6.0/glanvu_0.6.0_amd64.deb) |
+| Windows x64 | [`Glanvu-0.6.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.6.0/Glanvu-0.6.0-windows-x86_64.zip) |
 
 Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
 see the [Roadmap](#roadmap).
@@ -135,19 +135,23 @@ Glanvu refuses to overwrite an input or to map two inputs to the same output (da
 |---|---|
 | `←` `→` | Previous · next image |
 | `Home` / `End` | First · last image |
-| `Tab` / `G` | Thumbnail grid |
+| `F` / `/` | Find image by name |
 | `Enter` | Directory explorer |
-| `S` | Slideshow |
-| `O` | Toggle sort order (name / date) |
+| `Tab` / `G` | Thumbnail grid |
 | `+` / `−` / wheel | Zoom in · out |
 | drag | Pan |
-| `0` | Fit to window |
-| `1` | Actual size (1:1) |
-| `R` | Rotate 90° |
+| `0` / `1` | Fit to window · actual size (1:1) |
+| `T` | Turn (rotate) 90° |
+| `Space` / `F11` | Fullscreen |
+| `S` | Slideshow |
+| `O` | Toggle sort order (name / date) |
+| `I` | Image info panel |
+| `R` | Rename image |
 | `C` / `Shift+C` | Copy image · copy file path to clipboard |
-| `Space` / `F` / `F11` | Fullscreen |
-| `D` | Set Glanvu as default viewer (macOS) |
-| `U` | Restore previous defaults (macOS) |
+| `F5` | Refresh from disk |
+| `Delete` / `Backspace` | Move image (or grid selection) to Trash |
+| `Shift`/`Ctrl`/`⌘` + click · drag | Grid: select range · toggle · rubber-band |
+| `D` / `U` | Set · restore default viewer (macOS) |
 | `H` / `?` | Show / hide help |
 | `Esc` / `Q` | Close · quit |
 
@@ -159,7 +163,7 @@ viewer above is the foundation. Planned, in priority order:
 - **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images, multipage documents.
 - **Technical & 3D** — DICOM (medical), CAD drawings, 3D-printing formats (STL/OBJ/3MF/STEP/G-code)
   and general 3D models.
-- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.5.4).
+- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.6.0).
   Package managers in progress: Homebrew tap, Scoop bucket, AUR, winget, Chocolatey.
   Code signing and auto-update planned.
 - **Hosted (Phase 3)** — [glanvu.com](https://glanvu.com): web viewer, shareable links, and a
