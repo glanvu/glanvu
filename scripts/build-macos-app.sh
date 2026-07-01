@@ -7,9 +7,12 @@
 #   rustup target add x86_64-apple-darwin
 #   ./scripts/build-macos-app.sh --release --target x86_64-apple-darwin
 #
-# Note: codesigning and notarization require an Apple Developer account ($99/yr).
-# Without them the app runs fine but macOS shows a one-time "unverified developer"
-# dialog — bypass with right-click → Open. Add signing once the account is set up.
+# Note: the bundle is ad-hoc signed below (identity "-", free, no Apple Developer
+# account needed). Ad-hoc signing alone doesn't satisfy notarization, so a
+# quarantined (downloaded) copy still triggers Gatekeeper on first launch — but
+# as the standard "unidentified developer" dialog with an Open Anyway escape,
+# not the unsigned "app is damaged, move to Trash" dead end. Full notarization
+# requires a paid Apple Developer account ($99/yr) — deferred for cost.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -211,6 +214,14 @@ else
     echo "    Icon:   placeholder (assets/AppIcon.png not found)"
 fi
 
+# Ad-hoc code-sign the bundle: no certificate needed, but it gives Gatekeeper a
+# valid signature to check. Without this, a copy downloaded via a browser or
+# Homebrew (which sets the com.apple.quarantine xattr) is reported as "damaged"
+# with no bypass on Sonoma+; ad-hoc signed, it falls back to the milder
+# "unidentified developer" prompt (System Settings → Privacy & Security → Open
+# Anyway). See WIP/glanvu/doc/glanvu.distribution-runbook.md.
+codesign --force --deep --sign - "$APP"
+
 echo ""
 echo "✅  Built: $APP"
 echo "    Binary: $(du -sh "$MACOS/Glanvu" | cut -f1)"
@@ -222,5 +233,5 @@ echo ""
 echo "To open a file: open -a Glanvu /path/to/image.jpg"
 echo ""
 echo "Next steps:"
-echo "  1. Codesign + notarize for Gatekeeper-clean install (requires Apple Developer account)"
-echo "     codesign --deep --force --sign 'Developer ID Application: ...' dist/macos/Glanvu.app"
+echo "  1. Notarize for a fully Gatekeeper-clean install (requires Apple Developer account)"
+echo "     xcrun notarytool submit ... && xcrun stapler staple dist/macos/Glanvu.app"

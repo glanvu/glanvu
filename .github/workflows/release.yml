@@ -146,3 +146,37 @@ jobs:
             artifacts/*.zip
             artifacts/*.tar.gz
             artifacts/*.deb
+
+  # After the draft release has its assets, update all packaging manifests (sha256
+  # digests + version strings + download links) and commit them to main so that
+  # publish-distributions.yml can read up-to-date files from main once the draft
+  # is published (the deliberate human gate).
+  bump-manifests:
+    name: Bump packaging manifests
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run bump-packaging.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/bump-packaging.sh "$VERSION"
+
+      - name: Commit manifests to main
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/ web/index.html README.md
+          if git diff --cached --quiet; then
+            echo "Nothing to commit — manifests already at ${VERSION}."
+          else
+            git commit -m "chore: packaging manifests v${VERSION} [skip ci]"
+            git push origin main
+          fi

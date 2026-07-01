@@ -80,6 +80,12 @@ Pre-built binaries for v0.6.0 are available at [glanvu.com](https://glanvu.com) 
 Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
 see the [Roadmap](#roadmap).
 
+> **macOS:** the app is ad-hoc signed but not notarized. On first launch macOS blocks it — go to
+> **System Settings → Privacy & Security** and click **Open Anyway**. (If you somehow see
+> *"damaged and can't be opened"* instead, run `sudo xattr -rd com.apple.quarantine /Applications/Glanvu.app`.)
+>
+> **Windows:** click **More info → Run anyway** when SmartScreen prompts.
+
 ### Build from source
 
 ```bash

@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-01
+
+### Fixed
+
+- macOS bundles are now ad-hoc signed, so Gatekeeper shows the standard "unidentified
+  developer" prompt with an **Open Anyway** button in System Settings → Privacy & Security,
+  instead of the "damaged and can't be opened" dead-end (no bypass) that unsigned bundles hit
+  on Sonoma and later once quarantined by a browser or Homebrew download.
+
 ## [0.6.0] — 2026-06-21
 
 A feature release for the viewer: file management (rename, delete to Trash),

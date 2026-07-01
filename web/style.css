@@ -735,6 +735,12 @@ kbd {
   background: var(--bg);
 }
 
+.download-note {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-top: 24px;
+}
 .download-github {
   text-align: center;
   padding: 20px;
