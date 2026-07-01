@@ -6,14 +6,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- **SVG stays sharp when zoomed in (viewport rendering).** When zoomed in past fit, Glanvu renders
-  only the visible region (plus a small pad) at screen resolution, composited over a cheap
-  fit-resolution base layer, on a background thread so the UI never stalls. Small pans within the
-  pad are free; the render scale is capped so even filter-heavy SVGs stay responsive. Vector-only —
-  raster images are unaffected.
-
 ## [0.7.0] — 2026-07-01
 
 ### Added
@@ -25,6 +17,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   thumbnail grid (rasterized directly at thumbnail size, so it's sharp rather than
   intrinsic-then-downscaled), `glanvu info`, `glanvu convert` (input only — no raster→vector),
   and system file association (`glanvu set-default` / macOS "Open With").
+- **SVG stays sharp when zoomed in (viewport rendering).** When zoomed in past fit, Glanvu renders
+  only the visible region (plus a small pad) at screen resolution, composited over a cheap
+  fit-resolution base layer, on a background thread so the UI never stalls. Small pans within the
+  pad are free; the render scale is capped so even filter-heavy SVGs stay responsive. Vector-only —
+  raster images are unaffected.
 
 ### Fixed
 
