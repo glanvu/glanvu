@@ -4,22 +4,22 @@ class Glanvu < Formula
   license "Apache-2.0"
 
   on_linux do
-    url "https://github.com/glanvu/glanvu/releases/download/v0.6.1/glanvu-0.6.1-linux-x86_64.tar.gz"
-    sha256 "36c4a0f58061bdc1025af0bccef05d9517774c4574ef47d442f80ec08ba1e322"
-    version "0.6.1"
+    url "https://github.com/glanvu/glanvu/releases/download/v0.7.0/glanvu-0.7.0-linux-x86_64.tar.gz"
+    sha256 "d5764f409fc4afeb1d5febf5f02ab0064c90bec9dd978fdaaeeb98253982882e"
+    version "0.7.0"
   end
 
   on_macos do
     on_arm do
-      url "https://github.com/glanvu/glanvu/releases/download/v0.6.1/Glanvu-0.6.1-macos-arm64.zip"
-      sha256 "f680a3802f3ef102b007bd075f8266c2853149782984a981e5089aaba3209cfe"
-      version "0.6.1"
+      url "https://github.com/glanvu/glanvu/releases/download/v0.7.0/Glanvu-0.7.0-macos-arm64.zip"
+      sha256 "d15f534d6a915bb4098892d1b2df2f2ca27aa89185321216a6525aee632d535a"
+      version "0.7.0"
     end
 
     on_intel do
-      url "https://github.com/glanvu/glanvu/releases/download/v0.6.1/Glanvu-0.6.1-macos-x86_64.zip"
-      sha256 "1f62a010acb3ef36a8f5f0ca6cf51753c4c7bf7dbd7bd0d807121133c53b6f56"
-      version "0.6.1"
+      url "https://github.com/glanvu/glanvu/releases/download/v0.7.0/Glanvu-0.7.0-macos-x86_64.zip"
+      sha256 "70a8cf1b2c7eadef642def95be6f639115a2961cdb9f230db9d5c6279b04aba4"
+      version "0.7.0"
     end
   end
 
