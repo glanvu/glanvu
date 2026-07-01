@@ -7,7 +7,8 @@
 //! batch CLI) and, later, by other tools. See `WIP/glanvu/doc/plans/glanvu.phase-1-plan.md`.
 //!
 //! Phase 1 base formats (pure-Rust decoders, no system C libraries): JPEG, PNG, GIF, BMP, TIFF,
-//! WebP. AVIF and the long-tail formats arrive later via a plugin layer.
+//! WebP. SVG (vector, via `resvg`) was added in D11 — see the decision log. AVIF and the
+//! remaining long-tail formats arrive later via a plugin layer.
 
 mod convert;
 mod decode;
@@ -17,10 +18,11 @@ mod format;
 
 pub use convert::{convert_file, encode_to_file, ConvertOptions, Rotation};
 pub use decode::{
-    decode_bytes, decode_path, decode_thumbnail, read_meta_path, DecodedImage, ImageMeta,
+    decode_bytes, decode_path, decode_svg_at_size, decode_thumbnail, read_meta_path, DecodedImage,
+    ImageMeta, SvgDocument,
 };
 pub use error::{Error, Result};
-pub use folder::{is_supported_path, list_images};
+pub use folder::{is_supported_path, is_svg_path, list_images};
 pub use format::{detect_format, SourceFormat};
 
 /// The crate version, taken from `Cargo.toml` at build time.

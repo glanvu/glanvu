@@ -177,6 +177,11 @@ jobs:
           if git diff --cached --quiet; then
             echo "Nothing to commit — manifests already at ${VERSION}."
           else
-            git commit -m "chore: packaging manifests v${VERSION} [skip ci]"
+            # No `[skip ci]`: none of our workflows trigger on push to main (release.yml is
+            # tag-only), so it protects nothing here — and this exact commit is the one that
+            # bumps web/index.html, which Cloudflare Pages' git integration also treats `[skip
+            # ci]` as a signal to skip deploying. Confold's version of this job carries the
+            # marker for its own repo's needs; don't copy it blindly here.
+            git commit -m "chore: packaging manifests v${VERSION}"
             git push origin main
           fi

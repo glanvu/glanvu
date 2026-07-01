@@ -18,7 +18,8 @@ use std::sync::Mutex;
 
 /// Image extensions Glanvu can decode. Keep in sync with `CFBundleTypeExtensions`
 /// in `scripts/build-macos-app.sh`.
-pub const SUPPORTED_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp"];
+pub const SUPPORTED_EXTS: &[&str] =
+    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg"];
 
 /// Result of a background set/unset operation, posted here for the viewer to pick up.
 pub static ASSOC_RESULT: Mutex<Option<String>> = Mutex::new(None);

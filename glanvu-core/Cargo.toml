@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 image.workspace = true
 thiserror.workspace = true
+resvg.workspace = true
 
 [lints]
 workspace = true

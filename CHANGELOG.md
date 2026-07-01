@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **SVG stays sharp when zoomed in (viewport rendering).** When zoomed in past fit, Glanvu renders
+  only the visible region (plus a small pad) at screen resolution, composited over a cheap
+  fit-resolution base layer, on a background thread so the UI never stalls. Small pans within the
+  pad are free; the render scale is capped so even filter-heavy SVGs stay responsive. Vector-only —
+  raster images are unaffected.
+
+## [0.7.0] — 2026-07-01
+
+### Added
+
+- **SVG support** — the first vector format. Rendered crisp at every zoom level: the GPU scales
+  the current raster smoothly during an active zoom/pan/resize gesture (free, unchanged), and
+  once it settles, Glanvu re-rasterizes at the new effective on-screen resolution in the
+  background so large or complex files never stall the UI. Supported everywhere: the viewer,
+  thumbnail grid (rasterized directly at thumbnail size, so it's sharp rather than
+  intrinsic-then-downscaled), `glanvu info`, `glanvu convert` (input only — no raster→vector),
+  and system file association (`glanvu set-default` / macOS "Open With").
+
+### Fixed
+
+- Mouse-wheel zoom now anchors to the cursor position instead of the image center, matching
+  every other viewer/editor's scroll-to-zoom behavior.
+- Large images no longer look soft or aliased when fit to the window (or zoomed out). Image
+  textures now carry a full mipmap chain and are sampled trilinearly, so downscaled detail is
+  filtered correctly instead of a single-texel tap; previously a large photo looked rough until
+  you zoomed toward 100%.
+
 ## [0.6.1] — 2026-07-01
 
 ### Fixed

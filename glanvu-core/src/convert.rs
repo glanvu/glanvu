@@ -5,8 +5,9 @@
 
 use std::path::Path;
 
-use crate::decode::map_image_error;
+use crate::decode::{decode_path, map_image_error};
 use crate::error::{Error, Result};
+use crate::folder::is_svg_path;
 use crate::format::SourceFormat;
 
 /// Resize dimensions above `MAX_RESIZE_DIM` are rejected to prevent runaway memory allocation (a
@@ -49,8 +50,9 @@ pub fn encode_to_file(
     let raw = image.rgba.clone();
     let rgba_img = image::RgbaImage::from_raw(image.width, image.height, raw)
         .ok_or_else(|| crate::error::Error::Decode("invalid decoded image buffer".to_string()))?;
+    let format = target.to_image().ok_or(Error::UnsupportedFormat)?;
     image::DynamicImage::ImageRgba8(rgba_img)
-        .save_with_format(output, target.to_image())
+        .save_with_format(output, format)
         .map_err(map_image_error)
 }
 
@@ -60,17 +62,27 @@ pub fn convert_file(
     target: SourceFormat,
     opts: &ConvertOptions,
 ) -> Result<()> {
-    let reader = image::ImageReader::open(input)
-        .map_err(|source| Error::Io {
-            path: input.to_path_buf(),
-            source,
-        })?
-        .with_guessed_format()
-        .map_err(|source| Error::Io {
-            path: input.to_path_buf(),
-            source,
-        })?;
-    let mut image = reader.decode().map_err(map_image_error)?;
+    // SVG has no lazy/streaming decode (see decode.rs); reuse `decode_path`'s SVG branch (which
+    // rasterizes at intrinsic size) and convert into a `DynamicImage` so crop/rotate/resize below
+    // are unchanged for every format. Raster formats keep the existing lazy `ImageReader` path.
+    let mut image = if is_svg_path(input) {
+        let decoded = decode_path(input)?;
+        image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+            .map(image::DynamicImage::ImageRgba8)
+            .ok_or_else(|| Error::Decode("invalid decoded image buffer".to_string()))?
+    } else {
+        let reader = image::ImageReader::open(input)
+            .map_err(|source| Error::Io {
+                path: input.to_path_buf(),
+                source,
+            })?
+            .with_guessed_format()
+            .map_err(|source| Error::Io {
+                path: input.to_path_buf(),
+                source,
+            })?;
+        reader.decode().map_err(map_image_error)?
+    };
 
     // 1. Crop (pixels on the decoded image), validated against the actual dimensions.
     if let Some((x, y, w, h)) = opts.crop {
@@ -124,9 +136,10 @@ pub fn convert_file(
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, q);
             encoder.encode_image(&rgb).map_err(map_image_error)
         }
-        _ => image
-            .save_with_format(output, target.to_image())
-            .map_err(map_image_error),
+        _ => {
+            let format = target.to_image().ok_or(Error::UnsupportedFormat)?;
+            image.save_with_format(output, format).map_err(map_image_error)
+        }
     }
 }
 
@@ -274,6 +287,57 @@ mod tests {
             low_size < high_size,
             "q=10 ({low_size}B) should be smaller than q=95 ({high_size}B)"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const SAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10">
+<rect width="20" height="10" fill="#ff6633"/>
+</svg>"##;
+
+    #[test]
+    fn convert_svg_to_png_uses_intrinsic_size() {
+        let dir = temp_dir("svg-to-png");
+        let src = dir.join("src.svg");
+        std::fs::write(&src, SAMPLE_SVG).unwrap();
+
+        let dst = dir.join("out.png");
+        convert_file(&src, &dst, SourceFormat::Png, &ConvertOptions::default()).unwrap();
+
+        let meta = crate::read_meta_path(&dst).unwrap();
+        assert_eq!(meta.format, SourceFormat::Png);
+        assert_eq!((meta.width, meta.height), (20, 10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn convert_svg_to_png_with_resize() {
+        let dir = temp_dir("svg-to-png-resize");
+        let src = dir.join("src.svg");
+        std::fs::write(&src, SAMPLE_SVG).unwrap();
+
+        let dst = dir.join("out.png");
+        let opts = ConvertOptions {
+            resize: Some((10, 10)),
+            ..Default::default()
+        };
+        convert_file(&src, &dst, SourceFormat::Png, &opts).unwrap();
+
+        let meta = crate::read_meta_path(&dst).unwrap();
+        // 20x10 fit within 10x10 -> 10x5 (aspect preserved), same as any other format.
+        assert_eq!((meta.width, meta.height), (10, 5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn convert_to_svg_is_rejected() {
+        let dir = temp_dir("to-svg-rejected");
+        let src = dir.join("src.png");
+        write_png(&src, 12, 9);
+
+        let dst = dir.join("out.svg");
+        let err = convert_file(&src, &dst, SourceFormat::Svg, &ConvertOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, Error::UnsupportedFormat));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

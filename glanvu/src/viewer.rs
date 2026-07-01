@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,8 +40,164 @@ use glanvu_viewer_core::thumb::{ThumbnailCache, THUMB_H, THUMB_W};
 /// Each visible tile needs up to 3 draw slots (bg + selection ring + thumbnail).
 const TILE_POOL: usize = 384;
 
+/// Small pool of MVP uniform buffers for compositing the SVG deep-zoom viewport quad (a dedicated
+/// pool so it never clashes with the grid/explorer's `tile_bufs`). Only one is used at a time.
+const SVG_TILE_POOL: usize = 4;
+
 /// How long the path overlay stays visible after an action.
 const OVERLAY_DURATION: Duration = Duration::from_millis(2000);
+
+/// Debounce before re-rasterizing an SVG at its new effective on-screen resolution, after
+/// zoom/fit/window-size settles. The GPU keeps scaling the last raster during the gesture itself
+/// (free); this just controls how long "at rest" means before paying for a sharp re-raster. See
+/// D11 in the decision log.
+const SVG_RERENDER_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// A request to re-rasterize an SVG: `(generation, path, target_w, target_h)`. `generation` lets
+/// the receiver discard results from a superseded request (the user zoomed again before the
+/// previous re-raster finished) instead of applying a stale texture.
+type SvgRerenderRequest = (u64, PathBuf, u32, u32);
+/// The background worker's reply: `(generation, path, decode result)`.
+type SvgRerenderResult = (u64, PathBuf, glanvu_core::Result<DecodedImage>);
+
+/// How often to poll for a completed background SVG re-raster while one is in flight (mirrors
+/// the grid-thumbnail-polling interval below).
+const SVG_RERENDER_POLL: Duration = Duration::from_millis(30);
+
+/// A single-slot "latest request wins" mailbox for the SVG re-raster worker.
+///
+/// This is deliberately *not* an `mpsc` queue: a queue would keep every superseded request (each
+/// zoom/fit settle while a re-raster is still running) and the single worker thread would have to
+/// churn through all of them in order before it could even look at the newest one — a backlog
+/// that stays on CPU and competes with, say, opening the next image, even though every stale job
+/// but the last is wasted work. With a single slot, posting a new request overwrites whatever
+/// hasn't been picked up yet, so the worker only ever computes the most recent one.
+struct SvgRerenderMailbox {
+    slot: std::sync::Mutex<Option<SvgRerenderRequest>>,
+    cv: std::sync::Condvar,
+}
+
+impl SvgRerenderMailbox {
+    fn new() -> Self {
+        SvgRerenderMailbox {
+            slot: std::sync::Mutex::new(None),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Replace the pending request (dropping whatever hasn't been picked up yet) and wake the
+    /// worker.
+    fn post(&self, req: SvgRerenderRequest) {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(req);
+        }
+        self.cv.notify_one();
+    }
+
+    /// Block until a request is posted, then take it (clearing the slot). Returns `None` only if
+    /// the mutex is poisoned (a panic elsewhere while holding it) — the worker exits cleanly.
+    fn take_blocking(&self) -> Option<SvgRerenderRequest> {
+        let mut slot = self.slot.lock().ok()?;
+        while slot.is_none() {
+            slot = self.cv.wait(slot).ok()?;
+        }
+        slot.take()
+    }
+}
+
+/// Spawn the SVG re-raster background worker. Returns the mailbox to post requests to and the
+/// reply channel to poll for results — decoding runs off the UI thread so a large/complex SVG
+/// can't stall zoom or redraw (mirrors `FolderNav::new`'s prefetch worker in `nav.rs`, which
+/// keeps decode work off the UI thread the same way; that one *is* a plain FIFO queue because
+/// prefetch requests are cheap and never superseded the way a rapid-fire zoom is).
+fn spawn_svg_rerender_worker() -> (Arc<SvgRerenderMailbox>, Receiver<SvgRerenderResult>) {
+    let mailbox = Arc::new(SvgRerenderMailbox::new());
+    let worker_mailbox = Arc::clone(&mailbox);
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<SvgRerenderResult>();
+    std::thread::spawn(move || {
+        while let Some((gen, path, w, h)) = worker_mailbox.take_blocking() {
+            let result = glanvu_core::decode_svg_at_size(&path, w, h);
+            if res_tx.send((gen, path, result)).is_err() {
+                break;
+            }
+        }
+    });
+    (mailbox, res_rx)
+}
+
+// ── SVG deep-zoom tile worker ──────────────────────────────────────────────────────────────────
+//
+// Unlike the whole-image base re-raster (latest-wins mailbox above), tiling needs MANY tiles per
+// zoom epoch rendered off the UI thread, so this is a FIFO queue of jobs. Each job carries an
+// `Arc<SvgDocument>` (parsed once on load) so tiles render without re-parsing. Stale-epoch jobs are
+// dropped on receipt; the queue is cleared when the epoch changes.
+
+/// A tile render job: `(epoch, col, row)` key, image-space region, output pixel size, document.
+struct TileJob {
+    epoch: u64,
+    col: i32,
+    row: i32,
+    region: (f32, f32, f32, f32),
+    out: (u32, u32),
+    doc: Arc<glanvu_core::SvgDocument>,
+}
+
+/// A rendered tile reply: `(epoch, col, row, result)`.
+type TileResult = (u64, i32, i32, glanvu_core::Result<DecodedImage>);
+
+/// FIFO job queue for the tile worker; `clear` drops all pending jobs when the epoch changes.
+struct TileQueue {
+    jobs: std::sync::Mutex<std::collections::VecDeque<TileJob>>,
+    cv: std::sync::Condvar,
+}
+
+impl TileQueue {
+    fn new() -> Self {
+        TileQueue {
+            jobs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn push(&self, job: TileJob) {
+        if let Ok(mut q) = self.jobs.lock() {
+            q.push_back(job);
+        }
+        self.cv.notify_one();
+    }
+
+    /// Drop all pending jobs (called when the zoom epoch changes; in-flight jobs still reply but
+    /// are discarded by epoch on receipt).
+    fn clear(&self) {
+        if let Ok(mut q) = self.jobs.lock() {
+            q.clear();
+        }
+    }
+
+    fn pop_blocking(&self) -> Option<TileJob> {
+        let mut q = self.jobs.lock().ok()?;
+        while q.is_empty() {
+            q = self.cv.wait(q).ok()?;
+        }
+        q.pop_front()
+    }
+}
+
+fn spawn_tile_worker() -> (Arc<TileQueue>, Receiver<TileResult>) {
+    let queue = Arc::new(TileQueue::new());
+    let worker_queue = Arc::clone(&queue);
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<TileResult>();
+    std::thread::spawn(move || {
+        while let Some(job) = worker_queue.pop_blocking() {
+            let (rx, ry, rw, rh) = job.region;
+            let result = job.doc.render_region(rx, ry, rw, rh, job.out.0, job.out.1);
+            if res_tx.send((job.epoch, job.col, job.row, result)).is_err() {
+                break;
+            }
+        }
+    });
+    (queue, res_rx)
+}
 
 /// Whether to print timing diagnostics (set `GLANVU_PERF=1`). Off by default so runs stay quiet.
 fn perf_logging() -> bool {
@@ -226,6 +383,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Downsampling blit used to build each mipmap level from the previous one. Draws a single
+/// full-screen triangle (no vertex buffer) and copies the bound source texture into the target
+/// mip via the linear sampler — a 2× box-ish reduction per level.
+const MIP_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    out.uv = vec2<f32>(x, y);
+    out.clip = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(src, samp, in.uv);
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // Vertex / uniform types
 // ---------------------------------------------------------------------------
@@ -286,10 +471,12 @@ impl ViewState {
     }
 }
 
-/// MVP matrix mapping the unit quad to clip space (image transform, y-up center origin).
-fn mvp(img: (u32, u32), win: (f32, f32), st: &ViewState) -> [[f32; 4]; 4] {
+/// Effective on-screen scale in screen-px per image-px: the fit-to-window base × user `zoom`.
+/// Shared by `mvp`, the visible-region math, and the SVG tile grid so they stay consistent.
+fn image_scale(img: (u32, u32), win: (f32, f32), st: &ViewState) -> f32 {
     let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
     let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
+    // Rotation by an odd number of quarter-turns swaps which image axis maps to which window axis.
     let (bw, bh) = if st.quarter_turns % 2 == 1 {
         (ih, iw)
     } else {
@@ -300,8 +487,123 @@ fn mvp(img: (u32, u32), win: (f32, f32), st: &ViewState) -> [[f32; 4]; 4] {
     } else {
         1.0
     };
-    let scale = base * st.zoom;
+    base * st.zoom
+}
+
+/// The fit-to-window scale (screen-px per image-px when the whole image just fills the window),
+/// independent of `zoom`/`fit`. This is the resolution the whole-image base layer is rendered at,
+/// and the reference for deciding when to switch to viewport tiles (`image_scale` beyond it means
+/// the base can't provide screen resolution for the zoomed-in view).
+fn fit_scale(img: (u32, u32), win: (f32, f32), quarter_turns: u32) -> f32 {
+    let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
+    let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
+    let (bw, bh) = if quarter_turns % 2 == 1 {
+        (ih, iw)
+    } else {
+        (iw, ih)
+    };
+    (win_w / bw).min(win_h / bh)
+}
+
+/// MVP matrix mapping the unit quad to clip space (image transform, y-up center origin).
+fn mvp(img: (u32, u32), win: (f32, f32), st: &ViewState) -> [[f32; 4]; 4] {
+    let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
+    let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
+    let scale = image_scale(img, win, st);
     let model = Mat4::from_scale(Vec3::new(iw * scale, ih * scale, 1.0));
+    let rot = Mat4::from_rotation_z(st.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
+    let trans = Mat4::from_translation(Vec3::new(st.pan.0, st.pan.1, 0.0));
+    let proj = Mat4::from_scale(Vec3::new(2.0 / win_w, 2.0 / win_h, 1.0));
+    (proj * trans * rot * model).to_cols_array_2d()
+}
+
+/// Fraction the visible rect is padded by when choosing the SVG viewport render region, so small
+/// pans stay within the already-rendered texture (free) instead of triggering a re-render.
+const SVG_VP_PAD: f32 = 0.20;
+
+/// Cap on the SVG viewport render scale (output px per image px). resvg rasterizes the whole tree
+/// — every filter/blur — at the target scale, and blur cost grows ~scale⁴, so an uncapped deep
+/// zoom on a filter-heavy SVG takes tens of seconds for one render. Above this cap we render at
+/// the cap and let the GPU magnify (blurs upscale smoothly; only ultra-fine edges soften), which
+/// keeps a render to ~1s. Below it (up to ~`cap/fit`× zoom) rendering is at true screen resolution.
+const SVG_MAX_RENDER_SCALE: f32 = 10.0;
+
+/// Expand `rect` (image px) by `pad` on each side, clamped to the image bounds `[0,iw]×[0,ih]`.
+fn pad_region(rect: (f32, f32, f32, f32), pad: f32, img: (u32, u32)) -> (f32, f32, f32, f32) {
+    let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
+    let (x, y, w, h) = rect;
+    let (px, py) = (w * pad, h * pad);
+    let x0 = (x - px).max(0.0);
+    let y0 = (y - py).max(0.0);
+    let x1 = (x + w + px).min(iw);
+    let y1 = (y + h + py).min(ih);
+    (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+}
+
+/// Whether `outer` fully contains `inner` (both `(x, y, w, h)` in image px), with a tiny epsilon.
+fn region_covers(outer: (f32, f32, f32, f32), inner: (f32, f32, f32, f32)) -> bool {
+    let e = 0.5;
+    outer.0 <= inner.0 + e
+        && outer.1 <= inner.1 + e
+        && outer.0 + outer.2 + e >= inner.0 + inner.2
+        && outer.1 + outer.3 + e >= inner.1 + inner.3
+}
+
+/// The axis-aligned image-space rectangle `(x, y, w, h)` (image px) currently visible on screen.
+///
+/// Inverts the `mvp` transform for the four window corners and takes their bounding box; because
+/// rotation is always a multiple of 90°, the visible region stays axis-aligned in image space, so
+/// the bounding box is exact. Clamped to `[0, iw] × [0, ih]`.
+fn visible_image_rect(img: (u32, u32), win: (f32, f32), st: &ViewState) -> (f32, f32, f32, f32) {
+    let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
+    let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
+    let s = image_scale(img, win, st).max(f32::EPSILON);
+    // Inverse rotation (undo `rot` from the forward chain).
+    let inv = -(st.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
+    let (ca, sa) = (inv.cos(), inv.sin());
+    let corners = [
+        (-win_w / 2.0, -win_h / 2.0),
+        (win_w / 2.0, -win_h / 2.0),
+        (win_w / 2.0, win_h / 2.0),
+        (-win_w / 2.0, win_h / 2.0),
+    ];
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (cx, cy) in corners {
+        // Undo translate (pan), then rotation, then the center/y-flip/scale of the model.
+        let (mx, my) = (cx - st.pan.0, cy - st.pan.1);
+        let (rx, ry) = (mx * ca - my * sa, mx * sa + my * ca);
+        let fx = rx / s + iw / 2.0;
+        let fy = ih / 2.0 - ry / s;
+        x0 = x0.min(fx);
+        x1 = x1.max(fx);
+        y0 = y0.min(fy);
+        y1 = y1.max(fy);
+    }
+    let x0 = x0.clamp(0.0, iw);
+    let y0 = y0.clamp(0.0, ih);
+    let x1 = x1.clamp(0.0, iw);
+    let y1 = y1.clamp(0.0, ih);
+    (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+}
+
+/// A composited SVG viewport render: its MVP and the cache key of its texture (in `svg_tile_tex`).
+struct SvgTileDraw {
+    mvp: [[f32; 4]; 4],
+    key: (u64, i32, i32),
+}
+
+/// MVP for a single tile's quad, placing image-space sub-rect `tile` using the *same* view /
+/// projection as `mvp` so tiles line up exactly on top of the whole-image base layer.
+fn tile_mvp(img: (u32, u32), tile: (f32, f32, f32, f32), win: (f32, f32), st: &ViewState) -> [[f32; 4]; 4] {
+    let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
+    let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
+    let s = image_scale(img, win, st);
+    let (rx, ry, rw, rh) = tile;
+    // Tile center in the model's center-origin, y-up pixel space.
+    let cx = (rx + rw / 2.0 - iw / 2.0) * s;
+    let cy = (ih / 2.0 - (ry + rh / 2.0)) * s;
+    let model = Mat4::from_translation(Vec3::new(cx, cy, 0.0))
+        * Mat4::from_scale(Vec3::new(rw * s, rh * s, 1.0));
     let rot = Mat4::from_rotation_z(st.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
     let trans = Mat4::from_translation(Vec3::new(st.pan.0, st.pan.1, 0.0));
     let proj = Mat4::from_scale(Vec3::new(2.0 / win_w, 2.0 / win_h, 1.0));
@@ -391,6 +693,147 @@ fn build_texture_bind(
     })
 }
 
+/// Number of mipmap levels for a `w × h` texture: `floor(log2(max(w, h))) + 1`.
+fn mip_level_count(w: u32, h: u32) -> u32 {
+    32 - w.max(h).max(1).leading_zeros()
+}
+
+/// Like [`build_texture_bind`], but for the main image: builds a full mipmap chain so the image
+/// stays crisp when minified to fit the window or zoomed out (the sampler is trilinear). Small
+/// textures (≤1 px in either axis) get a single level and skip generation. `mip_pipeline` is the
+/// downsampling blit pipeline created in `Gpu::new`.
+fn build_image_texture_bind(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    mip_pipeline: &wgpu::RenderPipeline,
+    srgb: bool,
+    image: &DecodedImage,
+) -> wgpu::BindGroup {
+    let format = if srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    };
+    let (w, h) = (image.width.max(1), image.height.max(1));
+    let levels = mip_level_count(w, h);
+    let extent = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    // RENDER_ATTACHMENT is needed so `generate_mipmaps` can render into levels 1..n.
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::RENDER_ATTACHMENT;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glanvu image texture"),
+        size: extent,
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    });
+    // Upload the full-resolution pixels into mip level 0.
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * w),
+            rows_per_image: Some(h),
+        },
+        extent,
+    );
+    if levels > 1 {
+        generate_mipmaps(device, queue, mip_pipeline, layout, sampler, &texture, levels);
+    }
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("image texture bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// Fill mip levels `1..levels` by rendering each one from the previous level with the
+/// downsampling blit pipeline (a full-screen triangle sampled through the linear `sampler`).
+fn generate_mipmaps(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mip_pipeline: &wgpu::RenderPipeline,
+    src_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    texture: &wgpu::Texture,
+    levels: u32,
+) {
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mipmaps") });
+    // Per-level views, each covering exactly one mip level.
+    let views: Vec<wgpu::TextureView> = (0..levels)
+        .map(|level| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    for target in 1..levels as usize {
+        let src_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mip src bind"),
+            layout: src_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&views[target - 1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mip pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &views[target],
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(mip_pipeline);
+        pass.set_bind_group(0, &src_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
 fn make_uniform_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("glanvu uniforms"),
@@ -445,6 +888,8 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// Blit pipeline that builds each mipmap level from the previous one (see `generate_mipmaps`).
+    mip_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
@@ -543,6 +988,11 @@ struct Gpu {
     info_text_cache: String,
     // GPU-uploaded thumbnails keyed by path.
     thumb_binds: std::collections::HashMap<PathBuf, wgpu::BindGroup>,
+    // SVG deep-zoom tiles: cached tile textures keyed by (epoch, col, row) with a last-used tick
+    // for LRU eviction, plus a dedicated pool of per-tile MVP uniform buffers for compositing.
+    svg_tile_tex: std::collections::HashMap<(u64, i32, i32), (wgpu::BindGroup, u64)>,
+    svg_tile_mvp_bufs: Vec<wgpu::Buffer>,
+    svg_tile_mvp_binds: Vec<wgpu::BindGroup>,
     // Explorer panel: per-item text buffers (index 0 = header, 1..n = entries) + solid textures.
     explorer_item_bufs: Vec<TextBuffer>,
     explorer_text_cache: String,
@@ -594,6 +1044,9 @@ impl Gpu {
             label: Some("glanvu sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Trilinear: blend across the mipmap chain when the image is minified to fit/zoom-out,
+            // so downscaled large images stay crisp instead of aliasing from a single texel tap.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
@@ -634,10 +1087,60 @@ impl Gpu {
             ],
         });
 
+        // Mipmap-generation blit pipeline. Its bind group (source mip + sampler) has the same
+        // shape as `texture_layout`, so we reuse that layout for the source. The color target is
+        // the image texture's own format so downsampling is gamma-correct for sRGB textures.
+        let image_format = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glanvu mip shader"),
+            source: wgpu::ShaderSource::Wgsl(MIP_SHADER.into()),
+        });
+        let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glanvu mip pipeline layout"),
+            bind_group_layouts: &[Some(&texture_layout)],
+            immediate_size: 0,
+        });
+        let mip_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glanvu mip pipeline"),
+            layout: Some(&mip_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &mip_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &mip_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: image_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let uniform_buf = make_uniform_buffer(&device);
         let uniform_bind = make_uniform_bind(&device, &uniform_layout, &uniform_buf);
-        let texture_bind =
-            build_texture_bind(&device, &queue, &texture_layout, &sampler, srgb, image);
+        let texture_bind = build_image_texture_bind(
+            &device,
+            &queue,
+            &texture_layout,
+            &sampler,
+            &mip_pipeline,
+            srgb,
+            image,
+        );
 
         let box_uniform_buf = make_uniform_buffer(&device);
         let box_uniform_bind = make_uniform_bind(&device, &uniform_layout, &box_uniform_buf);
@@ -737,6 +1240,15 @@ impl Gpu {
             let bind = make_uniform_bind(&device, &ul, &buf);
             tile_bufs.push(buf);
             tile_binds.push(bind);
+        }
+        // Dedicated MVP-uniform pool for compositing SVG deep-zoom tiles (reuses the same layout).
+        let mut svg_tile_mvp_bufs = Vec::with_capacity(SVG_TILE_POOL);
+        let mut svg_tile_mvp_binds = Vec::with_capacity(SVG_TILE_POOL);
+        for _ in 0..SVG_TILE_POOL {
+            let buf = make_uniform_buffer(&device);
+            let bind = make_uniform_bind(&device, &ul, &buf);
+            svg_tile_mvp_bufs.push(buf);
+            svg_tile_mvp_binds.push(bind);
         }
         // Solid-color textures: dark bg, blue selection, mid-grey placeholder.
         let cell_bg = DecodedImage {
@@ -863,6 +1375,7 @@ impl Gpu {
             queue,
             config,
             pipeline,
+            mip_pipeline,
             texture_layout,
             sampler,
             uniform_buf,
@@ -938,6 +1451,9 @@ impl Gpu {
             info_line_h: 22.0,
             info_text_cache: String::new(),
             thumb_binds: std::collections::HashMap::new(),
+            svg_tile_tex: std::collections::HashMap::new(),
+            svg_tile_mvp_bufs,
+            svg_tile_mvp_binds,
             explorer_item_bufs: Vec::new(),
             explorer_text_cache: String::new(),
             explorer_layout_scale: -1.0,
@@ -949,11 +1465,12 @@ impl Gpu {
     }
 
     fn set_image(&mut self, image: &DecodedImage) {
-        self.texture_bind = build_texture_bind(
+        self.texture_bind = build_image_texture_bind(
             &self.device,
             &self.queue,
             &self.texture_layout,
             &self.sampler,
+            &self.mip_pipeline,
             self.config.format.is_srgb(),
             image,
         );
@@ -1508,9 +2025,20 @@ impl Gpu {
         info: Option<&str>,
         scale: f32,
         logo: bool,
+        svg_tiles: &[SvgTileDraw],
     ) -> bool {
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+
+        // Pre-write the MVP uniform for each composited SVG tile (bounded by the pool).
+        let svg_tile_count = svg_tiles.len().min(self.svg_tile_mvp_bufs.len());
+        for (i, tile) in svg_tiles.iter().take(svg_tile_count).enumerate() {
+            self.queue.write_buffer(
+                &self.svg_tile_mvp_bufs[i],
+                0,
+                bytemuck::bytes_of(&Uniforms { mvp: tile.mvp }),
+            );
+        }
 
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
 
@@ -2174,10 +2702,19 @@ impl Gpu {
             pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
             pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint16);
 
-            // 1. Image.
+            // 1. Image (whole-image base layer).
             pass.set_bind_group(0, &self.uniform_bind, &[]);
             pass.set_bind_group(1, &self.texture_bind, &[]);
             pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+
+            // 1a. SVG deep-zoom tiles composited on top of the base for the visible region.
+            for (i, tile) in svg_tiles.iter().take(svg_tile_count).enumerate() {
+                if let Some((tex_bind, _)) = self.svg_tile_tex.get(&tile.key) {
+                    pass.set_bind_group(0, &self.svg_tile_mvp_binds[i], &[]);
+                    pass.set_bind_group(1, tex_bind, &[]);
+                    pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+                }
+            }
 
             // 1b. Watermark logo (empty state only).
             if logo {
@@ -2279,6 +2816,26 @@ impl Gpu {
             img,
         );
         self.thumb_binds.insert(path, bind);
+    }
+
+    // --- SVG deep-zoom viewport texture -------------------------------------
+
+    /// Upload the freshly-rendered viewport texture, keyed by its request generation.
+    fn upload_svg_tile(&mut self, key: (u64, i32, i32), img: &DecodedImage, gen: u64) {
+        let bind = build_texture_bind(
+            &self.device,
+            &self.queue,
+            &self.texture_layout,
+            &self.sampler,
+            self.config.format.is_srgb(),
+            img,
+        );
+        self.svg_tile_tex.insert(key, (bind, gen));
+    }
+
+    /// Drop the cached viewport texture (on image change or when zooming back out to fit).
+    fn clear_svg_tiles(&mut self) {
+        self.svg_tile_tex.clear();
     }
 
     /// Render the thumbnail grid. Returns whether a frame was presented.
@@ -2697,13 +3254,54 @@ struct App {
     sort_mode: glanvu_viewer_core::nav::SortMode,
     /// Cached mtime string for the date overlay (updated when the path overlay fires).
     date_text: String,
+    /// Whether the current image is SVG — gates the crisp re-raster-on-settle behavior (D11).
+    current_is_svg: bool,
+    /// When `Some(t)`, the current SVG is re-rasterized at its new effective on-screen resolution
+    /// at time `t`. Reset on every zoom/fit/window-resize change while viewing an SVG.
+    svg_rerender_at: Option<Instant>,
+    /// Generation of the most recently *issued* SVG re-raster request. Bumped each time one is
+    /// sent to the background worker so a late reply from a superseded request can be dropped.
+    svg_rerender_gen: u64,
+    /// Whether a background SVG re-raster is currently running (drives the fast poll interval).
+    svg_rerender_inflight: bool,
+    /// Mailbox for the SVG re-raster worker thread — decoding/rasterizing runs off the UI thread
+    /// so a large or complex SVG doesn't stall zoom/redraw, and a single-slot mailbox (not a
+    /// queue) means switching images or zooming again never leaves a backlog of stale jobs
+    /// running behind the scenes (see the performance note in the decision log, D11 follow-up).
+    svg_rerender_mailbox: Arc<SvgRerenderMailbox>,
+    svg_rerender_rx: Receiver<SvgRerenderResult>,
+    // ── SVG deep-zoom: single viewport render ──
+    //
+    // When zoomed in past fit, render ONLY the visible region (+ a pad margin) at screen resolution
+    // in a single pass, composited over the fit-resolution base. One render per settle — NOT a tile
+    // grid: resvg re-renders the whole tree (all filters/gradients) per call regardless of clip, so
+    // a grid would multiply that cost by the tile count (catastrophic for filter-heavy SVGs).
+    // Panning within the padded region is free; panning beyond it (or zooming) re-renders.
+    /// Parsed current SVG (kept in memory so the viewport renders without re-parsing). `None` for
+    /// raster images.
+    svg_doc: Option<Arc<glanvu_core::SvgDocument>>,
+    /// Image-space region + scale of the currently CACHED viewport texture (in `gpu.svg_tile_tex`,
+    /// keyed by `svg_vp_key`). `None` until the first viewport render arrives.
+    svg_vp_region: Option<(f32, f32, f32, f32)>,
+    svg_vp_scale: f32,
+    svg_vp_key: (u64, i32, i32),
+    /// Region + scale of the in-flight viewport render (matched to its worker reply by generation).
+    svg_vp_pending: Option<(f32, f32, f32, f32, f32)>,
+    /// Generation of the most recent viewport render request (worker replies carry it in `epoch`).
+    svg_vp_gen: u64,
+    /// Last on-screen scale seen, and when it last changed — a scale change re-renders only after
+    /// settling (debounced); panning (same scale) re-renders immediately when coverage is lost.
+    svg_vp_last_scale: f32,
+    svg_vp_settled_at: Instant,
+    tile_queue: Arc<TileQueue>,
+    tile_rx: Receiver<TileResult>,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
 /// Text for the D-key confirmation overlay. `set` = true → set as default; false → unset.
 fn confirm_overlay_text(set: bool) -> &'static str {
     if set {
-        "Set Glanvu as default?\n\njpg  jpeg  png  gif\nbmp  tif   tiff webp\n\nEnter = confirm   Esc = cancel"
+        "Set Glanvu as default?\n\njpg  jpeg  png  gif\nbmp  tif   tiff webp  svg\n\nEnter = confirm   Esc = cancel"
     } else {
         "Restore previous defaults?\n\nGlanvu won't open images\nby default anymore.\n\nEnter = confirm   Esc = cancel"
     }
@@ -2803,6 +3401,158 @@ impl App {
             .current_path()
             .and_then(mtime_string)
             .unwrap_or_default();
+    }
+
+    /// Zoom by `factor` (`zoom *= factor`), keeping the point under the cursor fixed on screen —
+    /// mouse-wheel zoom should anchor to the pointer, not the image center. `pan` lives in the
+    /// same center-origin, y-up space `mvp()` applies it in (see `CursorMoved`'s drag-pan, which
+    /// uses this same convention); the fixed-point adjustment is the standard
+    /// `pan' = p + (pan - p) * factor` (rotation and `fit`'s base scale cancel out of the
+    /// derivation, since `pan` is applied after both in the transform chain).
+    fn zoom_at_cursor(&mut self, factor: f32) {
+        let (win_w, win_h) = self.win_size();
+        let px = self.cursor.x as f32 - win_w / 2.0;
+        let py = win_h / 2.0 - self.cursor.y as f32;
+        self.state.zoom *= factor;
+        self.state.pan.0 = px + (self.state.pan.0 - px) * factor;
+        self.state.pan.1 = py + (self.state.pan.1 - py) * factor;
+        self.schedule_svg_rerender();
+    }
+
+    /// Schedule a crisp SVG re-raster once zoom/fit/window-size settles, if the current image is
+    /// SVG. No-op for raster formats — the GPU already scales those textures smoothly. Called
+    /// from every zoom/fit/resize mutation site; see `about_to_wait` for the debounced re-raster.
+    fn schedule_svg_rerender(&mut self) {
+        if self.current_is_svg {
+            self.svg_rerender_at = Some(Instant::now() + SVG_RERENDER_DEBOUNCE);
+        }
+    }
+
+    /// (Re)load the parsed SVG document for the current image and invalidate the tile cache. Called
+    /// whenever the current image changes. `None` for raster images.
+    fn refresh_svg_doc(&mut self) {
+        self.svg_doc = if self.current_is_svg {
+            self.nav
+                .current_path()
+                .and_then(|p| glanvu_core::SvgDocument::load(p).ok())
+                .map(Arc::new)
+        } else {
+            None
+        };
+        // New image → the cached viewport render is meaningless. Reset viewport state.
+        self.svg_vp_region = None;
+        self.svg_vp_pending = None;
+        self.svg_vp_last_scale = 0.0;
+        self.tile_queue.clear();
+        if let Some(g) = self.gpu.as_mut() {
+            g.clear_svg_tiles();
+        }
+    }
+
+    /// The SVG deep-zoom viewport quad to composite this frame: a draw for the currently CACHED
+    /// viewport texture (if any), placed at its image-space region over the base. Pure/read-only —
+    /// the scheduling of new renders lives in `plan_svg_viewport` (timer-driven from
+    /// `about_to_wait`), so it fires even when the app is idle after a zoom settles.
+    fn svg_tile_draws(&self, win: (f32, f32)) -> Vec<SvgTileDraw> {
+        if !self.current_is_svg {
+            return Vec::new();
+        }
+        match self.svg_vp_region {
+            Some(region) => vec![SvgTileDraw {
+                mvp: tile_mvp(self.img_size, region, win, &self.state),
+                key: self.svg_vp_key,
+            }],
+            None => Vec::new(),
+        }
+    }
+
+    /// Decide whether to (re)render the SVG deep-zoom viewport, and enqueue it if so. Runs every
+    /// `about_to_wait` (not just on draw) so a render fires after the zoom-settle debounce even
+    /// while idle. Returns a wakeup deadline while debouncing so the loop re-checks after settle.
+    ///
+    /// One render per settle — never a tile grid: resvg re-renders the whole tree per call
+    /// regardless of clip, so tiling would multiply that cost by the tile count.
+    fn plan_svg_viewport(&mut self, win: (f32, f32)) -> Option<Instant> {
+        if !self.current_is_svg {
+            self.discard_svg_viewport();
+            return None;
+        }
+        let Some(doc) = self.svg_doc.clone() else {
+            self.discard_svg_viewport();
+            return None;
+        };
+        let img = self.img_size;
+        let s = image_scale(img, win, &self.state);
+
+        // Active only when zoomed in past fit — otherwise the fit-resolution base covers everything.
+        let fit = fit_scale(img, win, self.state.quarter_turns);
+        if s <= fit * 1.05 {
+            self.discard_svg_viewport();
+            self.svg_vp_last_scale = 0.0;
+            return None;
+        }
+
+        // Debounce re-render on scale change (a zoom gesture shows the stretched base meanwhile);
+        // pan keeps the same scale so its coverage-driven re-render fires immediately.
+        if (self.svg_vp_last_scale - s).abs() > f32::EPSILON {
+            self.svg_vp_last_scale = s;
+            self.svg_vp_settled_at = Instant::now();
+        }
+        let elapsed = self.svg_vp_settled_at.elapsed();
+        if elapsed < SVG_RERENDER_DEBOUNCE {
+            // Wake up once the scale settles so this runs again to enqueue.
+            return Some(self.svg_vp_settled_at + SVG_RERENDER_DEBOUNCE);
+        }
+
+        let vis = visible_image_rect(img, win, &self.state);
+        let cached_ok = match self.svg_vp_region {
+            Some(r) => (self.svg_vp_scale - s).abs() <= f32::EPSILON && region_covers(r, vis),
+            None => false,
+        };
+        let pending_ok = match self.svg_vp_pending {
+            Some((x, y, w, h, ps)) => {
+                (ps - s).abs() <= f32::EPSILON && region_covers((x, y, w, h), vis)
+            }
+            None => false,
+        };
+        if !cached_ok && !pending_ok {
+            let target = pad_region(vis, SVG_VP_PAD, img);
+            let max_dim = self
+                .gpu
+                .as_ref()
+                .map(|g| g.device.limits().max_texture_dimension_2d)
+                .unwrap_or(8192);
+            // Render at the true on-screen scale, but capped (blur cost ~scale⁴): above the cap the
+            // texture is rendered coarser and the GPU magnifies it (see `SVG_MAX_RENDER_SCALE`).
+            let render_scale = s.min(SVG_MAX_RENDER_SCALE);
+            let ow = ((target.2 * render_scale).round() as u32).clamp(1, max_dim);
+            let oh = ((target.3 * render_scale).round() as u32).clamp(1, max_dim);
+            self.svg_vp_gen = self.svg_vp_gen.wrapping_add(1);
+            self.svg_vp_pending = Some((target.0, target.1, target.2, target.3, s));
+            self.tile_queue.clear();
+            self.tile_queue.push(TileJob {
+                epoch: self.svg_vp_gen,
+                col: 0,
+                row: 0,
+                region: (target.0, target.1, target.2, target.3),
+                out: (ow, oh),
+                doc,
+            });
+        }
+        None
+    }
+
+    /// Drop any cached/pending SVG viewport render (image changed, or zoomed back out to fit).
+    fn discard_svg_viewport(&mut self) {
+        if self.svg_vp_region.is_some() || self.svg_vp_pending.is_some() {
+            self.tile_queue.clear();
+            if let Some(g) = self.gpu.as_mut() {
+                g.clear_svg_tiles();
+            }
+            self.redraw();
+        }
+        self.svg_vp_region = None;
+        self.svg_vp_pending = None;
     }
 
     fn toggle_slideshow(&mut self) {
@@ -3522,10 +4272,17 @@ impl App {
 
     fn apply_nav_result(&mut self, res: glanvu_viewer_core::nav::ShowResult) {
         self.img_size = res.img_size;
+        self.current_is_svg = glanvu_core::is_svg_path(&res.path);
         if let (Some(gpu), Some(img)) = (self.gpu.as_mut(), self.nav.current_image()) {
             gpu.set_image(img);
         }
         self.state = ViewState::fit();
+        // The nav/prefetch decode rasterizes an SVG at its *intrinsic* size, which is blurry when
+        // fit into a window larger than that (e.g. opening an SVG in an already-enlarged window).
+        // Schedule an immediate crisp re-raster at the actual on-screen size. Raster images are
+        // already full-res (mipmaps handle minification), so nothing is pending for them.
+        self.svg_rerender_at = self.current_is_svg.then(Instant::now);
+        self.refresh_svg_doc();
         self.update_title(res.index, res.total, &res.path);
         self.flash_overlay();
 
@@ -3601,6 +4358,7 @@ impl App {
                 None, // no image in empty mode → no info panel
                 scale,
                 true,
+                &[], // no SVG tiles in the empty state
             );
             return;
         }
@@ -3662,6 +4420,14 @@ impl App {
 
         // Single-image mode (original path).
         let now = Instant::now();
+        // SVG deep-zoom tiles: compute first (it needs `&mut self` to enqueue/touch), before the
+        // immutable-borrow overlay locals below. Empty for raster / low zoom (see `svg_tile_draws`).
+        let win_phys = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.config.width as f32, g.config.height as f32))
+            .unwrap_or((800.0, 600.0));
+        let svg_tile_draws = self.svg_tile_draws(win_phys);
         let overlay_active = matches!(self.overlay_until, Some(t) if now < t);
         let overlay = if overlay_active {
             self.nav.current_path().map(|p| p.display().to_string())
@@ -3708,6 +4474,7 @@ impl App {
             info.as_deref(),
             scale,
             false,
+            &svg_tile_draws,
         );
         if presented {
             if !self.first_frame {
@@ -3748,6 +4515,10 @@ impl ApplicationHandler for App {
         }
         self.flash_overlay();
         self.nav.prune_and_prefetch();
+        // The initial image is rasterized at its intrinsic size; for an SVG whose intrinsic size
+        // is smaller than the (min-clamped) window, fit magnifies it. Re-raster at window size.
+        self.svg_rerender_at = self.current_is_svg.then(Instant::now);
+        self.refresh_svg_doc();
         self.draw();
         self.redraw();
     }
@@ -3771,6 +4542,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
+                }
+                // In fit mode the effective on-screen scale changes with the window size.
+                if self.state.fit {
+                    self.schedule_svg_rerender();
                 }
                 self.redraw();
             }
@@ -4307,20 +5082,24 @@ impl ApplicationHandler for App {
                     }
                     Key::Character("0") => {
                         self.state = ViewState::fit();
+                        self.schedule_svg_rerender();
                         self.redraw();
                     }
                     Key::Character("1") => {
                         self.state.fit = false;
                         self.state.zoom = 1.0;
                         self.state.pan = (0.0, 0.0);
+                        self.schedule_svg_rerender();
                         self.redraw();
                     }
                     Key::Character("+") | Key::Character("=") => {
                         self.state.zoom *= 1.25;
+                        self.schedule_svg_rerender();
                         self.redraw();
                     }
                     Key::Character("-") | Key::Character("_") => {
                         self.state.zoom /= 1.25;
+                        self.schedule_svg_rerender();
                         self.redraw();
                     }
                     Key::Character("s") | Key::Character("S") => {
@@ -4400,7 +5179,7 @@ impl ApplicationHandler for App {
                         let max_s = (GridState::total_height(n, win_w) - win_h).max(0.0);
                         self.grid.scroll_y = self.grid.scroll_y.clamp(0.0, max_s);
                     } else {
-                        self.state.zoom *= 1.1_f32.powf(dy);
+                        self.zoom_at_cursor(1.1_f32.powf(dy));
                     }
                     self.redraw();
                 }
@@ -4662,10 +5441,107 @@ impl ApplicationHandler for App {
             }
         }
 
-        let deadline = [self.overlay_until, self.slideshow_next, self.status_until]
-            .into_iter()
-            .flatten()
-            .min();
+        // Apply any completed background SVG re-raster (decoding runs off the UI thread — see
+        // `spawn_svg_rerender_worker` — so a large/complex SVG can't stall zoom or redraw).
+        // Discard replies whose generation is stale (superseded by a newer request) or that
+        // arrive after navigating away from that image.
+        while let Ok((gen, path, result)) = self.svg_rerender_rx.try_recv() {
+            if gen != self.svg_rerender_gen {
+                continue;
+            }
+            self.svg_rerender_inflight = false;
+            if !self.current_is_svg || self.nav.current_path() != Some(&path) {
+                continue;
+            }
+            match result {
+                Ok(img) => {
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.set_image(&img);
+                    }
+                    self.redraw();
+                }
+                Err(e) => {
+                    eprintln!("glanvu: SVG re-raster failed for {}: {e}", path.display());
+                }
+            }
+        }
+
+        // Apply the completed SVG viewport render (ignore replies from superseded requests).
+        while let Ok((gen, col, row, result)) = self.tile_rx.try_recv() {
+            if gen != self.svg_vp_gen {
+                continue;
+            }
+            let Some((rx, ry, rw, rh, ps)) = self.svg_vp_pending else {
+                continue;
+            };
+            self.svg_vp_pending = None;
+            match result {
+                Ok(img) => {
+                    let key = (gen, col, row);
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.clear_svg_tiles(); // keep only the newest viewport texture
+                        gpu.upload_svg_tile(key, &img, gen);
+                    }
+                    self.svg_vp_region = Some((rx, ry, rw, rh));
+                    self.svg_vp_scale = ps;
+                    self.svg_vp_key = key;
+                    self.redraw();
+                }
+                Err(e) => eprintln!("glanvu: SVG viewport render failed: {e}"),
+            }
+        }
+
+        // SVG base layer re-raster: settle → render the WHOLE image at fit-to-window resolution
+        // (bounded, cheap, independent of zoom). Zoomed-in sharpness is provided by the viewport
+        // tiles composited on top; the base is just the always-present fallback, so it must never
+        // grow to `iw*zoom` (that whole-image render at deep zoom was slow and blocked navigation).
+        if let Some(t) = self.svg_rerender_at {
+            if now >= t {
+                self.svg_rerender_at = None;
+                if let Some(path) = self.nav.current_path().cloned() {
+                    let (win_w, win_h) = self.win_size();
+                    let (iw, ih) = (self.img_size.0.max(1) as f32, self.img_size.1.max(1) as f32);
+                    let fit = fit_scale(self.img_size, (win_w, win_h), self.state.quarter_turns);
+                    let max_dim = self
+                        .gpu
+                        .as_ref()
+                        .map(|g| g.device.limits().max_texture_dimension_2d)
+                        .unwrap_or(8192);
+                    let target_w = ((iw * fit).round().max(1.0) as u32).min(max_dim);
+                    let target_h = ((ih * fit).round().max(1.0) as u32).min(max_dim);
+                    self.svg_rerender_gen += 1;
+                    self.svg_rerender_inflight = true;
+                    self.svg_rerender_mailbox
+                        .post((self.svg_rerender_gen, path, target_w, target_h));
+                }
+            }
+        }
+
+        // Decide whether to (re)render the SVG deep-zoom viewport now that events have settled.
+        // Returns a wakeup while debouncing a scale change so this re-runs to enqueue after settle.
+        let vp_win = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.config.width as f32, g.config.height as f32))
+            .unwrap_or((800.0, 600.0));
+        let vp_debounce_deadline = self.plan_svg_viewport(vp_win);
+
+        let svg_poll_deadline = self.svg_rerender_inflight.then(|| now + SVG_RERENDER_POLL);
+        // Keep polling while the SVG viewport render is still in flight in the background.
+        let tile_poll_deadline = self.svg_vp_pending.is_some().then(|| now + SVG_RERENDER_POLL);
+
+        let deadline = [
+            self.overlay_until,
+            self.slideshow_next,
+            self.status_until,
+            self.svg_rerender_at,
+            svg_poll_deadline,
+            tile_poll_deadline,
+            vp_debounce_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         match deadline {
             Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
@@ -4689,6 +5565,7 @@ pub fn run(path: &str) -> ExitCode {
         }
     };
     let img_size = (first_image.width, first_image.height);
+    let current_is_svg = glanvu_core::is_svg_path(&first_path);
 
     let dir = first_path
         .parent()
@@ -4702,6 +5579,8 @@ pub fn run(path: &str) -> ExitCode {
     });
 
     let nav = FolderNav::new(paths, index, first_path, first_image);
+    let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
+    let (tile_queue, tile_rx) = spawn_tile_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -4749,6 +5628,22 @@ pub fn run(path: &str) -> ExitCode {
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
+        current_is_svg,
+        svg_rerender_at: None,
+        svg_rerender_gen: 0,
+        svg_rerender_inflight: false,
+        svg_rerender_mailbox,
+        svg_rerender_rx,
+        svg_doc: None,
+        svg_vp_region: None,
+        svg_vp_scale: 0.0,
+        svg_vp_key: (0, 0, 0),
+        svg_vp_pending: None,
+        svg_vp_gen: 0,
+        svg_vp_last_scale: 0.0,
+        svg_vp_settled_at: Instant::now(),
+        tile_queue,
+        tile_rx,
     };
 
     match event_loop.run_app(&mut app) {
@@ -4781,6 +5676,8 @@ pub fn run_empty() -> ExitCode {
         placeholder_path,
         placeholder,
     );
+    let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
+    let (tile_queue, tile_rx) = spawn_tile_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -4828,6 +5725,22 @@ pub fn run_empty() -> ExitCode {
         last_grid_click: None,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
+        current_is_svg: false,
+        svg_rerender_at: None,
+        svg_rerender_gen: 0,
+        svg_rerender_inflight: false,
+        svg_rerender_mailbox,
+        svg_rerender_rx,
+        svg_doc: None,
+        svg_vp_region: None,
+        svg_vp_scale: 0.0,
+        svg_vp_key: (0, 0, 0),
+        svg_vp_pending: None,
+        svg_vp_gen: 0,
+        svg_vp_last_scale: 0.0,
+        svg_vp_settled_at: Instant::now(),
+        tile_queue,
+        tile_rx,
     };
 
     match event_loop.run_app(&mut app) {
@@ -4841,7 +5754,99 @@ pub fn run_empty() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_size, TextInput};
+    use super::{
+        human_size, image_scale, pad_region, region_covers, tile_mvp, visible_image_rect,
+        TextInput, ViewState,
+    };
+
+    fn approx(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() <= eps
+    }
+
+    #[test]
+    fn visible_rect_is_whole_image_at_fit() {
+        // Fit view: the whole image is visible (letterboxed), so the visible rect == full image,
+        // even when window and image aspect ratios differ.
+        let st = ViewState::fit();
+        let r = visible_image_rect((1000, 500), (1000.0, 800.0), &st);
+        assert!(approx(r.0, 0.0, 0.5) && approx(r.1, 0.0, 0.5), "origin {r:?}");
+        assert!(approx(r.2, 1000.0, 0.5) && approx(r.3, 500.0, 0.5), "size {r:?}");
+    }
+
+    #[test]
+    fn visible_rect_is_centered_half_at_zoom_2() {
+        // Zoom 2 (no pan) on a square-fit setup shows the centered middle half of the image.
+        let st = ViewState {
+            fit: true,
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+            quarter_turns: 0,
+        };
+        let r = visible_image_rect((1000, 800), (1000.0, 800.0), &st);
+        assert!(approx(r.0, 250.0, 1.0) && approx(r.1, 200.0, 1.0), "origin {r:?}");
+        assert!(approx(r.2, 500.0, 1.0) && approx(r.3, 400.0, 1.0), "size {r:?}");
+    }
+
+    #[test]
+    fn pad_region_expands_and_clamps() {
+        // Interior rect: padded by 20% each side.
+        let r = pad_region((400.0, 300.0, 100.0, 100.0), 0.20, (1000, 800));
+        assert!(approx(r.0, 380.0, 0.01) && approx(r.1, 280.0, 0.01), "origin {r:?}");
+        assert!(approx(r.2, 140.0, 0.01) && approx(r.3, 140.0, 0.01), "size {r:?}");
+        // Rect near the edge: padding is clamped to the image bounds (no negative / overflow).
+        let e = pad_region((0.0, 0.0, 100.0, 100.0), 0.20, (1000, 800));
+        assert!(approx(e.0, 0.0, 0.01) && approx(e.1, 0.0, 0.01), "clamped origin {e:?}");
+        assert!(e.0 + e.2 <= 1000.01 && e.1 + e.3 <= 800.01);
+    }
+
+    #[test]
+    fn region_covers_containment() {
+        let outer = (100.0, 100.0, 200.0, 200.0);
+        assert!(region_covers(outer, (120.0, 120.0, 100.0, 100.0))); // inside
+        assert!(region_covers(outer, outer)); // equal
+        assert!(!region_covers(outer, (90.0, 120.0, 100.0, 100.0))); // spills left
+        assert!(!region_covers(outer, (120.0, 120.0, 200.0, 50.0))); // spills right
+    }
+
+    #[test]
+    fn whole_image_tile_mvp_equals_base_mvp() {
+        // A tile covering the entire image must produce exactly the same transform as `mvp`,
+        // guaranteeing tiles overlay the base layer without drift.
+        let st = ViewState {
+            fit: true,
+            zoom: 3.0,
+            pan: (40.0, -25.0),
+            quarter_turns: 1,
+        };
+        let img = (800, 600);
+        let win = (1280.0, 720.0);
+        let base = super::mvp(img, win, &st);
+        let whole = tile_mvp(img, (0.0, 0.0, 800.0, 600.0), win, &st);
+        for c in 0..4 {
+            for r in 0..4 {
+                assert!(
+                    approx(base[c][r], whole[c][r], 1e-3),
+                    "mvp mismatch at [{c}][{r}]: {} vs {}",
+                    base[c][r],
+                    whole[c][r]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_scale_matches_fit_and_zoom() {
+        let fit = ViewState::fit();
+        // Square image in square window: base = 1, scale = zoom.
+        assert!(approx(image_scale((100, 100), (100.0, 100.0), &fit), 1.0, 1e-4));
+        let z = ViewState {
+            fit: false,
+            zoom: 2.5,
+            pan: (0.0, 0.0),
+            quarter_turns: 0,
+        };
+        assert!(approx(image_scale((100, 100), (500.0, 500.0), &z), 2.5, 1e-4));
+    }
 
     #[test]
     fn text_input_edits_and_caret() {

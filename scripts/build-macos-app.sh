@@ -140,6 +140,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>tif</string>
         <string>tiff</string>
         <string>webp</string>
+        <string>svg</string>
       </array>
       <key>CFBundleTypeMIMETypes</key>
       <array>
@@ -149,6 +150,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>image/bmp</string>
         <string>image/tiff</string>
         <string>image/webp</string>
+        <string>image/svg+xml</string>
       </array>
     </dict>
   </array>

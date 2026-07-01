@@ -99,6 +99,12 @@ pub fn run(args: &[String]) -> ExitCode {
         eprintln!("glanvu convert: unsupported target format '{to}' (jpg/png/gif/bmp/tiff/webp)");
         return ExitCode::from(2);
     };
+    if target == SourceFormat::Svg {
+        eprintln!(
+            "glanvu convert: cannot convert to SVG (raster→vector isn't supported; SVG is input-only)"
+        );
+        return ExitCode::from(2);
+    }
     let ext = to.to_ascii_lowercase();
 
     if quality.is_some() && target != SourceFormat::Jpeg {

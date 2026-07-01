@@ -4,8 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::format::SourceFormat;
+
 /// File extensions Glanvu can currently open (the Phase 1 base set), lowercase, without the dot.
-const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp"];
+const SUPPORTED_EXTENSIONS: &[&str] =
+    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg"];
 
 /// Whether a path has a supported image extension (case-insensitive).
 pub fn is_supported_path(path: &Path) -> bool {
@@ -13,6 +16,16 @@ pub fn is_supported_path(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .is_some_and(|e| SUPPORTED_EXTENSIONS.contains(&e.as_str()))
+}
+
+/// Whether a path's extension marks it as SVG — the one format whose decode strategy differs
+/// enough (vector, no lazy header read, crisp-on-settle re-raster) that callers across the
+/// viewer and batch CLI need to branch on it. Single source of truth for that check.
+pub fn is_svg_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(SourceFormat::from_extension)
+        == Some(SourceFormat::Svg)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.

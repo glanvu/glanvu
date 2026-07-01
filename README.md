@@ -30,6 +30,8 @@ The name is **glance + view** — a fast look.
 
 - **Instant image viewing** — JPEG, PNG, WebP, GIF, BMP and TIFF, decoded by pure-Rust codecs and
   drawn on the GPU (wgpu). No system C libraries, no surprises.
+- **SVG, crisp at every zoom** — vector images stay sharp: Glanvu re-rasterizes at the display
+  resolution once you stop zooming, instead of stretching a blurry fixed-size raster.
 - **Keyboard-first navigation** — walk a whole folder with the arrow keys; zoom, pan, rotate, fit,
   and go fullscreen without touching the mouse. Press **H** any time for the full cheatsheet.
 - **Find by name** — press **F** (or **/**) for a fuzzy search across the folder: a floating match
