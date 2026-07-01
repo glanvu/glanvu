@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>glanvu</id>
-    <version>0.6.0</version>
+    <version>0.6.1</version>
     <packageSourceUrl>https://github.com/glanvu/glanvu/tree/main/dist/chocolatey</packageSourceUrl>
     <owners>juanyque</owners>
     <title>Glanvu</title>
@@ -24,7 +24,7 @@ TIFF via pure-Rust codecs — no system C libraries.
 
 The `glanvu` command works both as a GUI viewer and a headless batch converter.
     </description>
-    <releaseNotes>https://github.com/glanvu/glanvu/releases/tag/v0.6.0</releaseNotes>
+    <releaseNotes>https://github.com/glanvu/glanvu/releases/tag/v0.6.1</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
