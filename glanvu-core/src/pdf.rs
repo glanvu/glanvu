@@ -228,4 +228,32 @@ mod tests {
             Err(e) => panic!("expected PdfLibraryMissing or Decode, got: {e}"),
         }
     }
+
+    #[test]
+    fn concurrent_access_does_not_deadlock_or_panic() {
+        // Regression guard for the real crash documented in D13: the folder-prefetch worker and
+        // the main thread both called into PDFium at the same time and corrupted its internal
+        // font glyph cache. This doesn't reproduce that exact heap corruption (would need a real
+        // library and text-heavy pages under load) — what it does verify is that `PDFIUM_LOCK`
+        // itself is sound under genuine concurrent contention: many threads hammering
+        // `PdfDocument::from_bytes` (construct + implicit drop) must all complete without
+        // deadlocking or panicking, whether or not a real library is present. A broken lock
+        // (e.g. an actual deadlock, or a poisoned-lock panic cascading across threads) would hang
+        // or fail this test rather than just this one call.
+        use std::thread;
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                thread::spawn(|| {
+                    for _ in 0..25 {
+                        let _ = PdfDocument::from_bytes(b"%PDF-1.4\n");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+    }
 }

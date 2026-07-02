@@ -622,6 +622,18 @@ fn ideal_window_size(iw: u32, ih: u32) -> (f32, f32) {
     ((iw * s).max(640.0), (ih * s).max(360.0))
 }
 
+/// Clamp a PDF page turn by `delta` (±1) within `[0, page_count)`. `None` at either boundary
+/// (no wraparound) — `turn_pdf_page` then does nothing rather than falling through to file
+/// navigation (D13's navigation model: PDF pages and folder files are independent axes).
+fn clamped_page_turn(current: usize, delta: i32, page_count: usize) -> Option<usize> {
+    let next = current as i32 + delta;
+    if next < 0 || next as usize >= page_count {
+        None
+    } else {
+        Some(next as usize)
+    }
+}
+
 /// MVP for a screen-space rectangle (top-left origin, y-down pixel coords).
 fn rect_mvp(w: f32, h: f32, sx: f32, sy: f32, win_w: f32, win_h: f32) -> [[f32; 4]; 4] {
     let (win_w, win_h) = (win_w.max(1.0), win_h.max(1.0));
@@ -3597,11 +3609,11 @@ impl App {
         let Some(doc) = self.pdf_doc.as_ref() else {
             return;
         };
-        let new_page = self.current_pdf_page as i32 + delta;
-        if new_page < 0 || new_page as usize >= doc.page_count() {
+        let Some(new_page) = clamped_page_turn(self.current_pdf_page, delta, doc.page_count())
+        else {
             return; // clamped: no-op at the first/last page
-        }
-        self.current_pdf_page = new_page as usize;
+        };
+        self.current_pdf_page = new_page;
         self.render_current_pdf_page();
     }
 
@@ -6032,8 +6044,8 @@ pub fn run_empty() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        human_size, image_scale, pad_region, region_covers, tile_mvp, visible_image_rect,
-        TextInput, ViewState,
+        clamped_page_turn, human_size, ideal_window_size, image_scale, pad_region, region_covers,
+        tile_mvp, visible_image_rect, TextInput, ViewState,
     };
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
@@ -6158,5 +6170,41 @@ mod tests {
         assert_eq!(human_size(1536), "1.5 KB");
         assert_eq!(human_size(1_048_576), "1.0 MB");
         assert_eq!(human_size(1_073_741_824), "1.0 GB");
+    }
+
+    #[test]
+    fn ideal_window_size_floor_is_640x360() {
+        // The empty state's 1x1 placeholder (and any small enough image) hits this floor — see
+        // D13's window-size follow-up: it used to be 320x240, which looked too square/cramped.
+        assert_eq!(ideal_window_size(1, 1), (640.0, 360.0));
+        assert_eq!(ideal_window_size(100, 100), (640.0, 360.0));
+    }
+
+    #[test]
+    fn ideal_window_size_caps_and_scales_large_images() {
+        // 4000x4000: capped by both 1600 and 1000 bounds, min scale wins (0.25), then *0.9.
+        let (w, h) = ideal_window_size(4000, 4000);
+        assert!(
+            (w - 900.0).abs() < 0.5 && (h - 900.0).abs() < 0.5,
+            "got {w}x{h}"
+        );
+    }
+
+    #[test]
+    fn clamped_page_turn_moves_within_bounds() {
+        assert_eq!(clamped_page_turn(2, 1, 5), Some(3));
+        assert_eq!(clamped_page_turn(2, -1, 5), Some(1));
+    }
+
+    #[test]
+    fn clamped_page_turn_clamps_at_boundaries_no_wraparound() {
+        assert_eq!(clamped_page_turn(0, -1, 5), None); // before the first page
+        assert_eq!(clamped_page_turn(4, 1, 5), None); // past the last page
+    }
+
+    #[test]
+    fn clamped_page_turn_single_page_document_is_always_none() {
+        assert_eq!(clamped_page_turn(0, 1, 1), None);
+        assert_eq!(clamped_page_turn(0, -1, 1), None);
     }
 }
