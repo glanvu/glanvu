@@ -21,6 +21,20 @@ DIST="dist/linux"
 TAR_NAME="glanvu-${VERSION}-linux-${ARCH}.tar.gz"
 DEB_NAME="glanvu_${VERSION}_amd64.deb"
 
+# PDFium (D13 in the decision log): Glanvu's first native runtime dependency, fetched separately
+# from a pinned bblanchon/pdfium-binaries release — CI sets GLANVU_PDFIUM_DIST_DIR to the extracted
+# archive directory before calling this script. Bundled *next to the binary* in both packages
+# (not the more idiomatic /usr/lib/glanvu/ for the .deb) so `Pdfium::bind_to_library`'s "next to
+# current_exe()" search order (glanvu-core/src/pdf.rs) works identically across all three
+# platforms, with no Linux-specific path case. Optional locally: without it, Glanvu still builds
+# and runs — every other format works, PDFs show a clean "library not found" error.
+# NOTE: assumes the archive's library sits at lib/libpdfium.so — verify against the actual
+# downloaded archive before relying on it in CI.
+PDFIUM_SO=""
+if [[ -n "${GLANVU_PDFIUM_DIST_DIR:-}" && -f "$GLANVU_PDFIUM_DIST_DIR/lib/libpdfium.so" ]]; then
+    PDFIUM_SO="$GLANVU_PDFIUM_DIST_DIR/lib/libpdfium.so"
+fi
+
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
@@ -33,6 +47,12 @@ cp "$BINARY"  "$STAGING_TAR/$DIR/glanvu"
 cp README.md  "$STAGING_TAR/$DIR/README.md"
 cp LICENSE    "$STAGING_TAR/$DIR/LICENSE"
 chmod +x "$STAGING_TAR/$DIR/glanvu"
+if [[ -n "$PDFIUM_SO" ]]; then
+    cp "$PDFIUM_SO" "$STAGING_TAR/$DIR/libpdfium.so"
+    echo "    PDFium: bundled from $GLANVU_PDFIUM_DIST_DIR"
+else
+    echo "    PDFium: not bundled (set GLANVU_PDFIUM_DIST_DIR to include PDF support) — see README"
+fi
 tar -czf "$DIST/$TAR_NAME" -C "$STAGING_TAR" "$DIR"
 echo "    Tarball: $DIST/$TAR_NAME"
 
@@ -49,6 +69,10 @@ cp "$BINARY"  "$STAGING_DEB/usr/bin/glanvu"
 chmod +x      "$STAGING_DEB/usr/bin/glanvu"
 cp README.md  "$STAGING_DEB/usr/share/doc/glanvu/README.md"
 cp LICENSE    "$STAGING_DEB/usr/share/doc/glanvu/copyright"
+# Bundled, not distro-installed, so it has no apt-visible package name — no new `Depends:` entry.
+if [[ -n "$PDFIUM_SO" ]]; then
+    cp "$PDFIUM_SO" "$STAGING_DEB/usr/bin/libpdfium.so"
+fi
 
 INSTALLED_KB=$(du -sk "$STAGING_DEB/usr" | cut -f1)
 
@@ -77,7 +101,7 @@ Exec=glanvu %F
 Icon=glanvu
 Type=Application
 Categories=Graphics;Viewer;
-MimeType=image/jpeg;image/png;image/gif;image/bmp;image/tiff;image/webp;
+MimeType=image/jpeg;image/png;image/gif;image/bmp;image/tiff;image/webp;image/svg+xml;application/pdf;
 StartupNotify=true
 EOF
 

@@ -60,13 +60,30 @@ APP=dist/macos/Glanvu.app
 CONTENTS=$APP/Contents
 MACOS=$CONTENTS/MacOS
 RESOURCES=$CONTENTS/Resources
+FRAMEWORKS=$CONTENTS/Frameworks
 
 rm -rf "$APP"
-mkdir -p "$MACOS" "$RESOURCES"
+mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 
 # Binary
 cp "$BINARY" "$MACOS/Glanvu"
 chmod +x "$MACOS/Glanvu"
+
+# PDFium (D13 in the decision log): Glanvu's first native runtime dependency. It's a dynamic
+# library, fetched separately per platform/arch from a pinned bblanchon/pdfium-binaries release
+# (never "latest" — that repo rolls frequently) — CI sets GLANVU_PDFIUM_DIST_DIR to the extracted
+# archive directory for the arch this script is building before calling it. Locally, this is
+# optional: without it, Glanvu still builds and runs — every other format works, PDFs show a clean
+# "library not found" error (see glanvu-core/src/pdf.rs). Bundled at Contents/Frameworks, which
+# `Pdfium::bind_to_library`'s search order (glanvu-core/src/pdf.rs) checks relative to the exe.
+# NOTE: assumes the archive's library sits at lib/libpdfium.dylib (bblanchon's documented CMake
+# layout) — verify this against the actual downloaded archive before relying on it in CI.
+if [[ -n "${GLANVU_PDFIUM_DIST_DIR:-}" && -f "$GLANVU_PDFIUM_DIST_DIR/lib/libpdfium.dylib" ]]; then
+    cp "$GLANVU_PDFIUM_DIST_DIR/lib/libpdfium.dylib" "$FRAMEWORKS/libpdfium.dylib"
+    echo "    PDFium: bundled from $GLANVU_PDFIUM_DIST_DIR"
+else
+    echo "    PDFium: not bundled (set GLANVU_PDFIUM_DIST_DIR to include PDF support) — see README"
+fi
 
 # Info.plist — registers Glanvu with the OS as a viewer for image files.
 # Heredoc is unquoted so ${VERSION} expands; the plist body has no other shell metacharacters.
@@ -141,6 +158,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>tiff</string>
         <string>webp</string>
         <string>svg</string>
+        <string>pdf</string>
       </array>
       <key>CFBundleTypeMIMETypes</key>
       <array>
@@ -151,6 +169,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>image/tiff</string>
         <string>image/webp</string>
         <string>image/svg+xml</string>
+        <string>application/pdf</string>
       </array>
     </dict>
   </array>
@@ -187,6 +206,10 @@ Support development:<br>
 <a href="https://ko-fi.com/juanyque">Ko-fi</a>
 &nbsp;&middot;&nbsp;
 <a href="https://github.com/sponsors/juanyque">GitHub Sponsors</a>
+</p>
+<p style="margin:8px 0;font-size:10px;color:#888;">
+SVG: resvg/usvg/tiny-skia (MIT/Apache-2.0).<br>
+PDF: PDFium (BSD-3-Clause) via pdfium-render (MIT/Apache-2.0).
 </p>
 </body>
 </html>

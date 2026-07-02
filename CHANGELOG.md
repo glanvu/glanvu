@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-02
+
+### Added
+
+- **PDF support** — open multi-page PDFs like any other image (rendered via the native PDFium
+  library, Glanvu's first non-pure-Rust runtime dependency — see D13 in the decision log), fit to
+  the window preserving the document's own aspect ratio. `↑`/`↓` turn pages within the document
+  (clamped at the first/last page, no wraparound); `←`/`→` still walk the folder. A "page N/M"
+  indicator (top-right) appears alongside the filename overlay. One thumbnail per PDF in the grid
+  (page 1). `glanvu convert` rasterizes page 1 (a note is printed for multi-page sources); PDF is
+  input-only, like SVG. Included in file association / "Open With" / `glanvu set-default`.
+
+### Changed
+
+- The default/empty-state window is less cramped and square: the minimum window size grew from
+  320×240 to 640×360 (near 16:9 instead of 4:3), which also affects any image small enough to hit
+  that floor.
+
+### Fixed
+
+- The native "Open file" dialog's default filter now offers `.svg` and `.pdf` alongside the other
+  image types (it had its own extension list, separate from folder scanning and file association,
+  that was missed when each format landed).
+
 ## [0.7.0] — 2026-07-01
 
 ### Added
@@ -168,5 +192,6 @@ Workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
 ---
 
-[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/glanvu/glanvu/releases/tag/v0.8.0
 [0.5.0]: https://github.com/glanvu/glanvu/releases/tag/v0.5.0

@@ -13,6 +13,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # PDFium (D13 in the decision log): Glanvu's first native runtime dependency. Pin an exact
+  # bblanchon/pdfium-binaries release tag here — never "latest" — that repo rolls with every
+  # Chromium roll (often weekly), so floating would make PDF support silently vary release to
+  # release with no way to bisect a regression. Bump deliberately. The tag itself contains a
+  # literal "/" (Chromium's own versioning scheme), so it must stay %2F-encoded wherever it's
+  # used as a URL path segment below.
+  PDFIUM_VERSION: chromium%2F7920
 
 jobs:
   # ── macOS arm64 + x86_64 ─────────────────────────────────────────────────────
@@ -29,8 +36,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Fetch PDFium (arm64)
+        run: |
+          curl -fL -o pdfium-mac-arm64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_VERSION}/pdfium-mac-arm64.tgz"
+          mkdir -p vendor/pdfium-mac-arm64
+          tar -xzf pdfium-mac-arm64.tgz -C vendor/pdfium-mac-arm64
+
       - name: Build arm64 .app bundle
         run: ./scripts/build-macos-app.sh --release
+        env:
+          GLANVU_PDFIUM_DIST_DIR: ${{ github.workspace }}/vendor/pdfium-mac-arm64
 
       - name: Zip arm64 .app
         run: |
@@ -38,8 +54,17 @@ jobs:
           cd dist/macos
           zip -r "../../Glanvu-${VERSION}-macos-arm64.zip" Glanvu.app
 
+      - name: Fetch PDFium (x86_64)
+        run: |
+          curl -fL -o pdfium-mac-x64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_VERSION}/pdfium-mac-x64.tgz"
+          mkdir -p vendor/pdfium-mac-x64
+          tar -xzf pdfium-mac-x64.tgz -C vendor/pdfium-mac-x64
+
       - name: Build x86_64 .app bundle
         run: ./scripts/build-macos-app.sh --release --target x86_64-apple-darwin
+        env:
+          GLANVU_PDFIUM_DIST_DIR: ${{ github.workspace }}/vendor/pdfium-mac-x64
 
       - name: Zip x86_64 .app
         run: |
@@ -72,11 +97,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Fetch PDFium (x86_64)
+        run: |
+          curl -fL -o pdfium-linux-x64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_VERSION}/pdfium-linux-x64.tgz"
+          mkdir -p vendor/pdfium-linux-x64
+          tar -xzf pdfium-linux-x64.tgz -C vendor/pdfium-linux-x64
+
       - name: Build release binary
         run: cargo build --release
 
       - name: Package (.tar.gz + .deb)
         run: ./scripts/build-linux-pkg.sh
+        env:
+          GLANVU_PDFIUM_DIST_DIR: ${{ github.workspace }}/vendor/pdfium-linux-x64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -96,12 +130,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Fetch PDFium (x86_64)
+        shell: bash
+        run: |
+          curl -fL -o pdfium-win-x64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_VERSION}/pdfium-win-x64.tgz"
+          mkdir -p vendor/pdfium-win-x64
+          tar -xzf pdfium-win-x64.tgz -C vendor/pdfium-win-x64
+
       - name: Build release binary
         run: cargo build --release
 
       - name: Package (.zip)
         run: ./scripts/build-windows-pkg.sh
         shell: bash
+        env:
+          GLANVU_PDFIUM_DIST_DIR: ${{ github.workspace }}/vendor/pdfium-win-x64
 
       - uses: actions/upload-artifact@v4
         with:

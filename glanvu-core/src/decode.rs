@@ -11,8 +11,9 @@ use std::sync::{Arc, OnceLock};
 use resvg::{tiny_skia, usvg};
 
 use crate::error::{Error, Result};
-use crate::folder::is_svg_path;
-use crate::format::{sniff_svg, SourceFormat};
+use crate::folder::{is_pdf_path, is_svg_path};
+use crate::format::{sniff_pdf, sniff_svg, SourceFormat};
+use crate::pdf::PdfDocument;
 
 /// A decoded image, normalized to 8-bit RGBA.
 #[derive(Debug, Clone)]
@@ -36,12 +37,18 @@ pub struct ImageMeta {
     pub format: SourceFormat,
     /// File size in bytes.
     pub file_size: u64,
+    /// Number of pages, for paginated formats (currently just PDF). `None` for every other
+    /// format — there is no notion of "page" for a single raster image or an SVG.
+    pub page_count: Option<u32>,
 }
 
 /// Decode an image from in-memory bytes into normalized RGBA.
 pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedImage> {
     if sniff_svg(bytes) {
         return decode_svg_bytes(bytes, None);
+    }
+    if sniff_pdf(bytes) {
+        return decode_pdf_page0(&PdfDocument::from_bytes(bytes)?);
     }
     let img = image::load_from_memory(bytes).map_err(map_image_error)?;
     Ok(to_decoded(img))
@@ -53,8 +60,38 @@ pub fn decode_path<P: AsRef<Path>>(path: P) -> Result<DecodedImage> {
     if is_svg_path(path) {
         return decode_svg_bytes(&read_file(path)?, None);
     }
+    if is_pdf_path(path) {
+        return decode_pdf_page0(&PdfDocument::load(path)?);
+    }
     let img = open_reader(path)?.decode().map_err(map_image_error)?;
     Ok(to_decoded(img))
+}
+
+/// Rasterize page `page_index` (0-based) of a PDF file at an explicit pixel size.
+///
+/// The viewer's entry point for both the PDF's initial crisp-size render and page-turn
+/// navigation (`ArrowUp`/`ArrowDown` on a multi-page PDF — see D13 in the decision log). Unlike
+/// [`decode_svg_at_size`], this always takes an explicit page index: every other PDF decode path
+/// in this module (`decode_bytes`, `decode_path`, `decode_thumbnail`, `read_meta_path`) hardcodes
+/// page 0 internally. Returns [`Error::UnsupportedFormat`] if `path` isn't PDF.
+pub fn decode_pdf_page<P: AsRef<Path>>(
+    path: P,
+    page_index: usize,
+    w: u32,
+    h: u32,
+) -> Result<DecodedImage> {
+    let path = path.as_ref();
+    if !is_pdf_path(path) {
+        return Err(Error::UnsupportedFormat);
+    }
+    PdfDocument::load(path)?.render_page(page_index, w.max(1), h.max(1))
+}
+
+/// Rasterize page 0 of `doc` at its own intrinsic size — the "just open this file" default every
+/// generic decode entry point in this module uses for PDF.
+fn decode_pdf_page0(doc: &PdfDocument) -> Result<DecodedImage> {
+    let (w, h) = doc.page_size(0)?;
+    doc.render_page(0, w.round().max(1.0) as u32, h.round().max(1.0) as u32)
 }
 
 /// Rasterize an SVG file at an explicit pixel size, ignoring its intrinsic size.
@@ -86,6 +123,14 @@ pub fn decode_thumbnail<P: AsRef<Path>>(path: P, max_w: u32, max_h: u32) -> Resu
         let (tw, th) = fit_within(w, h, max_w.max(1), max_h.max(1));
         return doc.render_fit(tw, th);
     }
+    if is_pdf_path(path) {
+        // One thumbnail per PDF *file* (page 0), not one per page — same one-tile-per-file
+        // convention as every other format in the grid (see D13 in the decision log).
+        let doc = PdfDocument::load(path)?;
+        let (w, h) = doc.page_size(0)?;
+        let (tw, th) = fit_within(w, h, max_w.max(1), max_h.max(1));
+        return doc.render_page(0, tw, th);
+    }
     let img = open_reader(path)?.decode().map_err(map_image_error)?;
     let thumb = img.thumbnail(max_w.max(1), max_h.max(1));
     Ok(to_decoded(thumb))
@@ -108,6 +153,19 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
             height: h.round().max(1.0) as u32,
             format: SourceFormat::Svg,
             file_size,
+            page_count: None,
+        });
+    }
+
+    if is_pdf_path(path) {
+        let doc = PdfDocument::load(path)?;
+        let (w, h) = doc.page_size(0)?;
+        return Ok(ImageMeta {
+            width: w.round().max(1.0) as u32,
+            height: h.round().max(1.0) as u32,
+            format: SourceFormat::Pdf,
+            file_size,
+            page_count: Some(doc.page_count() as u32),
         });
     }
 
@@ -123,6 +181,7 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
         height,
         format,
         file_size,
+        page_count: None,
     })
 }
 
@@ -192,8 +251,11 @@ fn parse_svg(bytes: &[u8]) -> Result<usvg::Tree> {
 }
 
 /// Fit `(iw, ih)` within `(max_w, max_h)`, preserving aspect ratio. Unlike raster thumbnailing,
-/// this scales *up* as well as down — see `decode_thumbnail`'s doc comment for why.
-fn fit_within(iw: f32, ih: f32, max_w: u32, max_h: u32) -> (u32, u32) {
+/// this scales *up* as well as down — see `decode_thumbnail`'s doc comment for why. Public so
+/// callers outside this crate that render at an intrinsic-aspect-preserving size (the viewer's PDF
+/// page-turn render, which must not stretch a page to the window's aspect ratio) can reuse it
+/// instead of re-deriving the same fit math.
+pub fn fit_within(iw: f32, ih: f32, max_w: u32, max_h: u32) -> (u32, u32) {
     let scale = (max_w as f32 / iw).min(max_h as f32 / ih);
     (
         (iw * scale).round().max(1.0) as u32,
@@ -540,5 +602,180 @@ mod tests {
         // A region past the image edge just renders transparent where there's no content.
         let b = doc.render_region(90.0, 90.0, 40.0, 40.0, 32, 32).unwrap();
         assert_eq!((b.width, b.height), (32, 32));
+    }
+
+    // ── PDF ──────────────────────────────────────────────────────────────────────────────────
+    //
+    // These tests need a real PDFium library (see D13 in the decision log): it's fetched
+    // separately per platform, not bundled with `cargo test`, so a plain dev/CI environment
+    // won't have one. Every test below skips (with a message, not a failure) when
+    // `Error::PdfLibraryMissing` comes back, and only asserts real content once a library is
+    // actually bound — run with `GLANVU_PDFIUM_LIB` pointed at a local PDFium checkout to
+    // exercise the full assertions.
+
+    /// Build a minimal, byte-accurate multi-page PDF in memory (uncompressed, no content streams
+    /// — a page with no `/Contents` is legal PDF and renders blank, ISO 32000-1 §7.7.3.3). Byte
+    /// offsets are computed programmatically rather than hand-typed, so the cross-reference table
+    /// is always correct.
+    fn minimal_pdf(pages: &[(f32, f32)]) -> Vec<u8> {
+        let mut objs: Vec<String> = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string()];
+        let kids: String = (0..pages.len())
+            .map(|i| format!("{} 0 R", 3 + i))
+            .collect::<Vec<_>>()
+            .join(" ");
+        objs.push(format!(
+            "<< /Type /Pages /Kids [{kids}] /Count {} >>",
+            pages.len()
+        ));
+        for (w, h) in pages {
+            objs.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources << >> >>"
+            ));
+        }
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = vec![0usize]; // object 0 is the free-list head, never referenced.
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(buf.len());
+            buf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref_offset = buf.len();
+        let total = objs.len() + 1;
+        buf.extend_from_slice(format!("xref\n0 {total}\n").as_bytes());
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        for &off in &offsets[1..] {
+            buf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        buf.extend_from_slice(
+            format!("trailer\n<< /Size {total} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF")
+                .as_bytes(),
+        );
+        buf
+    }
+
+    fn temp_pdf(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("glanvu-decode-pdf-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// Parse `bytes` as a PDF, or skip the calling test (with a message) if no PDFium library is
+    /// bound in this environment. Panics on any other error, since that would be a real bug.
+    fn try_pdf_document(bytes: &[u8]) -> Option<PdfDocument> {
+        match PdfDocument::from_bytes(bytes) {
+            Ok(doc) => Some(doc),
+            Err(Error::PdfLibraryMissing(msg)) => {
+                eprintln!("skipping PDF test: {msg}");
+                None
+            }
+            Err(e) => panic!("unexpected error parsing test PDF: {e}"),
+        }
+    }
+
+    #[test]
+    fn pdf_extension_sniff_and_detect() {
+        let bytes = minimal_pdf(&[(200.0, 100.0)]);
+        assert!(sniff_pdf(&bytes));
+        assert_eq!(detect_format(&bytes), Some(SourceFormat::Pdf));
+    }
+
+    #[test]
+    fn pdf_document_page_count_and_size() {
+        let bytes = minimal_pdf(&[(200.0, 100.0), (300.0, 150.0), (50.0, 75.0)]);
+        let Some(doc) = try_pdf_document(&bytes) else {
+            return;
+        };
+        assert_eq!(doc.page_count(), 3);
+        let (w, h) = doc.page_size(1).unwrap();
+        assert!((w - 300.0).abs() < 0.5 && (h - 150.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn pdf_render_page_dims() {
+        let bytes = minimal_pdf(&[(200.0, 100.0)]);
+        let Some(doc) = try_pdf_document(&bytes) else {
+            return;
+        };
+        let img = doc.render_page(0, 64, 32).unwrap();
+        assert_eq!((img.width, img.height), (64, 32));
+        assert_eq!(img.rgba.len(), 64 * 32 * 4);
+    }
+
+    #[test]
+    fn pdf_render_page_out_of_range_errors_not_panics() {
+        let bytes = minimal_pdf(&[(200.0, 100.0)]);
+        let Some(doc) = try_pdf_document(&bytes) else {
+            return;
+        };
+        assert!(doc.render_page(5, 10, 10).is_err());
+        assert!(doc.page_size(5).is_err());
+    }
+
+    #[test]
+    fn pdf_decode_path_and_meta() {
+        let bytes = minimal_pdf(&[(200.0, 100.0), (200.0, 100.0), (200.0, 100.0)]);
+        if try_pdf_document(&bytes).is_none() {
+            return;
+        }
+        let path = temp_pdf("path-and-meta", &bytes);
+
+        let img = decode_path(&path).unwrap();
+        assert_eq!((img.width, img.height), (200, 100));
+
+        let meta = read_meta_path(&path).unwrap();
+        assert_eq!(meta.format, SourceFormat::Pdf);
+        assert_eq!((meta.width, meta.height), (200, 100));
+        assert_eq!(meta.page_count, Some(3));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pdf_decode_thumbnail_fits_box() {
+        let bytes = minimal_pdf(&[(200.0, 100.0)]);
+        if try_pdf_document(&bytes).is_none() {
+            return;
+        }
+        let path = temp_pdf("thumb", &bytes);
+
+        // 200x100 fit within 50x50 -> scale by 50/200 = 0.25 -> 50x25 (aspect preserved).
+        let thumb = decode_thumbnail(&path, 50, 50).unwrap();
+        assert_eq!((thumb.width, thumb.height), (50, 25));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pdf_decode_page_turns_pages() {
+        let bytes = minimal_pdf(&[(200.0, 100.0), (300.0, 150.0)]);
+        if try_pdf_document(&bytes).is_none() {
+            return;
+        }
+        let path = temp_pdf("page-turn", &bytes);
+
+        let page0 = decode_pdf_page(&path, 0, 40, 20).unwrap();
+        assert_eq!((page0.width, page0.height), (40, 20));
+        let page1 = decode_pdf_page(&path, 1, 40, 20).unwrap();
+        assert_eq!((page1.width, page1.height), (40, 20));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pdf_decode_page_rejects_non_pdf_path() {
+        let dir = std::env::temp_dir().join("glanvu-decode-pdf-test-rejects-non-pdf");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not-pdf.png");
+        sample().save(&path).unwrap();
+
+        let err = decode_pdf_page(&path, 0, 50, 50).unwrap_err();
+        assert!(matches!(err, Error::UnsupportedFormat));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

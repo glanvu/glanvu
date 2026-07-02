@@ -25,6 +25,12 @@ pub enum Error {
     /// The format was recognized but the data could not be decoded.
     #[error("failed to decode image: {0}")]
     Decode(String),
+
+    /// A PDF file was opened, but the bundled PDFium native library could not be located or
+    /// bound on this machine (see D13 in the decision log). PDF support is simply unavailable;
+    /// every other format is unaffected.
+    #[error("PDF support unavailable: the PDFium library could not be loaded ({0})")]
+    PdfLibraryMissing(String),
 }
 
 /// Convenience alias for results from this crate.

@@ -30,6 +30,22 @@ cp "$BINARY"  "$STAGING/glanvu.exe"
 cp README.md  "$STAGING/README.md"
 cp LICENSE    "$STAGING/LICENSE"
 
+# PDFium (D13 in the decision log): Glanvu's first native runtime dependency, fetched separately
+# from a pinned bblanchon/pdfium-binaries release — CI sets GLANVU_PDFIUM_DIST_DIR to the
+# extracted archive directory before calling this script. Dropped next to glanvu.exe: Windows'
+# own DLL search order already checks the exe's directory first, and it's also where
+# `Pdfium::bind_to_library`'s own search (glanvu-core/src/pdf.rs) looks. Optional locally: without
+# it, Glanvu still builds and runs — every other format works, PDFs show a clean error.
+# NOTE: assumes the archive's DLL sits at bin/pdfium.dll (Windows SDK-style archives typically
+# split runtime DLLs from lib/include under bin/, unlike the lib/-only macOS/Linux archives) —
+# verify against the actual downloaded archive before relying on it in CI.
+if [[ -n "${GLANVU_PDFIUM_DIST_DIR:-}" && -f "$GLANVU_PDFIUM_DIST_DIR/bin/pdfium.dll" ]]; then
+    cp "$GLANVU_PDFIUM_DIST_DIR/bin/pdfium.dll" "$STAGING/pdfium.dll"
+    echo "    PDFium: bundled from $GLANVU_PDFIUM_DIST_DIR"
+else
+    echo "    PDFium: not bundled (set GLANVU_PDFIUM_DIST_DIR to include PDF support) — see README"
+fi
+
 if command -v powershell.exe &>/dev/null; then
     powershell.exe -NoProfile -Command \
         "Compress-Archive -Path '${STAGING}' -DestinationPath '${DIST}/${ZIP_NAME}' -Force"

@@ -18,6 +18,10 @@ pub enum SourceFormat {
     /// A vector format (XML), unlike every other variant here. Input-only: there is no `image`
     /// crate encode target, so `to_image()` returns `None` for it (see D11 in the decision log).
     Svg,
+    /// A paginated document format, rendered via the native PDFium library rather than the
+    /// `image` crate. Input-only, like `Svg` (see D13 in the decision log): `to_image()` returns
+    /// `None`, and converting/viewing always operates on a single page (page 1 by default).
+    Pdf,
 }
 
 impl SourceFormat {
@@ -31,6 +35,7 @@ impl SourceFormat {
             SourceFormat::Tiff => "TIFF",
             SourceFormat::WebP => "WebP",
             SourceFormat::Svg => "SVG",
+            SourceFormat::Pdf => "PDF",
         }
     }
 
@@ -44,13 +49,15 @@ impl SourceFormat {
             "tif" | "tiff" => Some(SourceFormat::Tiff),
             "webp" => Some(SourceFormat::WebP),
             "svg" => Some(SourceFormat::Svg),
+            "pdf" => Some(SourceFormat::Pdf),
             _ => None,
         }
     }
 
     /// The `image` crate format used to encode this `SourceFormat`, if any.
     ///
-    /// `None` for `Svg`: it isn't an `image`-crate encode target (no raster→vector conversion).
+    /// `None` for `Svg` and `Pdf`: neither is an `image`-crate encode target (no raster→vector
+    /// or raster→document conversion).
     pub(crate) fn to_image(self) -> Option<image::ImageFormat> {
         match self {
             SourceFormat::Jpeg => Some(image::ImageFormat::Jpeg),
@@ -60,6 +67,7 @@ impl SourceFormat {
             SourceFormat::Tiff => Some(image::ImageFormat::Tiff),
             SourceFormat::WebP => Some(image::ImageFormat::WebP),
             SourceFormat::Svg => None,
+            SourceFormat::Pdf => None,
         }
     }
 
@@ -93,7 +101,19 @@ pub(crate) fn sniff_svg(prefix: &[u8]) -> bool {
     text.trim_start_matches('\u{feff}').contains("<svg")
 }
 
-/// Detect the image format from the leading bytes (magic numbers, or a content sniff for SVG),
+/// Bytes scanned from the start of a file when sniffing for a PDF magic number.
+const PDF_SNIFF_WINDOW: usize = 1024;
+
+/// Whether `prefix` looks like PDF content: a `%PDF-` marker within the first
+/// [`PDF_SNIFF_WINDOW`] bytes. The spec permits a short prefix of implementation-defined bytes
+/// before the header (some producers/scanners prepend bytes), so this doesn't require the marker
+/// at offset 0 — mirrors `sniff_svg`'s tolerance for a leading BOM/prolog.
+pub(crate) fn sniff_pdf(prefix: &[u8]) -> bool {
+    let window = &prefix[..prefix.len().min(PDF_SNIFF_WINDOW)];
+    window.windows(5).any(|w| w == b"%PDF-")
+}
+
+/// Detect the image format from the leading bytes (magic numbers, or a content sniff for SVG/PDF),
 /// without decoding.
 ///
 /// Returns `None` if the bytes are not a recognized image or are a format outside the base set.
@@ -102,6 +122,7 @@ pub fn detect_format(bytes: &[u8]) -> Option<SourceFormat> {
         .ok()
         .and_then(SourceFormat::from_image)
         .or_else(|| sniff_svg(bytes).then_some(SourceFormat::Svg))
+        .or_else(|| sniff_pdf(bytes).then_some(SourceFormat::Pdf))
 }
 
 #[cfg(test)]
@@ -150,5 +171,33 @@ mod tests {
     fn detect_format_finds_svg_by_content() {
         let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"6\"></svg>";
         assert_eq!(detect_format(svg), Some(SourceFormat::Svg));
+    }
+
+    #[test]
+    fn pdf_extension_is_case_insensitive() {
+        assert_eq!(SourceFormat::from_extension("pdf"), Some(SourceFormat::Pdf));
+        assert_eq!(SourceFormat::from_extension("PDF"), Some(SourceFormat::Pdf));
+    }
+
+    #[test]
+    fn pdf_has_no_encode_target() {
+        assert_eq!(SourceFormat::Pdf.to_image(), None);
+    }
+
+    #[test]
+    fn sniff_pdf_plain_header() {
+        assert!(sniff_pdf(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n"));
+    }
+
+    #[test]
+    fn sniff_pdf_rejects_non_pdf_content() {
+        assert!(!sniff_pdf(b"\x89PNG\r\n\x1a\n"));
+        assert!(!sniff_pdf(b"just some plain text, no markup here"));
+    }
+
+    #[test]
+    fn detect_format_finds_pdf_by_content() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        assert_eq!(detect_format(pdf), Some(SourceFormat::Pdf));
     }
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::decode::{decode_path, map_image_error};
 use crate::error::{Error, Result};
-use crate::folder::is_svg_path;
+use crate::folder::{is_pdf_path, is_svg_path};
 use crate::format::SourceFormat;
 
 /// Resize dimensions above `MAX_RESIZE_DIM` are rejected to prevent runaway memory allocation (a
@@ -62,10 +62,11 @@ pub fn convert_file(
     target: SourceFormat,
     opts: &ConvertOptions,
 ) -> Result<()> {
-    // SVG has no lazy/streaming decode (see decode.rs); reuse `decode_path`'s SVG branch (which
-    // rasterizes at intrinsic size) and convert into a `DynamicImage` so crop/rotate/resize below
-    // are unchanged for every format. Raster formats keep the existing lazy `ImageReader` path.
-    let mut image = if is_svg_path(input) {
+    // SVG and PDF have no lazy/streaming decode (see decode.rs); reuse `decode_path`'s branch for
+    // each (SVG rasterizes at intrinsic size, PDF rasterizes page 1 at its intrinsic size — see
+    // D13 in the decision log) and convert into a `DynamicImage` so crop/rotate/resize below are
+    // unchanged for every format. Raster formats keep the existing lazy `ImageReader` path.
+    let mut image = if is_svg_path(input) || is_pdf_path(input) {
         let decoded = decode_path(input)?;
         image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
             .map(image::DynamicImage::ImageRgba8)
@@ -338,6 +339,72 @@ mod tests {
         let err = convert_file(&src, &dst, SourceFormat::Svg, &ConvertOptions::default())
             .unwrap_err();
         assert!(matches!(err, Error::UnsupportedFormat));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn convert_to_pdf_is_rejected() {
+        let dir = temp_dir("to-pdf-rejected");
+        let src = dir.join("src.png");
+        write_png(&src, 12, 9);
+
+        let dst = dir.join("out.pdf");
+        let err = convert_file(&src, &dst, SourceFormat::Pdf, &ConvertOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, Error::UnsupportedFormat));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal, byte-accurate one-page PDF (see the equivalent, more thoroughly commented
+    /// builder in `decode.rs`'s test module — duplicated here rather than shared across a
+    /// `#[cfg(test)]`-only boundary between crate modules).
+    fn minimal_one_page_pdf(w: f32, h: f32) -> Vec<u8> {
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources << >> >>"),
+        ];
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(buf.len());
+            buf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref_offset = buf.len();
+        let total = objs.len() + 1;
+        buf.extend_from_slice(format!("xref\n0 {total}\n").as_bytes());
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        for &off in &offsets[1..] {
+            buf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        buf.extend_from_slice(
+            format!("trailer\n<< /Size {total} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF")
+                .as_bytes(),
+        );
+        buf
+    }
+
+    #[test]
+    fn convert_pdf_to_png_uses_page_one() {
+        // Skips (rather than fails) if no PDFium library is bound in this environment — see the
+        // "PDF" test section in decode.rs for why that's the expected default outside packaging.
+        let dir = temp_dir("pdf-to-png");
+        let src = dir.join("src.pdf");
+        std::fs::write(&src, minimal_one_page_pdf(200.0, 100.0)).unwrap();
+
+        let dst = dir.join("out.png");
+        match convert_file(&src, &dst, SourceFormat::Png, &ConvertOptions::default()) {
+            Ok(()) => {
+                let meta = crate::read_meta_path(&dst).unwrap();
+                assert_eq!(meta.format, SourceFormat::Png);
+                assert_eq!((meta.width, meta.height), (200, 100));
+            }
+            Err(Error::PdfLibraryMissing(msg)) => {
+                eprintln!("skipping: {msg}");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -105,6 +105,12 @@ pub fn run(args: &[String]) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    if target == SourceFormat::Pdf {
+        eprintln!(
+            "glanvu convert: cannot convert to PDF (raster→PDF isn't supported; PDF is input-only)"
+        );
+        return ExitCode::from(2);
+    }
     let ext = to.to_ascii_lowercase();
 
     if quality.is_some() && target != SourceFormat::Jpeg {
@@ -186,6 +192,18 @@ pub fn run(args: &[String]) -> ExitCode {
             );
             failed.fetch_add(1, Ordering::Relaxed);
             return;
+        }
+
+        if glanvu_core::is_pdf_path(input) {
+            if let Ok(meta) = glanvu_core::read_meta_path(input) {
+                if meta.page_count.unwrap_or(1) > 1 {
+                    println!(
+                        "note: {} has {} pages; only page 1 was converted",
+                        input.display(),
+                        meta.page_count.unwrap()
+                    );
+                }
+            }
         }
 
         match glanvu_core::convert_file(input, output, target, &opts) {
@@ -285,6 +303,9 @@ fn print_help() {
          \x20   -h, --help           print this help\n\
          \n\
          Pipeline order: crop -> rotate -> resize -> encode.\n\
+         \n\
+         SVG and PDF input are rasterized before the pipeline runs (SVG at its intrinsic size,\n\
+         PDF from page 1 only; multi-page PDFs print a note). Neither is a valid --to target.\n\
          \n\
          EXAMPLES:\n\
          \x20   glanvu convert --to webp --resize 2000x2000 --out out/ photos/*.jpg\n\

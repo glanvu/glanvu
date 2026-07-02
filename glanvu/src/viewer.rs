@@ -611,12 +611,15 @@ fn tile_mvp(img: (u32, u32), tile: (f32, f32, f32, f32), win: (f32, f32), st: &V
 }
 
 /// Ideal initial window size (logical px) for an image: capped to 1600x1000, scaled to 90%,
-/// never smaller than 320x240. Used both when creating the window and when resizing to a newly
-/// opened image (Open With / drop from the empty state).
+/// never smaller than 640x360 (owner request: the old 320x240 floor — which is what the empty
+/// state always hits, since its 1x1 placeholder scales to nothing — looked too square/cramped;
+/// 640x360 is 320 wider (+100%) and 120 taller (+50%), landing near 16:9 instead of 4:3). Used
+/// both when creating the window and when resizing to a newly opened image (Open With / drop from
+/// the empty state).
 fn ideal_window_size(iw: u32, ih: u32) -> (f32, f32) {
     let (iw, ih) = (iw.max(1) as f32, ih.max(1) as f32);
     let s = (1600.0 / iw).min(1000.0 / ih).min(1.0) * 0.9;
-    ((iw * s).max(320.0), (ih * s).max(240.0))
+    ((iw * s).max(640.0), (ih * s).max(360.0))
 }
 
 /// MVP for a screen-space rectangle (top-left origin, y-down pixel coords).
@@ -960,6 +963,13 @@ struct Gpu {
     date_text_buf: TextBuffer,
     date_overlay_text: String,
     date_overlay_line_h: f32,
+    // Page overlay (top-right, "N/M" for the current PDF page). Same timer as the path/date
+    // overlays (D13's page-number ask); a separate box since it sits in a different corner.
+    page_uniform_buf: wgpu::Buffer,
+    page_uniform_bind: wgpu::BindGroup,
+    page_text_buf: TextBuffer,
+    page_overlay_text: String,
+    page_overlay_line_h: f32,
     // Watermark logo shown in the empty state (app icon, low opacity, centered).
     watermark_bind: wgpu::BindGroup,
     watermark_uniform_buf: wgpu::Buffer,
@@ -1349,6 +1359,11 @@ impl Gpu {
         let date_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &date_uniform_buf);
         let date_text_buf = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
 
+        // Page overlay (top-right, PDF "N/M").
+        let page_uniform_buf = make_uniform_buffer(&device);
+        let page_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &page_uniform_buf);
+        let page_text_buf = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+
         // Watermark: decode app icon, bake ~22% opacity, upload as texture.
         let watermark_bind = {
             let mut img =
@@ -1431,6 +1446,11 @@ impl Gpu {
             date_text_buf,
             date_overlay_text: String::new(),
             date_overlay_line_h: 18.0,
+            page_uniform_buf,
+            page_uniform_bind,
+            page_text_buf,
+            page_overlay_text: String::new(),
+            page_overlay_line_h: 18.0,
             watermark_bind,
             watermark_uniform_buf,
             watermark_uniform_bind,
@@ -1564,6 +1584,49 @@ impl Gpu {
         let bh = self.date_overlay_line_h + 2.0 * pad;
         let bx = (win_w - margin - bw).max(0.0); // right-aligned
         let by = (win_h - margin - bh).max(0.0);
+        (bx, by, bw, bh, bx + pad, by + pad)
+    }
+
+    /// Lay out the PDF page overlay (top-right — same box style/timer as the path overlay, just
+    /// pinned to the opposite corner so it never collides with the filename/date at the bottom).
+    fn layout_page_overlay(
+        &mut self,
+        text: &str,
+        scale: f32,
+        win_w: f32,
+        _win_h: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
+        if self.page_overlay_text != text {
+            self.page_overlay_text = text.to_string();
+            let font = (13.0 * scale).clamp(12.0, 30.0);
+            self.page_overlay_line_h = font * 1.35;
+            let mut buf = TextBuffer::new(
+                &mut self.font_system,
+                Metrics::new(font, self.page_overlay_line_h),
+            );
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.page_text_buf = buf;
+        }
+        let pad = 8.0 * scale;
+        let margin = 12.0 * scale;
+        let text_w = self
+            .page_text_buf
+            .layout_runs()
+            .fold(0.0_f32, |m, r| m.max(r.line_w));
+        let bw = (text_w + 2.0 * pad)
+            .min(win_w - 2.0 * margin)
+            .max(2.0 * pad);
+        let bh = self.page_overlay_line_h + 2.0 * pad;
+        let bx = (win_w - margin - bw).max(0.0); // right-aligned
+        let by = margin; // top-aligned
         (bx, by, bw, bh, bx + pad, by + pad)
     }
 
@@ -2017,6 +2080,7 @@ impl Gpu {
         uniforms: Uniforms,
         overlay: Option<&str>,
         date_overlay: Option<&str>,
+        page_overlay: Option<&str>,
         status: Option<&str>,
         explorer: Option<&ExplorerState>,
         help: bool,
@@ -2078,6 +2142,22 @@ impl Gpu {
                 }),
             );
             show_date_box = true;
+        }
+
+        // Page overlay (top-right, PDF "N/M").
+        let mut show_page_box = false;
+        let mut page_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(text) = page_overlay {
+            page_coords = self.layout_page_overlay(text, scale, win_w, win_h);
+            let (bx, by, bw, bh, _, _) = page_coords;
+            self.queue.write_buffer(
+                &self.page_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            show_page_box = true;
         }
 
         // Status message (centered).
@@ -2334,6 +2414,7 @@ impl Gpu {
         // ---- ONE combined text prepare() call ----
         let need_text = show_overlay_box
             || show_date_box
+            || show_page_box
             || show_status_box
             || show_explorer
             || show_help_box
@@ -2370,6 +2451,7 @@ impl Gpu {
             // SAFETY: each pointer targets a distinct field from font_system/atlas/swash_cache.
             let p_buf = &self.text_buffer as *const TextBuffer;
             let d_buf = &self.date_text_buf as *const TextBuffer;
+            let pg_buf = &self.page_text_buf as *const TextBuffer;
             let s_buf = &self.status_text_buf as *const TextBuffer;
             let h_title = &self.help_title_buf as *const TextBuffer;
             let h_lk = &self.help_l_keys_buf as *const TextBuffer;
@@ -2428,6 +2510,23 @@ impl Gpu {
                 let (bx, by, bw, bh, tx, ty) = date_coords;
                 areas.push(TextArea {
                     buffer: unsafe { &*d_buf },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + bw) as i32,
+                        bottom: (by + bh) as i32,
+                    },
+                    default_color: Color::rgb(200, 200, 200),
+                    custom_glyphs: &[],
+                });
+            }
+            if show_page_box {
+                let (bx, by, bw, bh, tx, ty) = page_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*pg_buf },
                     left: tx,
                     top: ty,
                     scale: 1.0,
@@ -2741,7 +2840,8 @@ impl Gpu {
                 }
             }
 
-            // 3. Path overlay box (bottom-left) + date overlay box (bottom-right).
+            // 3. Path overlay box (bottom-left) + date overlay box (bottom-right) + page overlay
+            //    box (top-right, PDF "N/M").
             if show_overlay_box {
                 pass.set_bind_group(0, &self.box_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.box_texture_bind, &[]);
@@ -2749,6 +2849,11 @@ impl Gpu {
             }
             if show_date_box {
                 pass.set_bind_group(0, &self.date_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.box_texture_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+            if show_page_box {
+                pass.set_bind_group(0, &self.page_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.box_texture_bind, &[]);
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
@@ -3295,13 +3400,29 @@ struct App {
     svg_vp_settled_at: Instant,
     tile_queue: Arc<TileQueue>,
     tile_rx: Receiver<TileResult>,
+    // ── PDF (D13) ──
+    /// Whether the current image is PDF — gates page-turn navigation (ArrowUp/ArrowDown) and the
+    /// "page X of N" info line.
+    current_is_pdf: bool,
+    /// Parsed current PDF, kept in memory across page turns so each ArrowUp/ArrowDown re-renders
+    /// without re-parsing the file from disk (PDF parsing is not free). `None` for non-PDF images.
+    pdf_doc: Option<glanvu_core::PdfDocument>,
+    /// 0-based index of the currently displayed page within `pdf_doc`. Always 0 for non-PDF
+    /// images and reset to 0 whenever the current file changes.
+    current_pdf_page: usize,
+    /// When `Some(t)`, the current PDF page is re-rendered at the new window size at time `t`.
+    /// Set on window resize while in fit mode (mirrors `svg_rerender_at`'s resize handling) — the
+    /// page render is sized to the window (`render_current_pdf_page`), so leaving it stale after a
+    /// resize keeps showing the old resolution stretched/letterboxed to the new window, which
+    /// looks soft after enlarging. Debounced so a live drag-resize doesn't re-render every frame.
+    pdf_rerender_at: Option<Instant>,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
 /// Text for the D-key confirmation overlay. `set` = true → set as default; false → unset.
 fn confirm_overlay_text(set: bool) -> &'static str {
     if set {
-        "Set Glanvu as default?\n\njpg  jpeg  png  gif\nbmp  tif   tiff webp  svg\n\nEnter = confirm   Esc = cancel"
+        "Set Glanvu as default?\n\njpg  jpeg  png  gif\nbmp  tif   tiff webp  svg  pdf\n\nEnter = confirm   Esc = cancel"
     } else {
         "Restore previous defaults?\n\nGlanvu won't open images\nby default anymore.\n\nEnter = confirm   Esc = cancel"
     }
@@ -3324,7 +3445,8 @@ use HelpRow::{Keys, Section};
 /// inserts a blank line before each section automatically.
 const HELP_LEFT: &[HelpRow] = &[
     Section("Navigate"),
-    Keys("Arrows", "previous · next image"),
+    Keys("← / →", "previous · next image"),
+    Keys("↑ / ↓", "turn PDF page"),
     Keys("Home / End", "first · last image"),
     Keys("F  ·  /", "find by name"),
     Keys("Enter", "directory explorer"),
@@ -3447,6 +3569,88 @@ impl App {
         if let Some(g) = self.gpu.as_mut() {
             g.clear_svg_tiles();
         }
+    }
+
+    /// (Re)load the parsed PDF document for the current image and render its first page. Called
+    /// whenever the current image changes. `None` for non-PDF images. Unlike SVG's flow — which
+    /// uploads the nav/prefetch-decoded texture first and only *afterwards* schedules an async
+    /// crisp re-raster (D11) — PDF has no background re-render worker (see D13): the correct
+    /// on-screen-resolution page render happens synchronously right here, so the texture the
+    /// caller uploaded moments earlier from `self.nav.current_image()` is immediately replaced.
+    fn refresh_pdf_doc(&mut self) {
+        self.pdf_doc = if self.current_is_pdf {
+            self.nav
+                .current_path()
+                .and_then(|p| glanvu_core::PdfDocument::load(p).ok())
+        } else {
+            None
+        };
+        if self.pdf_doc.is_some() {
+            self.render_current_pdf_page();
+        }
+    }
+
+    /// Turn the current PDF's page by `delta` (±1), clamped at the first/last page — no
+    /// wraparound, no fall-through to the next/previous file (D13's navigation model: PDF pages
+    /// and folder files are independent axes). No-op if the current file isn't PDF.
+    fn turn_pdf_page(&mut self, delta: i32) {
+        let Some(doc) = self.pdf_doc.as_ref() else {
+            return;
+        };
+        let new_page = self.current_pdf_page as i32 + delta;
+        if new_page < 0 || new_page as usize >= doc.page_count() {
+            return; // clamped: no-op at the first/last page
+        }
+        self.current_pdf_page = new_page as usize;
+        self.render_current_pdf_page();
+    }
+
+    /// Render `self.current_pdf_page` of the current PDF at the window's physical resolution and
+    /// upload it as the displayed texture, resetting zoom/pan to fit.
+    ///
+    /// Synchronous on the main thread — deliberately not routed through a background-worker
+    /// mailbox the way SVG re-raster is (D11): PDFium page rasterization at a bounded/fit output
+    /// size is expected to be fast enough that the extra complexity isn't justified at v1 (see D13
+    /// in the decision log). This is a judgment call, not a benchmark — if dogfooding a large or
+    /// complex real-world PDF shows visible jank on page-turn, move this to a worker mirroring the
+    /// SVG one; the render call is isolated here specifically so that migration stays a small
+    /// diff.
+    ///
+    /// Resets zoom/pan to fit on every page turn rather than preserving the previous page's view:
+    /// different pages can have different sizes/orientations, and preserving a pan offset across
+    /// a size change could put the viewport somewhere nonsensical — matches how switching files
+    /// already resets to fit.
+    fn render_current_pdf_page(&mut self) {
+        let Some(doc) = self.pdf_doc.as_ref() else {
+            return;
+        };
+        let (win_w, win_h) = self.win_size();
+        // Fit the page's own aspect ratio within the window first (like SVG thumbnails/re-raster
+        // do via the same `fit_within` helper) — rendering straight to win_w×win_h would stretch
+        // the page to the window's aspect ratio instead of showing the whole document.
+        let page_size = doc.page_size(self.current_pdf_page);
+        let render_result = page_size.and_then(|(pw, ph)| {
+            let (out_w, out_h) =
+                glanvu_core::fit_within(pw, ph, win_w.max(1.0) as u32, win_h.max(1.0) as u32);
+            doc.render_page(self.current_pdf_page, out_w, out_h)
+        });
+        match render_result {
+            Ok(img) => {
+                self.img_size = (img.width, img.height);
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.set_image(&img);
+                }
+                self.state = ViewState::fit();
+                self.flash_overlay();
+            }
+            Err(e) => {
+                eprintln!(
+                    "glanvu: failed to render PDF page {}: {e}",
+                    self.current_pdf_page + 1
+                );
+            }
+        }
+        self.redraw();
     }
 
     /// The SVG deep-zoom viewport quad to composite this frame: a draw for the currently CACHED
@@ -3619,6 +3823,9 @@ impl App {
         if let Ok(meta) = glanvu_core::read_meta_path(path) {
             lines.push(meta.format.name().to_string());
             lines.push(human_size(meta.file_size));
+        }
+        if let Some(doc) = self.pdf_doc.as_ref() {
+            lines.push(format!("page {} of {}", self.current_pdf_page + 1, doc.page_count()));
         }
         if let Some(dt) = mtime_string(path) {
             lines.push(dt);
@@ -4273,6 +4480,8 @@ impl App {
     fn apply_nav_result(&mut self, res: glanvu_viewer_core::nav::ShowResult) {
         self.img_size = res.img_size;
         self.current_is_svg = glanvu_core::is_svg_path(&res.path);
+        self.current_is_pdf = glanvu_core::is_pdf_path(&res.path);
+        self.current_pdf_page = 0;
         if let (Some(gpu), Some(img)) = (self.gpu.as_mut(), self.nav.current_image()) {
             gpu.set_image(img);
         }
@@ -4283,6 +4492,9 @@ impl App {
         // already full-res (mipmaps handle minification), so nothing is pending for them.
         self.svg_rerender_at = self.current_is_svg.then(Instant::now);
         self.refresh_svg_doc();
+        // PDF has no async re-render worker (D13): refresh_pdf_doc renders the correct-resolution
+        // page synchronously, immediately replacing the texture uploaded a few lines above.
+        self.refresh_pdf_doc();
         self.update_title(res.index, res.total, &res.path);
         self.flash_overlay();
 
@@ -4348,6 +4560,7 @@ impl App {
                 Uniforms {
                     mvp: mvp((1, 1), win, &self.state),
                 },
+                None,
                 None,
                 None,
                 Some(hint),
@@ -4439,6 +4652,14 @@ impl App {
         } else {
             None
         };
+        // Page overlay (top-right, "N/M") — same timer as the path/date overlays, PDF only.
+        let page_overlay_text = if overlay_active && self.current_is_pdf {
+            self.pdf_doc
+                .as_ref()
+                .map(|doc| format!("{}/{}", self.current_pdf_page + 1, doc.page_count()))
+        } else {
+            None
+        };
         let status = match self.status_until {
             Some(t) if now < t => Some(self.status_text.as_str()),
             _ => None,
@@ -4466,6 +4687,7 @@ impl App {
             },
             overlay.as_deref(),
             date_overlay,
+            page_overlay_text.as_deref(),
             status,
             explorer_ref,
             self.help_visible,
@@ -4519,6 +4741,9 @@ impl ApplicationHandler for App {
         // is smaller than the (min-clamped) window, fit magnifies it. Re-raster at window size.
         self.svg_rerender_at = self.current_is_svg.then(Instant::now);
         self.refresh_svg_doc();
+        // Same idea for PDF: the initial page render in `run()` happens before a real window
+        // exists, so re-render at the now-known window size.
+        self.refresh_pdf_doc();
         self.draw();
         self.redraw();
     }
@@ -4546,6 +4771,9 @@ impl ApplicationHandler for App {
                 // In fit mode the effective on-screen scale changes with the window size.
                 if self.state.fit {
                     self.schedule_svg_rerender();
+                    if self.current_is_pdf {
+                        self.pdf_rerender_at = Some(Instant::now() + SVG_RERENDER_DEBOUNCE);
+                    }
                 }
                 self.redraw();
             }
@@ -4825,7 +5053,10 @@ impl ApplicationHandler for App {
                                 .set_title("Open image — Glanvu")
                                 .add_filter(
                                     "Images",
-                                    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp"],
+                                    &[
+                                        "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp",
+                                        "svg", "pdf",
+                                    ],
                                 )
                                 .add_filter("All files", &["*"])
                                 .pick_file()
@@ -5111,17 +5342,41 @@ impl ApplicationHandler for App {
                         self.open_explorer();
                         self.redraw();
                     }
-                    // Manual navigation stops the slideshow (user took control).
-                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
+                    // Left/Right always change files — unaffected by PDF page state (D13's
+                    // navigation model). Manual navigation stops the slideshow (user took
+                    // control).
+                    Key::Named(NamedKey::ArrowRight) => {
                         self.stop_slideshow();
                         if let Some(res) = self.nav.next() {
                             self.apply_nav_result(res);
                         }
                     }
-                    Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
+                    Key::Named(NamedKey::ArrowLeft) => {
                         self.stop_slideshow();
                         if let Some(res) = self.nav.prev() {
                             self.apply_nav_result(res);
+                        }
+                    }
+                    // Down/Up: page-turn a multi-page PDF (clamped, no wraparound); for every
+                    // other file, fall through to today's next/prev-file behavior (D13).
+                    Key::Named(NamedKey::ArrowDown) => {
+                        if self.current_is_pdf {
+                            self.turn_pdf_page(1);
+                        } else {
+                            self.stop_slideshow();
+                            if let Some(res) = self.nav.next() {
+                                self.apply_nav_result(res);
+                            }
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        if self.current_is_pdf {
+                            self.turn_pdf_page(-1);
+                        } else {
+                            self.stop_slideshow();
+                            if let Some(res) = self.nav.prev() {
+                                self.apply_nav_result(res);
+                            }
                         }
                     }
                     Key::Named(NamedKey::Home) => {
@@ -5517,6 +5772,18 @@ impl ApplicationHandler for App {
             }
         }
 
+        // PDF page re-render on resize settle (D13 follow-up: a stale page render left the
+        // document looking soft after enlarging the window). Synchronous — no worker/mailbox
+        // needed, see `render_current_pdf_page`'s doc comment.
+        if let Some(t) = self.pdf_rerender_at {
+            if now >= t {
+                self.pdf_rerender_at = None;
+                if self.current_is_pdf {
+                    self.render_current_pdf_page();
+                }
+            }
+        }
+
         // Decide whether to (re)render the SVG deep-zoom viewport now that events have settled.
         // Returns a wakeup while debouncing a scale change so this re-runs to enqueue after settle.
         let vp_win = self
@@ -5535,6 +5802,7 @@ impl ApplicationHandler for App {
             self.slideshow_next,
             self.status_until,
             self.svg_rerender_at,
+            self.pdf_rerender_at,
             svg_poll_deadline,
             tile_poll_deadline,
             vp_debounce_deadline,
@@ -5566,6 +5834,7 @@ pub fn run(path: &str) -> ExitCode {
     };
     let img_size = (first_image.width, first_image.height);
     let current_is_svg = glanvu_core::is_svg_path(&first_path);
+    let current_is_pdf = glanvu_core::is_pdf_path(&first_path);
 
     let dir = first_path
         .parent()
@@ -5644,6 +5913,10 @@ pub fn run(path: &str) -> ExitCode {
         svg_vp_settled_at: Instant::now(),
         tile_queue,
         tile_rx,
+        current_is_pdf,
+        pdf_doc: None,
+        current_pdf_page: 0,
+        pdf_rerender_at: None,
     };
 
     match event_loop.run_app(&mut app) {
@@ -5741,6 +6014,10 @@ pub fn run_empty() -> ExitCode {
         svg_vp_settled_at: Instant::now(),
         tile_queue,
         tile_rx,
+        current_is_pdf: false,
+        pdf_doc: None,
+        current_pdf_page: 0,
+        pdf_rerender_at: None,
     };
 
     match event_loop.run_app(&mut app) {

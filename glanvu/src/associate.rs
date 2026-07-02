@@ -16,10 +16,11 @@
 use std::process::ExitCode;
 use std::sync::Mutex;
 
-/// Image extensions Glanvu can decode. Keep in sync with `CFBundleTypeExtensions`
-/// in `scripts/build-macos-app.sh`.
+/// Image extensions Glanvu can decode. Keep in sync with `CFBundleTypeExtensions` in
+/// `scripts/build-macos-app.sh` and the `MimeType` line in `scripts/build-linux-pkg.sh`'s
+/// `.desktop` entry.
 pub const SUPPORTED_EXTS: &[&str] =
-    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg"];
+    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg", "pdf"];
 
 /// Result of a background set/unset operation, posted here for the viewer to pick up.
 pub static ASSOC_RESULT: Mutex<Option<String>> = Mutex::new(None);

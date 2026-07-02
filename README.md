@@ -32,6 +32,8 @@ The name is **glance + view** — a fast look.
   drawn on the GPU (wgpu). No system C libraries, no surprises.
 - **SVG, crisp at every zoom** — vector images stay sharp: Glanvu re-rasterizes at the display
   resolution once you stop zooming, instead of stretching a blurry fixed-size raster.
+- **PDF viewing** — open multi-page PDFs like any other image; **↑ / ↓** turn pages (clamped at
+  the first/last page) while **← / →** still walk the folder.
 - **Keyboard-first navigation** — walk a whole folder with the arrow keys; zoom, pan, rotate, fit,
   and go fullscreen without touching the mouse. Press **H** any time for the full cheatsheet.
 - **Find by name** — press **F** (or **/**) for a fuzzy search across the folder: a floating match
@@ -70,14 +72,14 @@ The name is **glance + view** — a fast look.
 
 ## Install
 
-Pre-built binaries for v0.7.0 are available at [glanvu.com](https://glanvu.com) and
+Pre-built binaries for v0.8.0 are available at [glanvu.com](https://glanvu.com) and
 [GitHub Releases](https://github.com/glanvu/glanvu/releases):
 
 | Platform | Download |
 |---|---|
-| macOS (Apple Silicon) | [`Glanvu-0.7.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.7.0/Glanvu-0.7.0-macos-arm64.zip) |
-| Linux x86_64 | [`glanvu-0.7.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.7.0/glanvu-0.7.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.7.0/glanvu_0.7.0_amd64.deb) |
-| Windows x64 | [`Glanvu-0.7.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.7.0/Glanvu-0.7.0-windows-x86_64.zip) |
+| macOS (Apple Silicon) | [`Glanvu-0.8.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.8.0/Glanvu-0.8.0-macos-arm64.zip) |
+| Linux x86_64 | [`glanvu-0.8.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.8.0/glanvu-0.8.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.8.0/glanvu_0.8.0_amd64.deb) |
+| Windows x64 | [`Glanvu-0.8.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.8.0/Glanvu-0.8.0-windows-x86_64.zip) |
 
 Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
 see the [Roadmap](#roadmap).
@@ -96,6 +98,25 @@ make release            # release binary → target/release/glanvu
 make app                # macOS .app bundle → dist/macos/Glanvu.app  (macOS only)
 make install-app        # install to /Applications/                  (macOS only)
 ```
+
+#### PDF support (optional)
+
+PDF rendering uses [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD-3-Clause) via
+[pdfium-render](https://github.com/ajrcarey/pdfium-render) (MIT/Apache-2.0) — a dynamic library
+that isn't bundled in this repository or vendored by `cargo build`. Pre-built binaries already
+include it; building from source, it's an optional extra step:
+
+```bash
+# macOS (Apple Silicon example — see https://github.com/bblanchon/pdfium-binaries/releases
+# for other platforms/architectures):
+curl -LO https://github.com/bblanchon/pdfium-binaries/releases/download/<version>/pdfium-mac-arm64.tgz
+tar -xzf pdfium-mac-arm64.tgz
+cp lib/libpdfium.dylib target/release/
+```
+
+Without this file, Glanvu builds and runs normally — every other format works — but opening a PDF
+shows a clean error instead of the page. `GLANVU_PDFIUM_LIB=/path/to/dir` points Glanvu at a
+library kept somewhere other than next to the binary (handy so it survives `cargo clean`).
 
 ## Usage
 
@@ -142,6 +163,7 @@ Glanvu refuses to overwrite an input or to map two inputs to the same output (da
 | Key | Action |
 |---|---|
 | `←` `→` | Previous · next image |
+| `↑` `↓` | Turn PDF page (clamped at first/last page) |
 | `Home` / `End` | First · last image |
 | `F` / `/` | Find image by name |
 | `Enter` | Directory explorer |
@@ -168,10 +190,10 @@ Glanvu refuses to overwrite an input or to map two inputs to the same output (da
 Glanvu's north star is a **universal viewer**: open almost anything, instantly. The fast image
 viewer above is the foundation. Planned, in priority order:
 
-- **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images, multipage documents.
+- **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images.
 - **Technical & 3D** — DICOM (medical), CAD drawings, 3D-printing formats (STL/OBJ/3MF/STEP/G-code)
   and general 3D models.
-- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.7.0).
+- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.8.0).
   Package managers in progress: Homebrew tap, Scoop bucket, AUR, winget, Chocolatey.
   Code signing and auto-update planned.
 - **Hosted (Phase 3)** — [glanvu.com](https://glanvu.com): web viewer, shareable links, and a
@@ -207,6 +229,13 @@ The workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 Sample images used in the screenshots are by various authors via
 [Pixabay](https://pixabay.com) (Pixabay Content License), sourced from
 [yavuzceliker/sample-images](https://github.com/yavuzceliker/sample-images).
+
+Third-party rendering engines bundled in Glanvu:
+
+- **SVG** — [resvg](https://github.com/linebender/resvg)/[usvg](https://github.com/linebender/resvg)/[tiny-skia](https://github.com/linebender/tiny-skia) (MIT/Apache-2.0), pure Rust.
+- **PDF** — [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD-3-Clause, © The PDFium Authors)
+  via [pdfium-render](https://github.com/ajrcarey/pdfium-render) (MIT/Apache-2.0). See
+  [Build from source](#build-from-source) for how the native library is obtained.
 
 ## License
 

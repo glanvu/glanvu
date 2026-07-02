@@ -6,7 +6,7 @@ resolver = "2"
 members = ["glanvu-core", "glanvu-viewer-core", "glanvu"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.96"
 license = "Apache-2.0"
@@ -26,6 +26,14 @@ thiserror = "2"
 # SVG: usvg (parse) + resvg (rasterize) + tiny-skia (the pixmap it renders into). Pure Rust,
 # consistent with the "no system C libraries" decoder philosophy above (D11 in the decision log).
 resvg = "0.47"
+# PDF: a Rust wrapper (MIT/Apache-2.0) around Google's PDFium (BSD-3-Clause), Glanvu's first
+# non-pure-Rust runtime dependency (D13 in the decision log) — no mature pure-Rust PDF renderer
+# exists. PDFium is loaded as a *dynamic* library located next to the running executable at
+# runtime (see glanvu-core/src/pdf.rs), not linked at build time: it is fetched separately per
+# platform from https://github.com/bblanchon/pdfium-binaries (pin the exact release tag used for
+# packaging in the CI workflow's PDFIUM_VERSION, not "latest" — that repo rolls frequently).
+# Missing library at runtime is a normal, non-fatal state: every other format is unaffected.
+pdfium-render = "0.9"
 
 # Lints applied workspace-wide. Treat warnings as errors in CI / pre-push.
 [workspace.lints.clippy]
