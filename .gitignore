@@ -18,4 +18,7 @@
 /Glanvu-*.zip
 /.playwright-mcp/
 
+# Graphify knowledge graph (generated, regenerable via `graphify .`)
+graphify-out/
+
 # Note: Cargo.lock IS committed (this workspace ships a binary).
