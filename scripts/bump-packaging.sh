@@ -18,8 +18,21 @@ echo "Bumping $PREV_VERSION → $VERSION"
 
 # ── Fetch digests from GitHub release ─────────────────────────────────────────
 echo "Fetching release digests for $TAG from $REPO..."
-ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets \
-  --jq '.assets[] | "\(.name) \(.digest)"')
+ASSETS=""
+for attempt in 1 2 3; do
+  ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets \
+    --jq '.assets[] | "\(.name) \(.digest)"' 2>/dev/null || true)
+  if [[ -n "$ASSETS" ]]; then
+    break
+  fi
+  echo "Attempt $attempt: release assets not yet visible, waiting 10s..."
+  sleep 10
+done
+
+if [[ -z "$ASSETS" ]]; then
+  echo "Error: could not fetch release assets after 3 attempts" >&2
+  exit 1
+fi
 
 extract() { echo "$ASSETS" | awk "/$1/ {print \$2}" | sed 's/^sha256://'; }
 SHA_MACOS_ARM=$(extract "Glanvu-${VERSION}-macos-arm64\\.zip")
@@ -27,9 +40,21 @@ SHA_MACOS_X86=$(extract "Glanvu-${VERSION}-macos-x86_64\\.zip")
 SHA_LINUX=$(extract     "glanvu-${VERSION}-linux-x86_64\\.tar\\.gz")
 SHA_WIN=$(extract       "Glanvu-${VERSION}-windows-x86_64\\.zip")
 
-[[ -z "$SHA_MACOS_ARM" || -z "$SHA_MACOS_X86" || -z "$SHA_LINUX" || -z "$SHA_WIN" ]] && {
-  echo "Error: could not find all four digests. Does the release have both macOS assets?" >&2
-  printf "%s\n" "$ASSETS" >&2; exit 1; }
+# Report missing digests explicitly
+MISSING=()
+[[ -z "$SHA_MACOS_ARM" ]] && MISSING+=("macOS arm64 (.zip)")
+[[ -z "$SHA_MACOS_X86" ]] && MISSING+=("macOS x64 (.zip)")
+[[ -z "$SHA_LINUX" ]] && MISSING+=("Linux (.tar.gz)")
+[[ -z "$SHA_WIN" ]] && MISSING+=("Windows (.zip)")
+
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  echo "Error: missing required release assets:" >&2
+  for m in "${MISSING[@]}"; do echo "  - $m" >&2; done
+  echo "" >&2
+  echo "Available assets:" >&2
+  printf "%s\n" "$ASSETS" >&2
+  exit 1
+fi
 
 SHA_WIN_UP=$(echo "$SHA_WIN" | tr '[:lower:]' '[:upper:]')
 printf "macOS arm64: %s\nmacOS x86_64: %s\nLinux:       %s\nWindows:     %s\n\n" \
