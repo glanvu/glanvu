@@ -102,11 +102,17 @@ jobs:
           # Sync fork's master with upstream before branching
           UPSTREAM_SHA=$(gh api "repos/${UPSTREAM}/git/ref/heads/master" --jq '.object.sha')
 
+          # Force the fork's master to match upstream so the SHA is known to the fork
+          gh api "repos/${FORK}/git/refs/heads/master" \
+            --method PATCH \
+            --field "sha=${UPSTREAM_SHA}" \
+            --field force=true 2>/dev/null || true
+
           # Delete branch if it already exists (idempotent re-runs)
           gh api "repos/${FORK}/git/refs/heads/${BRANCH}" \
             --method DELETE 2>/dev/null || true
 
-          # Create fresh branch from upstream master
+          # Create fresh branch from the synced SHA
           gh api "repos/${FORK}/git/refs" \
             --method POST \
             --field "ref=refs/heads/${BRANCH}" \
