@@ -19,8 +19,10 @@ use std::sync::Mutex;
 /// Image extensions Glanvu can decode. Keep in sync with `CFBundleTypeExtensions` in
 /// `scripts/build-macos-app.sh` and the `MimeType` line in `scripts/build-linux-pkg.sh`'s
 /// `.desktop` entry.
-pub const SUPPORTED_EXTS: &[&str] =
-    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg", "pdf"];
+pub const SUPPORTED_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "exr", "qoi", "dds", "pbm",
+    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf",
+];
 
 /// Result of a background set/unset operation, posted here for the viewer to pick up.
 pub static ASSOC_RESULT: Mutex<Option<String>> = Mutex::new(None);
@@ -330,8 +332,7 @@ mod platform {
     ///   3. `.<ext>\OpenWithProgids` → Glanvu offered for each supported extension.
     fn register(exe: &str) -> io::Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let classes =
-            hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)?;
+        let classes = hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)?;
 
         // 1) ProgID with open command + icon.
         let (progid, _) = classes.create_subkey(PROGID)?;
@@ -362,12 +363,11 @@ mod platform {
     /// to the remaining handlers. The app stays in the "Open with" list (Applications key).
     fn unregister_defaults() {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(classes) =
-            hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)
+        if let Ok(classes) = hkcu.open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)
         {
             for ext in SUPPORTED_EXTS {
-                if let Ok(owp) = classes
-                    .open_subkey_with_flags(format!(r".{ext}\OpenWithProgids"), KEY_WRITE)
+                if let Ok(owp) =
+                    classes.open_subkey_with_flags(format!(r".{ext}\OpenWithProgids"), KEY_WRITE)
                 {
                     let _ = owp.delete_value(PROGID);
                 }
@@ -410,9 +410,7 @@ mod platform {
                 println!("Current default ProgID per image type (Windows owns the real default):");
                 for ext in exts {
                     let choice = hkcu
-                        .open_subkey(format!(
-                            r"Software\Classes\.{ext}\UserChoice"
-                        ))
+                        .open_subkey(format!(r"Software\Classes\.{ext}\UserChoice"))
                         .ok()
                         .and_then(|k| k.get_value::<String, _>("ProgId").ok())
                         .unwrap_or_else(|| "(unset)".to_string());

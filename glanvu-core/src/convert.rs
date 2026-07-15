@@ -139,7 +139,9 @@ pub fn convert_file(
         }
         _ => {
             let format = target.to_image().ok_or(Error::UnsupportedFormat)?;
-            image.save_with_format(output, format).map_err(map_image_error)
+            image
+                .save_with_format(output, format)
+                .map_err(map_image_error)
         }
     }
 }
@@ -336,8 +338,8 @@ mod tests {
         write_png(&src, 12, 9);
 
         let dst = dir.join("out.svg");
-        let err = convert_file(&src, &dst, SourceFormat::Svg, &ConvertOptions::default())
-            .unwrap_err();
+        let err =
+            convert_file(&src, &dst, SourceFormat::Svg, &ConvertOptions::default()).unwrap_err();
         assert!(matches!(err, Error::UnsupportedFormat));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -349,8 +351,8 @@ mod tests {
         write_png(&src, 12, 9);
 
         let dst = dir.join("out.pdf");
-        let err = convert_file(&src, &dst, SourceFormat::Pdf, &ConvertOptions::default())
-            .unwrap_err();
+        let err =
+            convert_file(&src, &dst, SourceFormat::Pdf, &ConvertOptions::default()).unwrap_err();
         assert!(matches!(err, Error::UnsupportedFormat));
         let _ = std::fs::remove_dir_all(&dir);
     }

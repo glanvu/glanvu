@@ -16,11 +16,12 @@ repository = "https://github.com/glanvu/glanvu"
 [workspace.dependencies]
 # Shared dependencies are declared here and referenced with `dep.workspace = true`
 # in member crates.
-# Pure-Rust decode stack (no system C libraries) for the Phase 1 base formats.
+# Pure-Rust decode stack (no system C libraries) for the base formats.
 # AVIF is intentionally NOT enabled here: its decoder needs a C dav1d dependency, so it is
 # split out pending a decode-backend decision (see decision-log Q3/D10 note).
 image = { version = "0.25", default-features = false, features = [
     "jpeg", "png", "gif", "bmp", "tiff", "webp",
+    "ico", "exr", "qoi", "dds", "pnm", "ff", "tga",
 ] }
 thiserror = "2"
 # SVG: usvg (parse) + resvg (rasterize) + tiny-skia (the pixmap it renders into). Pure Rust,

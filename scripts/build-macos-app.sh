@@ -157,6 +157,17 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>tif</string>
         <string>tiff</string>
         <string>webp</string>
+        <string>ico</string>
+        <string>exr</string>
+        <string>qoi</string>
+        <string>dds</string>
+        <string>pbm</string>
+        <string>pgm</string>
+        <string>ppm</string>
+        <string>pfm</string>
+        <string>ff</string>
+        <string>farbfeld</string>
+        <string>tga</string>
         <string>svg</string>
         <string>pdf</string>
       </array>

@@ -453,7 +453,10 @@ mod tests {
 
     #[test]
     fn svg_detect_format_by_content() {
-        assert_eq!(detect_format(SAMPLE_SVG.as_bytes()), Some(SourceFormat::Svg));
+        assert_eq!(
+            detect_format(SAMPLE_SVG.as_bytes()),
+            Some(SourceFormat::Svg)
+        );
     }
 
     #[test]
@@ -535,7 +538,12 @@ mod tests {
 
     fn px(img: &DecodedImage, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * img.width + x) * 4) as usize;
-        [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]]
+        [
+            img.rgba[i],
+            img.rgba[i + 1],
+            img.rgba[i + 2],
+            img.rgba[i + 3],
+        ]
     }
 
     #[test]
@@ -586,7 +594,12 @@ mod tests {
                 px(&full, sx, sy),
                 {
                     let i = ((sy * 100 + sx) * 4) as usize;
-                    [stitched[i], stitched[i + 1], stitched[i + 2], stitched[i + 3]]
+                    [
+                        stitched[i],
+                        stitched[i + 1],
+                        stitched[i + 2],
+                        stitched[i + 3],
+                    ]
                 },
                 "quadrant sample at ({sx},{sy}) differs between render_fit and stitched tiles"
             );

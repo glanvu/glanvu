@@ -27,8 +27,7 @@ fn score(query: &str, name: &str) -> Option<i32> {
             if prev_match.is_some_and(|p| p + 1 == i) {
                 s += 8; // contiguous with the previous match
             }
-            let at_boundary =
-                i == 0 || matches!(n.get(i - 1), Some(' ' | '_' | '-' | '.'));
+            let at_boundary = i == 0 || matches!(n.get(i - 1), Some(' ' | '_' | '-' | '.'));
             if at_boundary {
                 s += 6; // start of a word
             }

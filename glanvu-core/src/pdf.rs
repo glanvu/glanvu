@@ -76,7 +76,9 @@ fn pdfium_binding() -> Option<&'static Pdfium> {
 static PDFIUM_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_pdfium<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = PDFIUM_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = PDFIUM_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     f()
 }
 
@@ -194,7 +196,9 @@ impl Drop for PdfDocument {
     /// other access (see [`PDFIUM_LOCK`]'s doc comment), or dropping a document on one thread
     /// could still corrupt PDFium's shared internal state while another thread is mid-render.
     fn drop(&mut self) {
-        let _guard = PDFIUM_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = PDFIUM_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         drop(self.document.take());
     }
 }

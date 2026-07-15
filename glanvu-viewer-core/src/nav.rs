@@ -305,7 +305,11 @@ impl FolderNav {
     /// while the app wasn't looking). Applies `mode` ordering, preserves the current image when it
     /// survives (else clamps to a neighbour), and evicts cache entries for vanished files.
     /// Returns `(added, removed)` counts, or `None` if nothing changed.
-    pub fn sync_paths(&mut self, mut new_paths: Vec<PathBuf>, mode: SortMode) -> Option<(usize, usize)> {
+    pub fn sync_paths(
+        &mut self,
+        mut new_paths: Vec<PathBuf>,
+        mode: SortMode,
+    ) -> Option<(usize, usize)> {
         sort_paths_by(&mut new_paths, mode);
         if new_paths == self.paths {
             return None;
@@ -457,11 +461,7 @@ mod tests {
 
         // New scan: drop 0000, keep 0001+0002, add 0003.
         let p3 = dir.join("0003.png");
-        let new_paths = vec![
-            dir.join("0001.png"),
-            dir.join("0002.png"),
-            p3.clone(),
-        ];
+        let new_paths = vec![dir.join("0001.png"), dir.join("0002.png"), p3.clone()];
         let change = nav.sync_paths(new_paths, SortMode::NameAsc).unwrap();
         assert_eq!(change, (1, 1)); // +0003, -0000
         assert_eq!(nav.paths.len(), 3);

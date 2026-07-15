@@ -28,8 +28,9 @@ The name is **glance + view** — a fast look.
 
 ## What you get today
 
-- **Instant image viewing** — JPEG, PNG, WebP, GIF, BMP and TIFF, decoded by pure-Rust codecs and
-  drawn on the GPU (wgpu). No system C libraries, no surprises.
+- **Instant image viewing** — JPEG, PNG, WebP, GIF, BMP, TIFF, ICO, QOI, EXR (HDR), DDS, PNM
+  (PBM/PGM/PPM/PFM), farbfeld and TGA, decoded by pure-Rust codecs and drawn on the GPU (wgpu).
+  No system C libraries, no surprises.
 - **SVG, crisp at every zoom** — vector images stay sharp: Glanvu re-rasterizes at the display
   resolution once you stop zooming, instead of stretching a blurry fixed-size raster.
 - **PDF viewing** — open multi-page PDFs like any other image; **↑ / ↓** turn pages (clamped at

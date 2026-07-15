@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(g.selected, HashSet::from([3, 4, 5, 6]));
         assert_eq!(g.sel, 6);
         assert_eq!(g.anchor, 3); // anchor preserved
-        // Range the other direction re-extends from the same anchor.
+                                 // Range the other direction re-extends from the same anchor.
         g.select_range(1);
         assert_eq!(g.selected, HashSet::from([1, 2, 3]));
     }
@@ -271,7 +271,14 @@ mod tests {
         );
         assert!(hits.contains(&0) && hits.contains(&1));
         // A tiny rect inside tile 0 only hits tile 0.
-        let one = g.tiles_in_rect(MARGIN + 2.0, MARGIN + 2.0, MARGIN + 4.0, MARGIN + 4.0, 1000.0, 5);
+        let one = g.tiles_in_rect(
+            MARGIN + 2.0,
+            MARGIN + 2.0,
+            MARGIN + 4.0,
+            MARGIN + 4.0,
+            1000.0,
+            5,
+        );
         assert_eq!(one, vec![0]);
     }
 

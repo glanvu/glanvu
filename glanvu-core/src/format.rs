@@ -4,8 +4,9 @@
 
 /// An image container/codec Glanvu can decode.
 ///
-/// This is the Phase 1 base set (all pure-Rust decoders). It is `#[non_exhaustive]` because the
-/// long-tail formats (RAW, HEIF, JPEG XL, DICOM, ...) arrive via the plugin layer in later phases.
+/// All raster formats are decoded by pure-Rust codecs (no system C libraries). SVG and PDF
+/// have dedicated render paths. The enum is `#[non_exhaustive]` because more formats (RAW, HEIF,
+/// JPEG XL, DICOM, ...) arrive in later phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SourceFormat {
@@ -15,6 +16,13 @@ pub enum SourceFormat {
     Bmp,
     Tiff,
     WebP,
+    Ico,
+    Exr,
+    Qoi,
+    Dds,
+    Pnm,
+    Farbfeld,
+    Tga,
     /// A vector format (XML), unlike every other variant here. Input-only: there is no `image`
     /// crate encode target, so `to_image()` returns `None` for it (see D11 in the decision log).
     Svg,
@@ -34,6 +42,13 @@ impl SourceFormat {
             SourceFormat::Bmp => "BMP",
             SourceFormat::Tiff => "TIFF",
             SourceFormat::WebP => "WebP",
+            SourceFormat::Ico => "ICO",
+            SourceFormat::Exr => "EXR",
+            SourceFormat::Qoi => "QOI",
+            SourceFormat::Dds => "DDS",
+            SourceFormat::Pnm => "PNM",
+            SourceFormat::Farbfeld => "Farbfeld",
+            SourceFormat::Tga => "TGA",
             SourceFormat::Svg => "SVG",
             SourceFormat::Pdf => "PDF",
         }
@@ -48,6 +63,13 @@ impl SourceFormat {
             "bmp" => Some(SourceFormat::Bmp),
             "tif" | "tiff" => Some(SourceFormat::Tiff),
             "webp" => Some(SourceFormat::WebP),
+            "ico" => Some(SourceFormat::Ico),
+            "exr" => Some(SourceFormat::Exr),
+            "qoi" => Some(SourceFormat::Qoi),
+            "dds" => Some(SourceFormat::Dds),
+            "pbm" | "pgm" | "ppm" | "pfm" => Some(SourceFormat::Pnm),
+            "ff" | "farbfeld" => Some(SourceFormat::Farbfeld),
+            "tga" => Some(SourceFormat::Tga),
             "svg" => Some(SourceFormat::Svg),
             "pdf" => Some(SourceFormat::Pdf),
             _ => None,
@@ -66,6 +88,13 @@ impl SourceFormat {
             SourceFormat::Bmp => Some(image::ImageFormat::Bmp),
             SourceFormat::Tiff => Some(image::ImageFormat::Tiff),
             SourceFormat::WebP => Some(image::ImageFormat::WebP),
+            SourceFormat::Ico => Some(image::ImageFormat::Ico),
+            SourceFormat::Exr => None,
+            SourceFormat::Qoi => Some(image::ImageFormat::Qoi),
+            SourceFormat::Dds => None,
+            SourceFormat::Pnm => Some(image::ImageFormat::Pnm),
+            SourceFormat::Farbfeld => Some(image::ImageFormat::Farbfeld),
+            SourceFormat::Tga => Some(image::ImageFormat::Tga),
             SourceFormat::Svg => None,
             SourceFormat::Pdf => None,
         }
@@ -80,6 +109,13 @@ impl SourceFormat {
             image::ImageFormat::Bmp => Some(SourceFormat::Bmp),
             image::ImageFormat::Tiff => Some(SourceFormat::Tiff),
             image::ImageFormat::WebP => Some(SourceFormat::WebP),
+            image::ImageFormat::Ico => Some(SourceFormat::Ico),
+            image::ImageFormat::OpenExr => Some(SourceFormat::Exr),
+            image::ImageFormat::Qoi => Some(SourceFormat::Qoi),
+            image::ImageFormat::Dds => Some(SourceFormat::Dds),
+            image::ImageFormat::Pnm => Some(SourceFormat::Pnm),
+            image::ImageFormat::Farbfeld => Some(SourceFormat::Farbfeld),
+            image::ImageFormat::Tga => Some(SourceFormat::Tga),
             _ => None,
         }
     }
@@ -143,7 +179,9 @@ mod tests {
 
     #[test]
     fn sniff_svg_plain_tag() {
-        assert!(sniff_svg(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
+        assert!(sniff_svg(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+        ));
     }
 
     #[test]
@@ -199,5 +237,45 @@ mod tests {
     fn detect_format_finds_pdf_by_content() {
         let pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
         assert_eq!(detect_format(pdf), Some(SourceFormat::Pdf));
+    }
+
+    #[test]
+    fn new_extensions_resolve() {
+        assert_eq!(SourceFormat::from_extension("ico"), Some(SourceFormat::Ico));
+        assert_eq!(SourceFormat::from_extension("EXR"), Some(SourceFormat::Exr));
+        assert_eq!(SourceFormat::from_extension("qoi"), Some(SourceFormat::Qoi));
+        assert_eq!(SourceFormat::from_extension("dds"), Some(SourceFormat::Dds));
+        assert_eq!(SourceFormat::from_extension("ppm"), Some(SourceFormat::Pnm));
+        assert_eq!(SourceFormat::from_extension("pfm"), Some(SourceFormat::Pnm));
+        assert_eq!(
+            SourceFormat::from_extension("ff"),
+            Some(SourceFormat::Farbfeld)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("farbfeld"),
+            Some(SourceFormat::Farbfeld)
+        );
+        assert_eq!(SourceFormat::from_extension("tga"), Some(SourceFormat::Tga));
+    }
+
+    #[test]
+    fn decode_only_formats_have_no_encode_target() {
+        assert_eq!(SourceFormat::Exr.to_image(), None);
+        assert_eq!(SourceFormat::Dds.to_image(), None);
+        assert_eq!(SourceFormat::Ico.to_image(), Some(image::ImageFormat::Ico));
+        assert_eq!(SourceFormat::Qoi.to_image(), Some(image::ImageFormat::Qoi));
+    }
+
+    #[test]
+    fn ico_detect_by_magic() {
+        let ico =
+            b"\x00\x00\x01\x00\x01\x00\x01\x01\x00\x00\x01\x00\x18\x00\x30\x00\x00\x00\x16\x00";
+        assert_eq!(detect_format(ico), Some(SourceFormat::Ico));
+    }
+
+    #[test]
+    fn qoi_detect_by_magic() {
+        let qoi = b"qoif\x00\x01\x00\x01\x04\x00";
+        assert_eq!(detect_format(qoi), Some(SourceFormat::Qoi));
     }
 }

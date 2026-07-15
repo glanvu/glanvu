@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use crate::format::SourceFormat;
 
 /// File extensions Glanvu can currently open (the Phase 1 base set), lowercase, without the dot.
-const SUPPORTED_EXTENSIONS: &[&str] =
-    &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "svg", "pdf"];
+const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "exr", "qoi", "dds", "pbm",
+    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf",
+];
 
 /// Whether a path has a supported image extension (case-insensitive).
 pub fn is_supported_path(path: &Path) -> bool {
