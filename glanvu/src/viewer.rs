@@ -36,6 +36,40 @@ use glanvu_viewer_core::grid::{GridState, CELL_H, CELL_W, GAP, MARGIN, SEL_OUTSE
 use glanvu_viewer_core::nav::{locate, FolderNav};
 use glanvu_viewer_core::thumb::{ThumbnailCache, THUMB_H, THUMB_W};
 
+/// Centralized font-size configuration for all on-screen text.
+/// Using a single role (BODY = 15.0 base, clamp 13.0–30.0, line-height factor 1.5) for all
+/// overlay text (path, date, PDF page number) and panel text (Info, Help, About, Confirm, Findbar,
+/// Version, Donate) eliminates the historical drift where each surface picked its own literal.
+/// Status overlay (zoom indicator) is also routed through this module for centralized control,
+/// though it could use a distinct role if a different prominence is desired later.
+mod ui_text {
+
+    /// Base font size (logical points before scale), clamp min/max, line-height factor.
+    pub struct FontSpec {
+        pub base: f32,
+        pub lo: f32,
+        pub hi: f32,
+        pub lh_factor: f32,
+    }
+
+    /// Single source of truth: 15.0 base, clamp 13.0–30.0, 1.5× line height.
+    /// Applies to path overlay, date overlay, PDF page overlay, Info, Help, About, Confirm,
+    /// Findbar, Version label, and Donate text.
+    pub const BODY: FontSpec = FontSpec {
+        base: 15.0,
+        lo: 13.0,
+        hi: 30.0,
+        lh_factor: 1.5,
+    };
+
+    /// Compute font size and line height for a given spec at the current DPI scale.
+    /// Returns `(font_size, line_height)` so callers can build Metrics or use values directly.
+    pub fn metrics(spec: FontSpec, scale: f32) -> (f32, f32) {
+        let font = (spec.base * scale).clamp(spec.lo, spec.hi);
+        (font, font * spec.lh_factor)
+    }
+}
+
 /// Maximum tile uniform buffers for the grid renderer (pool pre-allocated at GPU init).
 /// Each visible tile needs up to 3 draw slots (bg + selection ring + thumbnail).
 const TILE_POOL: usize = 384;
@@ -339,8 +373,8 @@ impl FindState {
 /// Height (physical px) of the grid-filter search bar for a given DPI scale. Shared by the renderer
 /// (`layout_find_bar`) and the scroll math (`find_scroll_to_cursor`) so they stay in agreement.
 fn find_bar_height(scale: f32) -> f32 {
-    let font = (16.0 * scale).clamp(14.0, 32.0);
-    font * 1.4 + 2.0 * (8.0 * scale)
+    let font = (15.0 * scale).clamp(13.0, 30.0);
+    font * 1.5 + 2.0 * (8.0 * scale)
 }
 
 /// In-progress grid drag (left button held). Decides between a click (no movement) and a
@@ -594,7 +628,12 @@ struct SvgTileDraw {
 
 /// MVP for a single tile's quad, placing image-space sub-rect `tile` using the *same* view /
 /// projection as `mvp` so tiles line up exactly on top of the whole-image base layer.
-fn tile_mvp(img: (u32, u32), tile: (f32, f32, f32, f32), win: (f32, f32), st: &ViewState) -> [[f32; 4]; 4] {
+fn tile_mvp(
+    img: (u32, u32),
+    tile: (f32, f32, f32, f32),
+    win: (f32, f32),
+    st: &ViewState,
+) -> [[f32; 4]; 4] {
     let (iw, ih) = (img.0.max(1) as f32, img.1.max(1) as f32);
     let (win_w, win_h) = (win.0.max(1.0), win.1.max(1.0));
     let s = image_scale(img, win, st);
@@ -769,7 +808,15 @@ fn build_image_texture_bind(
         extent,
     );
     if levels > 1 {
-        generate_mipmaps(device, queue, mip_pipeline, layout, sampler, &texture, levels);
+        generate_mipmaps(
+            device,
+            queue,
+            mip_pipeline,
+            layout,
+            sampler,
+            &texture,
+            levels,
+        );
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -799,8 +846,9 @@ fn generate_mipmaps(
     texture: &wgpu::Texture,
     levels: u32,
 ) {
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mipmaps") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mipmaps"),
+    });
     // Per-level views, each covering exactly one mip level.
     let views: Vec<wgpu::TextureView> = (0..levels)
         .map(|level| {
@@ -1231,8 +1279,8 @@ impl Gpu {
         let mut atlas = TextAtlas::new(&device, &queue, &glyph_cache, config.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let text_buffer = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
-        let status_text_buf = TextBuffer::new(&mut font_system, Metrics::new(20.0, 26.0));
+        let text_buffer = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let status_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         if perf_logging() {
             eprintln!(
@@ -1340,41 +1388,40 @@ impl Gpu {
             make_uniform_bind(&device, &uniform_layout_solo, &status_uniform_buf);
         let help_uniform_buf = make_uniform_buffer(&device);
         let help_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &help_uniform_buf);
-        let help_title_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_l_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_l_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_r_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_r_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_f_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
-        let help_f_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let help_title_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_l_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_l_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_r_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_r_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_f_keys_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let help_f_desc_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
         let confirm_uniform_buf = make_uniform_buffer(&device);
         let confirm_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &confirm_uniform_buf);
-        let confirm_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let confirm_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
         let findbar_uniform_buf = make_uniform_buffer(&device);
         let findbar_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &findbar_uniform_buf);
-        let findbar_text_buf = TextBuffer::new(&mut font_system, Metrics::new(16.0, 22.0));
-        let donate_text_buf = TextBuffer::new(&mut font_system, Metrics::new(13.0, 17.0));
+        let findbar_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+        let donate_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
         let about_uniform_buf = make_uniform_buffer(&device);
         let about_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &about_uniform_buf);
-        let about_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let about_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         let info_uniform_buf = make_uniform_buffer(&device);
-        let info_uniform_bind =
-            make_uniform_bind(&device, &uniform_layout_solo, &info_uniform_buf);
-        let info_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let info_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &info_uniform_buf);
+        let info_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         // Date overlay (bottom-right counterpart to the path overlay).
         let date_uniform_buf = make_uniform_buffer(&device);
         let date_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &date_uniform_buf);
-        let date_text_buf = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        let date_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         // Page overlay (top-right, PDF "N/M").
         let page_uniform_buf = make_uniform_buffer(&device);
         let page_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &page_uniform_buf);
-        let page_text_buf = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        let page_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         // Watermark: decode app icon, bake ~22% opacity, upload as texture.
         let watermark_bind = {
@@ -1394,7 +1441,7 @@ impl Gpu {
             make_uniform_bind(&device, &uniform_layout_solo, &watermark_uniform_buf);
 
         // Version label buffer (text + size filled in by `layout_version` on first empty-state draw).
-        let version_text_buf = TextBuffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        let version_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
         Gpu {
             surface,
@@ -1420,7 +1467,7 @@ impl Gpu {
             text_renderer,
             text_buffer,
             overlay_text: String::new(),
-            overlay_line_h: 18.0,
+            overlay_line_h: 22.5,
             status_uniform_buf,
             status_uniform_bind,
             status_text_buf,
@@ -1435,7 +1482,7 @@ impl Gpu {
             help_f_keys_buf,
             help_f_desc_buf,
             help_layout_scale: -1.0,
-            help_line_h: 22.0,
+            help_line_h: 22.5,
             help_col_lines: 0,
             help_footer_lines: 0,
             findbar_uniform_buf,
@@ -1446,7 +1493,7 @@ impl Gpu {
             confirm_uniform_bind,
             confirm_text_buf,
             confirm_layout_cache: String::new(),
-            confirm_line_h: 22.0,
+            confirm_line_h: 22.5,
             tile_bufs,
             tile_binds,
             cell_bg_bind,
@@ -1457,12 +1504,12 @@ impl Gpu {
             date_uniform_bind,
             date_text_buf,
             date_overlay_text: String::new(),
-            date_overlay_line_h: 18.0,
+            date_overlay_line_h: 22.5,
             page_uniform_buf,
             page_uniform_bind,
             page_text_buf,
             page_overlay_text: String::new(),
-            page_overlay_line_h: 18.0,
+            page_overlay_line_h: 22.5,
             watermark_bind,
             watermark_uniform_buf,
             watermark_uniform_bind,
@@ -1475,12 +1522,12 @@ impl Gpu {
             about_uniform_bind,
             about_text_buf,
             about_layout_scale: -1.0,
-            about_line_h: 22.0,
+            about_line_h: 22.5,
             info_uniform_buf,
             info_uniform_bind,
             info_text_buf,
             info_layout_scale: -1.0,
-            info_line_h: 22.0,
+            info_line_h: 22.5,
             info_text_cache: String::new(),
             thumb_binds: std::collections::HashMap::new(),
             svg_tile_tex: std::collections::HashMap::new(),
@@ -1525,12 +1572,9 @@ impl Gpu {
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.overlay_text != text {
             self.overlay_text = text.to_string();
-            let font = (13.0 * scale).clamp(12.0, 30.0);
-            self.overlay_line_h = font * 1.35;
-            let mut buf = TextBuffer::new(
-                &mut self.font_system,
-                Metrics::new(font, self.overlay_line_h),
-            );
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.overlay_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
                 &mut self.font_system,
@@ -1567,12 +1611,9 @@ impl Gpu {
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.date_overlay_text != text {
             self.date_overlay_text = text.to_string();
-            let font = (13.0 * scale).clamp(12.0, 30.0);
-            self.date_overlay_line_h = font * 1.35;
-            let mut buf = TextBuffer::new(
-                &mut self.font_system,
-                Metrics::new(font, self.date_overlay_line_h),
-            );
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.date_overlay_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
                 &mut self.font_system,
@@ -1610,12 +1651,9 @@ impl Gpu {
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.page_overlay_text != text {
             self.page_overlay_text = text.to_string();
-            let font = (13.0 * scale).clamp(12.0, 30.0);
-            self.page_overlay_line_h = font * 1.35;
-            let mut buf = TextBuffer::new(
-                &mut self.font_system,
-                Metrics::new(font, self.page_overlay_line_h),
-            );
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.page_overlay_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
                 &mut self.font_system,
@@ -1648,8 +1686,8 @@ impl Gpu {
     fn layout_version(&mut self, scale: f32, win_w: f32, win_h: f32) -> (f32, f32) {
         if (self.version_layout_scale - scale).abs() > f32::EPSILON {
             self.version_layout_scale = scale;
-            let font = (14.0 * scale).clamp(12.0, 28.0);
-            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.3));
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -1679,8 +1717,8 @@ impl Gpu {
     fn layout_donate(&mut self, scale: f32, win_w: f32, win_h: f32) -> (f32, f32) {
         if (self.donate_layout_scale - scale).abs() > f32::EPSILON {
             self.donate_layout_scale = scale;
-            let font = (13.0 * scale).clamp(11.0, 26.0);
-            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.3));
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -1697,8 +1735,7 @@ impl Gpu {
             .donate_text_buf
             .layout_runs()
             .fold(0.0_f32, |m, r| m.max(r.line_w));
-        let version_font = (14.0 * scale).clamp(12.0, 28.0);
-        let version_lh = version_font * 1.3;
+        let (_, version_lh) = ui_text::metrics(ui_text::BODY, scale);
         let logo_size = (win_w.min(win_h) * 0.40).max(64.0);
         let logo_bottom = ((win_h - logo_size) / 2.0).round() + logo_size;
         let version_y = logo_bottom + 16.0 * scale;
@@ -1724,15 +1761,17 @@ impl Gpu {
 
     /// Lay out the About overlay (A key). The body (head) is white; the donate line is rendered
     /// separately (blue, centered) below it. Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`.
-    fn layout_about(&mut self, scale: f32, win_w: f32, win_h: f32) -> (f32, f32, f32, f32, f32, f32) {
+    fn layout_about(
+        &mut self,
+        scale: f32,
+        win_w: f32,
+        win_h: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
         if (self.about_layout_scale - scale).abs() > f32::EPSILON {
             self.about_layout_scale = scale;
-            let font = (15.0 * scale).clamp(13.0, 30.0);
-            self.about_line_h = font * 1.5;
-            let mut buf = TextBuffer::new(
-                &mut self.font_system,
-                Metrics::new(font, self.about_line_h),
-            );
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.about_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -1775,15 +1814,12 @@ impl Gpu {
         win_w: f32,
         win_h: f32,
     ) -> (f32, f32, f32, f32, f32, f32) {
-        if self.info_text_cache != text
-            || (self.info_layout_scale - scale).abs() > f32::EPSILON
-        {
+        if self.info_text_cache != text || (self.info_layout_scale - scale).abs() > f32::EPSILON {
             self.info_text_cache = text.to_string();
             self.info_layout_scale = scale;
-            let font = (15.0 * scale).clamp(13.0, 30.0);
-            self.info_line_h = font * 1.5;
-            let mut buf =
-                TextBuffer::new(&mut self.font_system, Metrics::new(font, self.info_line_h));
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.info_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -1820,8 +1856,7 @@ impl Gpu {
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.status_overlay_text != text {
             self.status_overlay_text = text.to_string();
-            let font = (20.0 * scale).clamp(16.0, 40.0);
-            let lh = font * 1.35;
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
             let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -1851,7 +1886,11 @@ impl Gpu {
     /// Build one help block (`keys` rich-text buffer + `desc` buffer) from a slice of rows, with a
     /// blank line inserted before each section except the first. Returns the two buffers and the
     /// line count. Section headers render in the accent colour.
-    fn build_help_block(&mut self, rows: &[HelpRow], font: f32) -> (TextBuffer, TextBuffer, usize) {
+    fn build_help_block(
+        &mut self,
+        rows: &[HelpRow],
+        metrics: (f32, f32),
+    ) -> (TextBuffer, TextBuffer, usize) {
         let accent = Attrs::new()
             .weight(Weight::BOLD)
             .color(Color::rgb(125, 178, 255));
@@ -1871,9 +1910,8 @@ impl Gpu {
                 Keys(k, d) => lines.push(((*k).to_string(), false, (*d).to_string())),
             }
         }
-        let line_h = font * 1.5;
 
-        let mut keys = TextBuffer::new(&mut self.font_system, Metrics::new(font, line_h));
+        let mut keys = TextBuffer::new(&mut self.font_system, Metrics::new(metrics.0, metrics.1));
         keys.set_wrap(&mut self.font_system, Wrap::None);
         keys.set_size(&mut self.font_system, None, None);
         let spans: Vec<(String, bool)> = lines
@@ -1890,9 +1928,12 @@ impl Gpu {
             .collect();
         keys.set_rich_text(
             &mut self.font_system,
-            spans
-                .iter()
-                .map(|(s, hdr)| (s.as_str(), if *hdr { accent.clone() } else { plain.clone() })),
+            spans.iter().map(|(s, hdr)| {
+                (
+                    s.as_str(),
+                    if *hdr { accent.clone() } else { plain.clone() },
+                )
+            }),
             &plain,
             Shaping::Basic,
             None,
@@ -1904,10 +1945,16 @@ impl Gpu {
             .map(|(_, _, d)| d.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let mut desc = TextBuffer::new(&mut self.font_system, Metrics::new(font, line_h));
+        let mut desc = TextBuffer::new(&mut self.font_system, Metrics::new(metrics.0, metrics.1));
         desc.set_wrap(&mut self.font_system, Wrap::None);
         desc.set_size(&mut self.font_system, None, None);
-        desc.set_text(&mut self.font_system, &desc_str, &plain, Shaping::Basic, None);
+        desc.set_text(
+            &mut self.font_system,
+            &desc_str,
+            &plain,
+            Shaping::Basic,
+            None,
+        );
         desc.shape_until_scroll(&mut self.font_system, false);
 
         (keys, desc, lines.len())
@@ -1916,13 +1963,16 @@ impl Gpu {
     /// Lay out the help overlay: centered title, a left and right column of sections side by side,
     /// and a centered footer block below them. Returns the box + every text origin.
     fn layout_help(&mut self, scale: f32, win_w: f32, win_h: f32) -> HelpLayout {
-        let font = (15.0 * scale).clamp(13.0, 30.0);
+        let metrics = ui_text::metrics(ui_text::BODY, scale);
         if (self.help_layout_scale - scale).abs() > f32::EPSILON {
             self.help_layout_scale = scale;
-            self.help_line_h = font * 1.5;
+            self.help_line_h = metrics.1;
 
             // Title (centered, bold, bright).
-            let mut title = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.5));
+            let mut title = TextBuffer::new(
+                &mut self.font_system,
+                Metrics::new(metrics.0, metrics.0 * 1.5),
+            );
             title.set_wrap(&mut self.font_system, Wrap::None);
             title.set_size(&mut self.font_system, None, None);
             title.set_rich_text(
@@ -1935,13 +1985,13 @@ impl Gpu {
             title.shape_until_scroll(&mut self.font_system, false);
             self.help_title_buf = title;
 
-            let (lk, ld, lc) = self.build_help_block(HELP_LEFT, font);
+            let (lk, ld, lc) = self.build_help_block(HELP_LEFT, metrics);
             self.help_l_keys_buf = lk;
             self.help_l_desc_buf = ld;
-            let (rk, rd, rc) = self.build_help_block(HELP_RIGHT, font);
+            let (rk, rd, rc) = self.build_help_block(HELP_RIGHT, metrics);
             self.help_r_keys_buf = rk;
             self.help_r_desc_buf = rd;
-            let (fk, fd, fc) = self.build_help_block(HELP_FOOTER, font);
+            let (fk, fd, fc) = self.build_help_block(HELP_FOOTER, metrics);
             self.help_f_keys_buf = fk;
             self.help_f_desc_buf = fd;
             self.help_col_lines = lc.max(rc);
@@ -2022,12 +2072,9 @@ impl Gpu {
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.confirm_layout_cache != text {
             self.confirm_layout_cache = text.to_string();
-            let font = (15.0 * scale).clamp(13.0, 30.0);
-            self.confirm_line_h = font * 1.5;
-            let mut buf = TextBuffer::new(
-                &mut self.font_system,
-                Metrics::new(font, self.confirm_line_h),
-            );
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.confirm_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
             buf.set_text(
@@ -2056,14 +2103,25 @@ impl Gpu {
 
     /// Lay out the grid-filter search bar: a full-width strip across the top, text left-aligned.
     /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`. Height must match `find_bar_height`.
-    fn layout_find_bar(&mut self, text: &str, scale: f32, win_w: f32) -> (f32, f32, f32, f32, f32, f32) {
+    fn layout_find_bar(
+        &mut self,
+        text: &str,
+        scale: f32,
+        win_w: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
         if self.findbar_layout_cache != text {
             self.findbar_layout_cache = text.to_string();
-            let font = (16.0 * scale).clamp(14.0, 32.0);
-            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, font * 1.4));
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
             buf.set_wrap(&mut self.font_system, Wrap::None);
             buf.set_size(&mut self.font_system, None, None);
-            buf.set_text(&mut self.font_system, text, &Attrs::new(), Shaping::Advanced, None);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
             buf.shape_until_scroll(&mut self.font_system, false);
             self.findbar_text_buf = buf;
         }
@@ -2140,10 +2198,11 @@ impl Gpu {
             show_overlay_box = true;
         }
 
-        // Date overlay (bottom-right).
+        // Date overlay (bottom-right). Suppressed while the info panel is open — the date is
+        // already shown there, so the bottom-right overlay would be redundant.
         let mut show_date_box = false;
         let mut date_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        if let Some(text) = date_overlay {
+        if let Some(text) = date_overlay.filter(|_| info.is_none()) {
             date_coords = self.layout_date_overlay(text, scale, win_w, win_h);
             let (bx, by, bw, bh, _, _) = date_coords;
             self.queue.write_buffer(
@@ -2156,10 +2215,11 @@ impl Gpu {
             show_date_box = true;
         }
 
-        // Page overlay (top-right, PDF "N/M").
+        // Page overlay (top-right, PDF "N/M"). Suppressed while the info panel is open —
+        // the page count is already shown there, so the top-right overlay would be redundant.
         let mut show_page_box = false;
         let mut page_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        if let Some(text) = page_overlay {
+        if let Some(text) = page_overlay.filter(|_| info.is_none()) {
             page_coords = self.layout_page_overlay(text, scale, win_w, win_h);
             let (bx, by, bw, bh, _, _) = page_coords;
             self.queue.write_buffer(
@@ -2561,7 +2621,7 @@ impl Gpu {
                 };
                 let bright = Color::rgb(245, 245, 250); // title + keys
                 let dim = Color::rgb(180, 185, 195); // descriptions
-                // Helper to push a (buffer, left, top, color) text area within the help box bounds.
+                                                     // Helper to push a (buffer, left, top, color) text area within the help box bounds.
                 let mut push = |ptr: *const TextBuffer, left: f32, top: f32, color: Color| {
                     areas.push(TextArea {
                         buffer: unsafe { &*ptr },
@@ -3013,7 +3073,7 @@ impl Gpu {
         for &i in &visible {
             let (cx, cy) = grid.cell_origin(i, win_w);
             let cy = cy + top_inset; // shift below the find search bar (0.0 when not filtering)
-            // bg quad
+                                     // bg quad
             if slot < TILE_POOL {
                 self.queue.write_buffer(
                     &self.tile_bufs[slot],
@@ -3030,7 +3090,11 @@ impl Gpu {
             let is_cursor = i == grid.sel;
             let ring = is_cursor || grid.selected.contains(&i);
             let sel_slot = if ring && slot < TILE_POOL {
-                let out = if is_cursor { SEL_OUTSET * 2.5 } else { SEL_OUTSET };
+                let out = if is_cursor {
+                    SEL_OUTSET * 2.5
+                } else {
+                    SEL_OUTSET
+                };
                 self.queue.write_buffer(
                     &self.tile_bufs[slot],
                     0,
@@ -3502,7 +3566,9 @@ fn mtime_string(path: &std::path::PathBuf) -> Option<String> {
 
 /// The file name of `p` as a string, or "(unknown)" — used in overlay/status text.
 fn file_name_str(p: &Path) -> &str {
-    p.file_name().and_then(|n| n.to_str()).unwrap_or("(unknown)")
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("(unknown)")
 }
 
 /// Human-readable byte count (e.g. "1.4 MB"). Used by the info overlay.
@@ -3822,25 +3888,35 @@ impl App {
     /// size, modified date. Returns `None` when there is no current image.
     fn build_info_string(&self) -> Option<String> {
         let path = self.nav.current_path()?;
-        let mut lines: Vec<String> = Vec::with_capacity(5);
+        let mut lines: Vec<String> = Vec::with_capacity(7);
+        lines.push(
+            path.parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or("")
+                .to_string(),
+        );
         lines.push(
             path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("(unknown)")
                 .to_string(),
         );
+        if let Some(dt) = mtime_string(path) {
+            lines.push(dt);
+        }
+        if let Ok(meta) = glanvu_core::read_meta_path(path) {
+            lines.push(human_size(meta.file_size));
+            lines.push(meta.format.name().to_string());
+        }
         if let Some(img) = self.nav.current_image() {
             lines.push(format!("{} × {} px", img.width, img.height));
         }
-        if let Ok(meta) = glanvu_core::read_meta_path(path) {
-            lines.push(meta.format.name().to_string());
-            lines.push(human_size(meta.file_size));
-        }
         if let Some(doc) = self.pdf_doc.as_ref() {
-            lines.push(format!("page {} of {}", self.current_pdf_page + 1, doc.page_count()));
-        }
-        if let Some(dt) = mtime_string(path) {
-            lines.push(dt);
+            lines.push(format!(
+                "page {} of {}",
+                self.current_pdf_page + 1,
+                doc.page_count()
+            ));
         }
         Some(lines.join("\n"))
     }
@@ -4248,7 +4324,9 @@ impl App {
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
         {
-            let _ = self.nav.sync_paths(glanvu_core::list_images(&dir), self.sort_mode);
+            let _ = self
+                .nav
+                .sync_paths(glanvu_core::list_images(&dir), self.sort_mode);
         }
         if self.nav.paths.is_empty() {
             self.mode = ViewMode::Empty;
@@ -4613,8 +4691,14 @@ impl App {
                 fgrid.scroll_y = st.scroll_y;
                 let bar = self.find_bar_text();
                 let Some(gpu) = self.gpu.as_mut() else { return };
-                let presented =
-                    gpu.render_grid(&view_paths, &fgrid, None, status.as_deref(), bar.as_deref(), scale);
+                let presented = gpu.render_grid(
+                    &view_paths,
+                    &fgrid,
+                    None,
+                    status.as_deref(),
+                    bar.as_deref(),
+                    scale,
+                );
                 if !presented {
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -5098,8 +5182,7 @@ impl ApplicationHandler for App {
                 // In grid mode, arrows navigate tiles and Enter opens the selection.
                 if self.mode == ViewMode::Grid {
                     let n = self.nav.paths.len();
-                    let cmd_ctrl =
-                        self.modifiers.control_key() || self.modifiers.super_key();
+                    let cmd_ctrl = self.modifiers.control_key() || self.modifiers.super_key();
                     match event.logical_key.as_ref() {
                         // Esc collapses a multi-selection to the cursor first; only then quits.
                         Key::Named(NamedKey::Escape) => {
@@ -5145,9 +5228,7 @@ impl ApplicationHandler for App {
                         Key::Named(NamedKey::ArrowDown) => self.grid_move(0, 1),
                         Key::Named(NamedKey::ArrowUp) => self.grid_move(0, -1),
                         Key::Named(NamedKey::Home) => self.grid_set_cursor(0),
-                        Key::Named(NamedKey::End) => {
-                            self.grid_set_cursor(n.saturating_sub(1))
-                        }
+                        Key::Named(NamedKey::End) => self.grid_set_cursor(n.saturating_sub(1)),
                         // Delete / Backspace: confirm, then trash the selection (or the cursor).
                         Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
                             let mut idxs: Vec<usize> = if self.grid.selected.is_empty() {
@@ -5778,8 +5859,12 @@ impl ApplicationHandler for App {
                     let target_h = ((ih * fit).round().max(1.0) as u32).min(max_dim);
                     self.svg_rerender_gen += 1;
                     self.svg_rerender_inflight = true;
-                    self.svg_rerender_mailbox
-                        .post((self.svg_rerender_gen, path, target_w, target_h));
+                    self.svg_rerender_mailbox.post((
+                        self.svg_rerender_gen,
+                        path,
+                        target_w,
+                        target_h,
+                    ));
                 }
             }
         }
@@ -5807,7 +5892,10 @@ impl ApplicationHandler for App {
 
         let svg_poll_deadline = self.svg_rerender_inflight.then(|| now + SVG_RERENDER_POLL);
         // Keep polling while the SVG viewport render is still in flight in the background.
-        let tile_poll_deadline = self.svg_vp_pending.is_some().then(|| now + SVG_RERENDER_POLL);
+        let tile_poll_deadline = self
+            .svg_vp_pending
+            .is_some()
+            .then(|| now + SVG_RERENDER_POLL);
 
         let deadline = [
             self.overlay_until,
@@ -6058,8 +6146,14 @@ mod tests {
         // even when window and image aspect ratios differ.
         let st = ViewState::fit();
         let r = visible_image_rect((1000, 500), (1000.0, 800.0), &st);
-        assert!(approx(r.0, 0.0, 0.5) && approx(r.1, 0.0, 0.5), "origin {r:?}");
-        assert!(approx(r.2, 1000.0, 0.5) && approx(r.3, 500.0, 0.5), "size {r:?}");
+        assert!(
+            approx(r.0, 0.0, 0.5) && approx(r.1, 0.0, 0.5),
+            "origin {r:?}"
+        );
+        assert!(
+            approx(r.2, 1000.0, 0.5) && approx(r.3, 500.0, 0.5),
+            "size {r:?}"
+        );
     }
 
     #[test]
@@ -6072,19 +6166,34 @@ mod tests {
             quarter_turns: 0,
         };
         let r = visible_image_rect((1000, 800), (1000.0, 800.0), &st);
-        assert!(approx(r.0, 250.0, 1.0) && approx(r.1, 200.0, 1.0), "origin {r:?}");
-        assert!(approx(r.2, 500.0, 1.0) && approx(r.3, 400.0, 1.0), "size {r:?}");
+        assert!(
+            approx(r.0, 250.0, 1.0) && approx(r.1, 200.0, 1.0),
+            "origin {r:?}"
+        );
+        assert!(
+            approx(r.2, 500.0, 1.0) && approx(r.3, 400.0, 1.0),
+            "size {r:?}"
+        );
     }
 
     #[test]
     fn pad_region_expands_and_clamps() {
         // Interior rect: padded by 20% each side.
         let r = pad_region((400.0, 300.0, 100.0, 100.0), 0.20, (1000, 800));
-        assert!(approx(r.0, 380.0, 0.01) && approx(r.1, 280.0, 0.01), "origin {r:?}");
-        assert!(approx(r.2, 140.0, 0.01) && approx(r.3, 140.0, 0.01), "size {r:?}");
+        assert!(
+            approx(r.0, 380.0, 0.01) && approx(r.1, 280.0, 0.01),
+            "origin {r:?}"
+        );
+        assert!(
+            approx(r.2, 140.0, 0.01) && approx(r.3, 140.0, 0.01),
+            "size {r:?}"
+        );
         // Rect near the edge: padding is clamped to the image bounds (no negative / overflow).
         let e = pad_region((0.0, 0.0, 100.0, 100.0), 0.20, (1000, 800));
-        assert!(approx(e.0, 0.0, 0.01) && approx(e.1, 0.0, 0.01), "clamped origin {e:?}");
+        assert!(
+            approx(e.0, 0.0, 0.01) && approx(e.1, 0.0, 0.01),
+            "clamped origin {e:?}"
+        );
         assert!(e.0 + e.2 <= 1000.01 && e.1 + e.3 <= 800.01);
     }
 
@@ -6127,14 +6236,22 @@ mod tests {
     fn image_scale_matches_fit_and_zoom() {
         let fit = ViewState::fit();
         // Square image in square window: base = 1, scale = zoom.
-        assert!(approx(image_scale((100, 100), (100.0, 100.0), &fit), 1.0, 1e-4));
+        assert!(approx(
+            image_scale((100, 100), (100.0, 100.0), &fit),
+            1.0,
+            1e-4
+        ));
         let z = ViewState {
             fit: false,
             zoom: 2.5,
             pan: (0.0, 0.0),
             quarter_turns: 0,
         };
-        assert!(approx(image_scale((100, 100), (500.0, 500.0), &z), 2.5, 1e-4));
+        assert!(approx(
+            image_scale((100, 100), (500.0, 500.0), &z),
+            2.5,
+            1e-4
+        ));
     }
 
     #[test]
