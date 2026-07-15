@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-15
+
+### Added
+
+- **7 new image formats** — ICO, EXR (HDR), QOI, DDS, PNM (PBM/PGM/PPM/PFM), farbfeld and TGA.
+  All decoded by pure-Rust codecs from the `image` crate, no system C libraries. EXR and DDS are
+  decode-only; the rest can also be used as `glanvu convert` output targets. Registered in file
+  associations (macOS Info.plist, `glanvu set-default`) and the folder listing.
+- **Directory in Info panel** — the Info overlay (`I`) now shows the directory path as the first
+  line, above the filename. Field order changed to: directory, filename, date, size, type,
+  dimensions, page count.
+
+### Changed
+
+- **Unified font sizes** — all on-screen text (path overlay, date overlay, PDF page indicator,
+  Info, Help, About, Confirm, Find bar, Status, Version label, Donate) now derives from a single
+  `ui_text::BODY` spec (15.0 base, clamp 13.0-30.0, 1.5× line height) instead of per-surface
+  literals. A new font-size drift between overlays is no longer possible.
+- **Cleaner Info overlay** — the date and PDF page-number overlays are now suppressed while the
+  Info panel is open (previously only the path overlay was hidden).
+
 ## [0.8.0] — 2026-07-02
 
 ### Added
@@ -192,6 +213,7 @@ Workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
 ---
 
-[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/glanvu/glanvu/releases/tag/v0.9.0
 [0.8.0]: https://github.com/glanvu/glanvu/releases/tag/v0.8.0
 [0.5.0]: https://github.com/glanvu/glanvu/releases/tag/v0.5.0

@@ -783,7 +783,7 @@ checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
 
 [[package]]
 name = "glanvu"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "glanvu-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "image",
  "pdfium-render",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "glanvu-viewer-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "glanvu-core",
  "image",

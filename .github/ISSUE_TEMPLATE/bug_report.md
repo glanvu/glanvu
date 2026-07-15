@@ -18,7 +18,7 @@ What you expected to happen instead.
 
 **Environment**
 - OS: <!-- e.g. macOS 14.5 / Ubuntu 24.04 / Windows 11 -->
-- Glanvu version: <!-- e.g. 0.8.0 — run `glanvu --version` -->
+- Glanvu version: <!-- e.g. 0.9.0 — run `glanvu --version` -->
 - Image format: <!-- e.g. JPEG, PNG, WebP — if relevant -->
 - How installed: <!-- build from source / installer / other -->
 
