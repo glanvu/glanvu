@@ -17,9 +17,9 @@ A clear and concise description of what happened.
 What you expected to happen instead.
 
 **Environment**
-- OS: <!-- e.g. macOS 14.5 / Ubuntu 24.04 / Windows 11 -->
-- Glanvu version: <!-- e.g. 0.9.0 — run `glanvu --version` -->
-- Image format: <!-- e.g. JPEG, PNG, WebP — if relevant -->
+- OS: <!-- macOS 14.5 / Ubuntu 24.04 / Windows 11 -->
+- Glanvu version: <!-- e.g. 0.9.1 — run `glanvu --version` -->
+- GPU / Display: <!-- Apple M1 / Intel Iris / NVIDIA RTX 3080 / Wayland / X11 -->
 - How installed: <!-- build from source / installer / other -->
 
 **Additional context**

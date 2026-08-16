@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+## [0.9.1] — 2026-08-16
+
+### Fixed
+
+- **Single-instance window activation & focus (macOS)** — opening a file via Finder ("Open With",
+  drag-and-drop or double-click) when Glanvu is already running now automatically un-minimizes the
+  window, requests window focus, and brings the application to the foreground (switching macOS
+  Spaces/desktops if necessary).
+- **State reset on external open** — opening a new file from the OS clears any active overlays,
+  modals, slideshows, inline rename/find editors and returns to single-image view mode.
 
 ## [0.9.0] — 2026-07-15
 
@@ -213,7 +223,8 @@ Workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
 ---
 
-[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/glanvu/glanvu/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/glanvu/glanvu/releases/tag/v0.9.0
 [0.8.0]: https://github.com/glanvu/glanvu/releases/tag/v0.8.0
 [0.5.0]: https://github.com/glanvu/glanvu/releases/tag/v0.5.0
