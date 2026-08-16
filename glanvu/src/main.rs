@@ -19,6 +19,7 @@
 
 mod associate;
 mod batch;
+mod updater;
 mod viewer;
 
 #[cfg(target_os = "macos")]

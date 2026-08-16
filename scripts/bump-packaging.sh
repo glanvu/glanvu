@@ -155,6 +155,8 @@ done
 # Version-display strings (targeted anchors to avoid touching unrelated versions).
 p "s|<code>v[0-9.]+</code>|<code>v${VERSION}</code>|"                    web/index.html
 p "s|v[0-9.]+ &nbsp;|v${VERSION} \&nbsp;|"                               web/index.html
+p "s|\"version\": \"[0-9.]+\"|\"version\": \"${VERSION}\"|"             web/version.json
+p "s|releases/tag/v[0-9.]+|releases/tag/v${VERSION}|"                  web/version.json
 p "s|binaries for v[0-9.]+|binaries for v${VERSION}|"                    README.md
 p "s|Windows \(v[0-9.]+\)|Windows (v${VERSION})|"                        README.md
 

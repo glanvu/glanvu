@@ -172,7 +172,7 @@ cargo fmt --all --check
   | viewer-core extraction | done |
   | Batch enhancements (crop, rotate, quality, rename) | done |
   | Brew cask + Linux/Windows installers | planned |
-  | Auto-update | planned |
+  | Auto-update | done |
   | Web app (glanvu.com) | planned (Phase 3) |
 
 ## Writing conventions

@@ -2093,8 +2093,21 @@ impl Gpu {
             .confirm_text_buf
             .layout_runs()
             .fold(0.0_f32, |m, r| m.max(r.line_w));
-        let lines = text.lines().count().max(1) as f32;
-        let bw = (text_w + 2.0 * pad_h).min(win_w - 40.0);
+        let donate_w = self
+            .donate_text_buf
+            .layout_runs()
+            .fold(0.0_f32, |m, r| m.max(r.line_w));
+        let is_update_modal = text.starts_with("Glanvu v");
+        let content_w = if is_update_modal {
+            text_w.max(donate_w)
+        } else {
+            text_w
+        };
+        let mut lines = text.lines().count().max(1) as f32;
+        if is_update_modal {
+            lines += 2.0; // gap + donate line
+        }
+        let bw = (content_w + 2.0 * pad_h).min(win_w - 40.0);
         let bh = (lines * self.confirm_line_h + 2.0 * pad_v).min(win_h - 40.0);
         let bx = ((win_w - bw) / 2.0).max(0.0);
         let by = ((win_h - bh) / 2.0).max(0.0);
@@ -2298,12 +2311,14 @@ impl Gpu {
             help_layout = Some(hl);
         }
 
-        // Confirmation overlay (D key: set/unset default app).
+        // Confirmation overlay (D key: set/unset default app, update modal, delete).
         let mut show_confirm_box = false;
         let mut confirm_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        let mut show_confirm_donate = false;
+        let mut confirm_donate_coords = (0.0_f32, 0.0_f32);
         if let Some(text) = confirm {
             confirm_coords = self.layout_confirm(text, scale, win_w, win_h);
-            let (bx, by, bw, bh, _, _) = confirm_coords;
+            let (bx, by, bw, bh, _, ty) = confirm_coords;
             self.queue.write_buffer(
                 &self.confirm_uniform_buf,
                 0,
@@ -2312,12 +2327,21 @@ impl Gpu {
                 }),
             );
             show_confirm_box = true;
+            if text.starts_with("Glanvu v") {
+                let lines = text.lines().count().max(1) as f32;
+                let c_donate_top =
+                    ty + lines * self.confirm_line_h + (self.confirm_line_h - don_lh) / 2.0;
+                confirm_donate_coords = (donate_left, c_donate_top);
+                show_confirm_donate = true;
+                push_donate_hit!(c_donate_top);
+            }
         }
 
         // Watermark logo (empty state only): centered square, 40% of the shorter dimension.
         let mut show_version = false;
         let mut version_coords = (0.0_f32, 0.0_f32);
-        if logo {
+        let modal_active = show_confirm_box || show_help_box || about;
+        if logo && !modal_active {
             let size = (win_w.min(win_h) * 0.40).max(64.0);
             let sx = ((win_w - size) / 2.0).round();
             let sy = ((win_h - size) / 2.0).round();
@@ -2333,7 +2357,7 @@ impl Gpu {
         }
 
         // Donate text (empty state, below version label).
-        let show_donate = logo;
+        let show_donate = logo && !modal_active;
         let donate_coords = donate_pos; // position computed above via layout_donate
         if show_donate {
             push_donate_hit!(donate_coords.1);
@@ -2491,6 +2515,7 @@ impl Gpu {
             || show_explorer
             || show_help_box
             || show_confirm_box
+            || show_confirm_donate
             || show_version
             || show_donate
             || show_help_donate
@@ -2747,6 +2772,23 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
+            if show_confirm_donate {
+                let (tx, ty) = confirm_donate_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*donate_ptr },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: win_w as i32,
+                        bottom: win_h as i32,
+                    },
+                    default_color: Color::rgb(130, 190, 255),
+                    custom_glyphs: &[],
+                });
+            }
             if show_help_donate {
                 let (tx, ty) = help_donate_coords;
                 areas.push(TextArea {
@@ -2887,8 +2929,8 @@ impl Gpu {
                 }
             }
 
-            // 1b. Watermark logo (empty state only).
-            if logo {
+            // 1b. Watermark logo (empty state only, hidden when modal/overlay is up).
+            if logo && !modal_active {
                 pass.set_bind_group(0, &self.watermark_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.watermark_bind, &[]);
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
@@ -3420,6 +3462,8 @@ struct App {
     grid_drag: Option<GridDrag>,
     /// Pending default-app confirmation. `Some(true)` = set; `Some(false)` = unset.
     confirm_assoc: Option<bool>,
+    /// Pending update confirmation: `(new_version, url)` awaiting Enter to open browser or Esc to dismiss.
+    confirm_update: Option<(String, String)>,
     /// Pending delete confirmation: the image(s) to move to Trash (Delete/Backspace key).
     /// One path in single view; the grid selection (1..n) in grid view.
     confirm_delete: Option<Vec<PathBuf>>,
@@ -3967,6 +4011,12 @@ impl App {
         if let Some(t) = self.delete_confirm_text() {
             return Some(t);
         }
+        if let Some((ver, _)) = &self.confirm_update {
+            return Some(format!(
+                "Glanvu v{}\n\nNew version available: v{ver}\n\nEnter = download   Esc = later   I = skip this version",
+                crate::VERSION
+            ));
+        }
         self.confirm_assoc
             .map(|set| confirm_overlay_text(set).to_string())
     }
@@ -4473,6 +4523,7 @@ impl App {
         self.help_visible = false;
         self.about_visible = false;
         self.confirm_assoc = None;
+        self.confirm_update = None;
         self.confirm_delete = None;
         self.rename = None;
         self.confirm_rename = None;
@@ -4660,11 +4711,16 @@ impl App {
                 .as_ref()
                 .map(|w| w.scale_factor() as f32)
                 .unwrap_or(1.0);
+            let modal = self.modal_text();
+            let confirm_text = modal.as_deref();
             let Some(gpu) = self.gpu.as_mut() else { return };
             let win = (gpu.config.width as f32, gpu.config.height as f32);
-            // Re-use the status overlay as a centred hint text (no timer — always visible).
-            let hint = "Drop an image here  ·  Press Enter to open";
-            let confirm_text = self.confirm_assoc.map(confirm_overlay_text);
+            // Re-use the status overlay as a centred hint text (hidden when a modal overlay is active).
+            let hint = if confirm_text.is_none() && !self.help_visible && !self.about_visible {
+                Some("Drop an image here  ·  Press Enter to open")
+            } else {
+                None
+            };
             let _ = gpu.render(
                 Uniforms {
                     mvp: mvp((1, 1), win, &self.state),
@@ -4672,7 +4728,7 @@ impl App {
                 None,
                 None,
                 None,
-                Some(hint),
+                hint,
                 None,
                 self.help_visible,
                 confirm_text,
@@ -4941,6 +4997,32 @@ impl ApplicationHandler for App {
                         }
                         Key::Named(NamedKey::Escape) => {
                             self.confirm_assoc = None;
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // If the update confirmation modal is up:
+                //   Enter = open download website
+                //   Esc   = dismiss for this session (remind next time)
+                //   I     = skip/ignore this specific version permanently
+                if let Some((ver, url)) = self.confirm_update.clone() {
+                    match event.logical_key.as_ref() {
+                        Key::Named(NamedKey::Enter) => {
+                            self.confirm_update = None;
+                            self.redraw();
+                            let _ = open::that(url);
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.confirm_update = None;
+                            self.redraw();
+                        }
+                        Key::Character("i") | Key::Character("I") => {
+                            crate::updater::ignore_version(&ver);
+                            self.confirm_update = None;
+                            self.show_status("Update skipped for this version");
                             self.redraw();
                         }
                         _ => {}
@@ -5774,6 +5856,16 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Drain update availability from background check.
+        if let Ok(mut slot) = crate::updater::UPDATE_AVAILABLE.lock() {
+            if let Some((ver, url)) = slot.take() {
+                if self.confirm_update.is_none() {
+                    self.confirm_update = Some((ver, url));
+                    self.redraw();
+                }
+            }
+        }
+
         // Grid thumbnail polling: redraw immediately so draw() drains the worker.
         if self.mode == ViewMode::Grid && self.nav.paths.iter().any(|p| self.thumbs.is_pending(p)) {
             self.redraw();
@@ -5984,6 +6076,10 @@ pub fn run(path: &str) -> ExitCode {
     #[cfg(target_os = "macos")]
     crate::macos_open::install();
 
+    // Launch background update check (silent, non-blocking).
+    // Temporary simulation for testing: pass "0.9.0" so it detects the remote 0.9.1 release.
+    crate::updater::spawn_update_check(crate::VERSION);
+
     let mut app = App {
         start,
         nav,
@@ -6009,6 +6105,7 @@ pub fn run(path: &str) -> ExitCode {
         grid_drag: None,
         about_visible: false,
         confirm_assoc: None,
+        confirm_update: None,
         confirm_delete: None,
         rename: None,
         confirm_rename: None,
@@ -6085,6 +6182,10 @@ pub fn run_empty() -> ExitCode {
     #[cfg(target_os = "macos")]
     crate::macos_open::install();
 
+    // Launch background update check (silent, non-blocking).
+    // Temporary simulation for testing: pass "0.9.0" so it detects the remote 0.9.1 release.
+    crate::updater::spawn_update_check(crate::VERSION);
+
     let mut app = App {
         start,
         nav,
@@ -6110,6 +6211,7 @@ pub fn run_empty() -> ExitCode {
         grid_drag: None,
         about_visible: false,
         confirm_assoc: None,
+        confirm_update: None,
         confirm_delete: None,
         rename: None,
         confirm_rename: None,
@@ -6350,6 +6452,7 @@ mod tests {
         let mut help_visible = true;
         let mut about_visible = true;
         let mut confirm_assoc = Some(true);
+        let mut confirm_update = Some(("0.9.2".to_string(), "https://...".to_string()));
         let mut confirm_delete = Some(vec![PathBuf::from("a.png")]);
         let mut rename = Some(TextInput::new("old"));
         let mut confirm_rename = Some((PathBuf::from("a.png"), PathBuf::from("b.png")));
@@ -6366,6 +6469,7 @@ mod tests {
         assert!(help_visible);
         assert!(about_visible);
         assert!(confirm_assoc.is_some());
+        assert!(confirm_update.is_some());
         assert!(confirm_delete.is_some());
         assert!(rename.is_some());
         assert!(confirm_rename.is_some());
@@ -6376,6 +6480,7 @@ mod tests {
         help_visible = false;
         about_visible = false;
         confirm_assoc = None;
+        confirm_update = None;
         confirm_delete = None;
         rename = None;
         confirm_rename = None;
@@ -6386,6 +6491,7 @@ mod tests {
         assert!(!help_visible);
         assert!(!about_visible);
         assert!(confirm_assoc.is_none());
+        assert!(confirm_update.is_none());
         assert!(confirm_delete.is_none());
         assert!(rename.is_none());
         assert!(confirm_rename.is_none());
