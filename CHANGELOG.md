@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.10.0] — 2026-08-16
+
+### Added
+
+- **Automatic update checker** — checks for new releases in the background (silent, non-blocking)
+  upon launch. If a newer version is available, a modal overlay appears prompting to download
+  (`Enter`), postpone (`Esc`), or permanently skip that specific version (`I`).
+- **Update skip preference persistence** — skipped versions are stored in user configuration
+  (`~/.config/glanvu/ignore_update.txt` / `%LOCALAPPDATA%\glanvu\ignore_update.txt`) so they never
+  interrupt again until a newer version is published.
+- **Support & Sponsor links in modal** — direct clickable links to support Glanvu on Ko-fi and GitHub
+  Sponsors directly within the update notification modal.
+
 ## [0.9.1] — 2026-08-16
 
 ### Fixed
@@ -223,7 +237,8 @@ Workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
 ---
 
-[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/glanvu/glanvu/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/glanvu/glanvu/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/glanvu/glanvu/releases/tag/v0.9.0
 [0.8.0]: https://github.com/glanvu/glanvu/releases/tag/v0.8.0
