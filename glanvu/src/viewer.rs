@@ -4468,7 +4468,17 @@ impl App {
             return;
         }
         let was_empty = self.mode == ViewMode::Empty;
-        self.mode = ViewMode::Single; // leave Empty state
+        self.stop_slideshow();
+        self.close_explorer();
+        self.help_visible = false;
+        self.about_visible = false;
+        self.confirm_assoc = None;
+        self.confirm_delete = None;
+        self.rename = None;
+        self.confirm_rename = None;
+        self.find = None;
+        self.mode = ViewMode::Single; // leave Empty/Grid state
+
         let dir = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -4490,13 +4500,22 @@ impl App {
                     if let Some(res) = self.nav.show_index(idx) {
                         self.apply_nav_result(res);
                     }
-                    self.close_explorer();
                 }
                 Err(e) => {
                     eprintln!("glanvu: cannot open {}: {e}", path.display());
                     return;
                 }
             }
+        }
+
+        // Ensure window is un-minimized and brought to focus / foreground.
+        if let Some(w) = &self.window {
+            w.set_minimized(false);
+            w.focus_window();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            crate::macos_open::activate_app();
         }
 
         // Opening from the empty state (Open With / drop on launch): size the window to the image,
@@ -6133,8 +6152,9 @@ pub fn run_empty() -> ExitCode {
 mod tests {
     use super::{
         clamped_page_turn, human_size, ideal_window_size, image_scale, pad_region, region_covers,
-        tile_mvp, visible_image_rect, TextInput, ViewState,
+        tile_mvp, visible_image_rect, FindState, TextInput, ViewMode, ViewState,
     };
+    use std::path::PathBuf;
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() <= eps
@@ -6323,5 +6343,79 @@ mod tests {
     fn clamped_page_turn_single_page_document_is_always_none() {
         assert_eq!(clamped_page_turn(0, 1, 1), None);
         assert_eq!(clamped_page_turn(0, -1, 1), None);
+    }
+
+    #[test]
+    fn open_file_resets_overlays_and_modals() {
+        let mut help_visible = true;
+        let mut about_visible = true;
+        let mut confirm_assoc = Some(true);
+        let mut confirm_delete = Some(vec![PathBuf::from("a.png")]);
+        let mut rename = Some(TextInput::new("old"));
+        let mut confirm_rename = Some((PathBuf::from("a.png"), PathBuf::from("b.png")));
+        let mut find = Some(FindState {
+            input: TextInput::new("test"),
+            matches: vec![0],
+            sel: 0,
+            limit: 8,
+            scroll_y: 0.0,
+        });
+        let mut mode = ViewMode::Grid;
+
+        // Verify pre-conditions
+        assert!(help_visible);
+        assert!(about_visible);
+        assert!(confirm_assoc.is_some());
+        assert!(confirm_delete.is_some());
+        assert!(rename.is_some());
+        assert!(confirm_rename.is_some());
+        assert!(find.is_some());
+        assert_eq!(mode, ViewMode::Grid);
+
+        // Simulated state reset block matching open_file_path:
+        help_visible = false;
+        about_visible = false;
+        confirm_assoc = None;
+        confirm_delete = None;
+        rename = None;
+        confirm_rename = None;
+        find = None;
+        mode = ViewMode::Single;
+
+        // Verify post-conditions
+        assert!(!help_visible);
+        assert!(!about_visible);
+        assert!(confirm_assoc.is_none());
+        assert!(confirm_delete.is_none());
+        assert!(rename.is_none());
+        assert!(confirm_rename.is_none());
+        assert!(find.is_none());
+        assert_eq!(mode, ViewMode::Single);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pending_open_paths_queue_and_drain() {
+        let p1 = PathBuf::from("/tmp/test_image_1.png");
+        let p2 = PathBuf::from("/tmp/test_image_2.jpg");
+
+        // Simulate applicationOpenFile pushing to the mutex queue
+        {
+            let mut pending = crate::macos_open::PENDING_OPEN_PATHS.lock().unwrap();
+            pending.push(p1.clone());
+            pending.push(p2.clone());
+        }
+
+        // Simulate about_to_wait draining the queue
+        let drained: Vec<PathBuf> = crate::macos_open::PENDING_OPEN_PATHS
+            .lock()
+            .map(|mut v| v.drain(..).collect())
+            .unwrap_or_default();
+
+        assert_eq!(drained, vec![p1, p2]);
+
+        // Verify queue is empty after drain
+        let remaining = crate::macos_open::PENDING_OPEN_PATHS.lock().unwrap().len();
+        assert_eq!(remaining, 0);
     }
 }

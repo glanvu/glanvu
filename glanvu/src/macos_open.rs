@@ -90,3 +90,19 @@ pub fn install() {
         }
     }
 }
+
+/// Bring Glanvu to the foreground and activate it, switching Spaces/desktops if necessary.
+#[allow(unsafe_code)]
+pub fn activate_app() {
+    unsafe {
+        let cls = objc_getClass(c"NSApplication".as_ptr() as *const std::ffi::c_char);
+        if cls.is_null() {
+            return;
+        }
+        let app: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![cls as *const _, sharedApplication];
+        if !app.is_null() {
+            let _: () = objc2::msg_send![app, activateIgnoringOtherApps: Bool::YES];
+        }
+    }
+}
