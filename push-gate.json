@@ -1,0 +1,7 @@
+{
+  "schema_version": "push-gate/config-v1",
+  "allow_paths": [],
+  "allow_strings": [],
+  "disabled_detectors": [],
+  "protected_paths": []
+}

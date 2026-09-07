@@ -1,0 +1,4 @@
+title = "gitleaks config (server-side net; local gate: ~/.agents/skills/push-gate)"
+
+[extend]
+useDefault = true
