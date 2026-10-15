@@ -32,6 +32,10 @@ pub enum SourceFormat {
     Pdf,
     /// A plain text or log document format (.txt, .log), rendered with monospace typography.
     Txt,
+    /// A JSON document (.json), rendered with monospace typography and pretty formatting.
+    Json,
+    /// A JSON Lines document (.jsonl), rendered with monospace typography.
+    Jsonl,
 }
 
 impl SourceFormat {
@@ -54,6 +58,8 @@ impl SourceFormat {
             SourceFormat::Svg => "SVG",
             SourceFormat::Pdf => "PDF",
             SourceFormat::Txt => "TXT",
+            SourceFormat::Json => "JSON",
+            SourceFormat::Jsonl => "JSONL",
         }
     }
 
@@ -76,13 +82,15 @@ impl SourceFormat {
             "svg" => Some(SourceFormat::Svg),
             "pdf" => Some(SourceFormat::Pdf),
             "txt" | "log" => Some(SourceFormat::Txt),
+            "json" => Some(SourceFormat::Json),
+            "jsonl" => Some(SourceFormat::Jsonl),
             _ => None,
         }
     }
 
     /// The `image` crate format used to encode this `SourceFormat`, if any.
     ///
-    /// `None` for `Svg`, `Pdf`, and `Txt`: neither is an `image`-crate encode target (no raster→vector
+    /// `None` for `Svg`, `Pdf`, and text formats: neither is an `image`-crate encode target (no raster→vector
     /// or raster→document conversion).
     pub(crate) fn to_image(self) -> Option<image::ImageFormat> {
         match self {
@@ -102,6 +110,8 @@ impl SourceFormat {
             SourceFormat::Svg => None,
             SourceFormat::Pdf => None,
             SourceFormat::Txt => None,
+            SourceFormat::Json => None,
+            SourceFormat::Jsonl => None,
         }
     }
 
@@ -282,5 +292,29 @@ mod tests {
     fn qoi_detect_by_magic() {
         let qoi = b"qoif\x00\x01\x00\x01\x04\x00";
         assert_eq!(detect_format(qoi), Some(SourceFormat::Qoi));
+    }
+
+    #[test]
+    fn json_and_jsonl_extensions_resolve() {
+        assert_eq!(
+            SourceFormat::from_extension("json"),
+            Some(SourceFormat::Json)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("JSON"),
+            Some(SourceFormat::Json)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("jsonl"),
+            Some(SourceFormat::Jsonl)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("JSONL"),
+            Some(SourceFormat::Jsonl)
+        );
+        assert_eq!(SourceFormat::Json.name(), "JSON");
+        assert_eq!(SourceFormat::Jsonl.name(), "JSONL");
+        assert_eq!(SourceFormat::Json.to_image(), None);
+        assert_eq!(SourceFormat::Jsonl.to_image(), None);
     }
 }

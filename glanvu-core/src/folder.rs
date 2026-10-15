@@ -9,7 +9,7 @@ use crate::format::SourceFormat;
 /// File extensions Glanvu can currently open (the Phase 1 base set), lowercase, without the dot.
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "exr", "qoi", "dds", "pbm",
-    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf", "txt", "log",
+    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf", "txt", "log", "json", "jsonl",
 ];
 
 /// Whether a path has a supported image extension (case-insensitive).
@@ -41,13 +41,23 @@ pub fn is_pdf_path(path: &Path) -> bool {
         == Some(SourceFormat::Pdf)
 }
 
-/// Whether a path's extension marks it as plain text (.txt, .log) — paginated and rendered with
-/// monospace typography and line numbers. Single source of truth for that check.
+/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl) —
+/// paginated and rendered with monospace typography and line numbers. Single source of truth for that check.
 pub fn is_text_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .and_then(SourceFormat::from_extension),
+        Some(SourceFormat::Txt | SourceFormat::Json | SourceFormat::Jsonl)
+    )
+}
+
+/// Whether a path's extension marks it as JSON (.json).
+pub fn is_json_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .and_then(SourceFormat::from_extension)
-        == Some(SourceFormat::Txt)
+        == Some(SourceFormat::Json)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -103,6 +113,8 @@ mod tests {
         assert!(is_supported_path(Path::new("/x/a.pdf")));
         assert!(is_supported_path(Path::new("/x/a.TXT")));
         assert!(is_supported_path(Path::new("/x/sys.LOG")));
+        assert!(is_supported_path(Path::new("/x/data.JSON")));
+        assert!(is_supported_path(Path::new("/x/records.jsonl")));
         assert!(!is_supported_path(Path::new("/x/data.bin")));
         assert!(!is_supported_path(Path::new("/x/noext")));
     }
@@ -121,6 +133,18 @@ mod tests {
         assert!(is_text_path(Path::new("/x/notes.TXT")));
         assert!(is_text_path(Path::new("/x/app.log")));
         assert!(is_text_path(Path::new("/x/app.LOG")));
+        assert!(is_text_path(Path::new("/x/data.json")));
+        assert!(is_text_path(Path::new("/x/data.JSON")));
+        assert!(is_text_path(Path::new("/x/records.jsonl")));
+        assert!(is_text_path(Path::new("/x/records.JSONL")));
         assert!(!is_text_path(Path::new("/x/doc.pdf")));
+    }
+
+    #[test]
+    fn is_json_path_is_case_insensitive() {
+        assert!(is_json_path(Path::new("/x/data.json")));
+        assert!(is_json_path(Path::new("/x/data.JSON")));
+        assert!(!is_json_path(Path::new("/x/records.jsonl")));
+        assert!(!is_json_path(Path::new("/x/notes.txt")));
     }
 }

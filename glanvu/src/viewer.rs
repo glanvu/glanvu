@@ -5378,7 +5378,7 @@ impl ApplicationHandler for App {
                                     "Supported files",
                                     &[
                                         "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp",
-                                        "svg", "pdf", "txt", "log",
+                                        "svg", "pdf", "txt", "log", "json", "jsonl",
                                     ],
                                 )
                                 .add_filter("All files", &["*"])

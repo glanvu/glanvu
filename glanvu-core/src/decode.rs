@@ -196,10 +196,15 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
     if is_text_path(path) {
         let doc = TextDocument::load(path)?;
         let (w, h) = doc.page_size(0)?;
+        let format = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(SourceFormat::from_extension)
+            .unwrap_or(SourceFormat::Txt);
         return Ok(ImageMeta {
             width: w.round().max(1.0) as u32,
             height: h.round().max(1.0) as u32,
-            format: SourceFormat::Txt,
+            format,
             file_size,
             page_count: Some(doc.page_count() as u32),
         });
@@ -824,6 +829,33 @@ mod tests {
 
         let err = decode_pdf_page(&path, 0, 50, 50).unwrap_err();
         assert!(matches!(err, Error::UnsupportedFormat));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_meta_path_for_text_and_json() {
+        let dir = std::env::temp_dir().join("glanvu-decode-test-meta-text-json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let txt_path = dir.join("notes.txt");
+        std::fs::write(&txt_path, "Hello world").unwrap();
+        let meta_txt = read_meta_path(&txt_path).unwrap();
+        assert_eq!(meta_txt.format, SourceFormat::Txt);
+        assert_eq!(meta_txt.page_count, Some(1));
+
+        let json_path = dir.join("data.json");
+        std::fs::write(&json_path, "{\"a\": 1}").unwrap();
+        let meta_json = read_meta_path(&json_path).unwrap();
+        assert_eq!(meta_json.format, SourceFormat::Json);
+        assert_eq!(meta_json.page_count, Some(1));
+
+        let jsonl_path = dir.join("records.jsonl");
+        std::fs::write(&jsonl_path, "{\"id\": 1}\n{\"id\": 2}").unwrap();
+        let meta_jsonl = read_meta_path(&jsonl_path).unwrap();
+        assert_eq!(meta_jsonl.format, SourceFormat::Jsonl);
+        assert_eq!(meta_jsonl.page_count, Some(1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
