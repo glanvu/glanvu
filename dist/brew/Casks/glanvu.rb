@@ -4,30 +4,27 @@ cask "glanvu" do
 
   on_arm do
     sha256 "d6d5503893980d29892bf0076b17b597482ff05178eaa8f676281857f932594e"
+
     url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-arm64.zip"
   end
-
   on_intel do
     sha256 "dd54173231dd5f4e482b32681a2f59e65c20e4944c6bdb707e02d7778debd3be"
+
     url "https://github.com/glanvu/glanvu/releases/download/v#{version}/Glanvu-#{version}-macos-x86_64.zip"
   end
 
   name "Glanvu"
   desc "Fast, keyboard-driven, cross-platform universal image viewer and converter"
-  homepage "https://glanvu.com"
+  homepage "https://glanvu.com/"
 
   livecheck do
     url :url
     strategy :github_latest
   end
 
-  app "Glanvu.app"
+  depends_on :macos
 
-  # Register Glanvu with Launch Services so Finder offers it under "Open With".
-  postflight do
-    system_command "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-                   args: ["-f", "#{appdir}/Glanvu.app"]
-  end
+  app "Glanvu.app"
 
   uninstall quit: "com.glanvu.app"
 
