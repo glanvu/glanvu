@@ -6,28 +6,16 @@ use std::path::{Path, PathBuf};
 
 use crate::format::SourceFormat;
 
-/// File extensions Glanvu can currently open (the Phase 1 base set), lowercase, without the dot.
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "exr", "qoi", "dds", "pbm",
-    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf", "txt", "log", "json", "jsonl",
-];
-
-/// Whether a path has a supported image extension (case-insensitive).
+/// Whether a path has a supported image extension or filename (case-insensitive).
 pub fn is_supported_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .is_some_and(|e| SUPPORTED_EXTENSIONS.contains(&e.as_str()))
+    SourceFormat::from_path(path).is_some()
 }
 
 /// Whether a path's extension marks it as SVG — the one format whose decode strategy differs
 /// enough (vector, no lazy header read, crisp-on-settle re-raster) that callers across the
 /// viewer and batch CLI need to branch on it. Single source of truth for that check.
 pub fn is_svg_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .and_then(SourceFormat::from_extension)
-        == Some(SourceFormat::Svg)
+    SourceFormat::from_path(path) == Some(SourceFormat::Svg)
 }
 
 /// Whether a path's extension marks it as PDF — the other format (besides SVG) whose decode
@@ -35,29 +23,43 @@ pub fn is_svg_path(path: &Path) -> bool {
 /// native PDFium library rather than the `image` crate. Single source of truth for that check,
 /// mirroring `is_svg_path`.
 pub fn is_pdf_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .and_then(SourceFormat::from_extension)
-        == Some(SourceFormat::Pdf)
+    SourceFormat::from_path(path) == Some(SourceFormat::Pdf)
 }
 
-/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl) —
+/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .cfg, .conf, .env, .properties) —
 /// paginated and rendered with monospace typography and line numbers. Single source of truth for that check.
 pub fn is_text_path(path: &Path) -> bool {
     matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .and_then(SourceFormat::from_extension),
-        Some(SourceFormat::Txt | SourceFormat::Json | SourceFormat::Jsonl)
+        SourceFormat::from_path(path),
+        Some(
+            SourceFormat::Txt
+                | SourceFormat::Json
+                | SourceFormat::Jsonl
+                | SourceFormat::Xml
+                | SourceFormat::Ini
+                | SourceFormat::Toml
+        )
     )
 }
 
 /// Whether a path's extension marks it as JSON (.json).
 pub fn is_json_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .and_then(SourceFormat::from_extension)
-        == Some(SourceFormat::Json)
+    SourceFormat::from_path(path) == Some(SourceFormat::Json)
+}
+
+/// Whether a path's extension marks it as XML (.xml).
+pub fn is_xml_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Xml)
+}
+
+/// Whether a path's extension marks it as INI or related config (.ini, .cfg, .conf, .env, .properties).
+pub fn is_ini_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Ini)
+}
+
+/// Whether a path's extension marks it as TOML (.toml).
+pub fn is_toml_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Toml)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -137,6 +139,19 @@ mod tests {
         assert!(is_text_path(Path::new("/x/data.JSON")));
         assert!(is_text_path(Path::new("/x/records.jsonl")));
         assert!(is_text_path(Path::new("/x/records.JSONL")));
+        assert!(is_text_path(Path::new("/x/config.xml")));
+        assert!(is_text_path(Path::new("/x/config.XML")));
+        assert!(is_text_path(Path::new("/x/settings.ini")));
+        assert!(is_text_path(Path::new("/x/settings.INI")));
+        assert!(is_text_path(Path::new("/x/Cargo.toml")));
+        assert!(is_text_path(Path::new("/x/Cargo.TOML")));
+        assert!(is_text_path(Path::new("/x/setup.cfg")));
+        assert!(is_text_path(Path::new("/x/nginx.conf")));
+        assert!(is_text_path(Path::new("/x/.env")));
+        assert!(is_text_path(Path::new("/x/.env.local")));
+        assert!(is_text_path(Path::new("/x/app.properties")));
+        assert!(is_text_path(Path::new("/x/.editorconfig")));
+        assert!(is_text_path(Path::new("/x/.gitconfig")));
         assert!(!is_text_path(Path::new("/x/doc.pdf")));
     }
 
@@ -146,5 +161,55 @@ mod tests {
         assert!(is_json_path(Path::new("/x/data.JSON")));
         assert!(!is_json_path(Path::new("/x/records.jsonl")));
         assert!(!is_json_path(Path::new("/x/notes.txt")));
+    }
+
+    #[test]
+    fn is_xml_path_is_case_insensitive() {
+        assert!(is_xml_path(Path::new("/x/doc.xml")));
+        assert!(is_xml_path(Path::new("/x/doc.XML")));
+        assert!(!is_xml_path(Path::new("/x/doc.svg")));
+        assert!(!is_xml_path(Path::new("/x/data.json")));
+    }
+
+    #[test]
+    fn is_ini_path_is_case_insensitive() {
+        assert!(is_ini_path(Path::new("/x/config.ini")));
+        assert!(is_ini_path(Path::new("/x/config.INI")));
+        assert!(is_ini_path(Path::new("/x/setup.cfg")));
+        assert!(is_ini_path(Path::new("/x/nginx.conf")));
+        assert!(is_ini_path(Path::new("/x/.env")));
+        assert!(is_ini_path(Path::new("/x/.env.local")));
+        assert!(is_ini_path(Path::new("/x/app.properties")));
+        assert!(!is_ini_path(Path::new("/x/notes.txt")));
+    }
+
+    #[test]
+    fn is_toml_path_is_case_insensitive() {
+        assert!(is_toml_path(Path::new("/x/Cargo.toml")));
+        assert!(is_toml_path(Path::new("/x/Cargo.TOML")));
+        assert!(!is_toml_path(Path::new("/x/config.ini")));
+        assert!(!is_toml_path(Path::new("/x/notes.txt")));
+    }
+
+    #[test]
+    fn bak_extensions_resolve_to_underlying_format() {
+        assert!(is_supported_path(Path::new("/x/config.toml.bak")));
+        assert!(is_toml_path(Path::new("/x/config.toml.bak")));
+        assert!(is_text_path(Path::new("/x/config.toml.bak")));
+
+        assert!(is_supported_path(Path::new("/x/.env.bak")));
+        assert!(is_ini_path(Path::new("/x/.env.bak")));
+        assert!(is_text_path(Path::new("/x/.env.bak")));
+
+        assert!(is_supported_path(Path::new("/x/photo.png.bak")));
+        assert!(is_supported_path(Path::new("/x/doc.pdf.bak")));
+        assert!(is_pdf_path(Path::new("/x/doc.pdf.bak")));
+
+        assert!(is_supported_path(Path::new("/x/vector.svg.bak")));
+        assert!(is_svg_path(Path::new("/x/vector.svg.bak")));
+
+        // Unsupported underlying format with .bak remains unsupported
+        assert!(!is_supported_path(Path::new("/x/binary.bin.bak")));
+        assert!(!is_supported_path(Path::new("/x/unknown.bak")));
     }
 }

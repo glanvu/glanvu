@@ -196,11 +196,7 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
     if is_text_path(path) {
         let doc = TextDocument::load(path)?;
         let (w, h) = doc.page_size(0)?;
-        let format = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(SourceFormat::from_extension)
-            .unwrap_or(SourceFormat::Txt);
+        let format = SourceFormat::from_path(path).unwrap_or(SourceFormat::Txt);
         return Ok(ImageMeta {
             width: w.round().max(1.0) as u32,
             height: h.round().max(1.0) as u32,

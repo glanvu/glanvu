@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::decode::{decode_path, map_image_error};
 use crate::error::{Error, Result};
-use crate::folder::{is_pdf_path, is_svg_path};
+use crate::folder::{is_pdf_path, is_svg_path, is_text_path};
 use crate::format::SourceFormat;
 
 /// Resize dimensions above `MAX_RESIZE_DIM` are rejected to prevent runaway memory allocation (a
@@ -66,7 +66,7 @@ pub fn convert_file(
     // each (SVG rasterizes at intrinsic size, PDF rasterizes page 1 at its intrinsic size — see
     // D13 in the decision log) and convert into a `DynamicImage` so crop/rotate/resize below are
     // unchanged for every format. Raster formats keep the existing lazy `ImageReader` path.
-    let mut image = if is_svg_path(input) || is_pdf_path(input) {
+    let mut image = if is_svg_path(input) || is_pdf_path(input) || is_text_path(input) {
         let decoded = decode_path(input)?;
         image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
             .map(image::DynamicImage::ImageRgba8)

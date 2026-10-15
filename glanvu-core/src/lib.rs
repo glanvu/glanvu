@@ -26,11 +26,14 @@ pub use decode::{
 };
 pub use error::{Error, Result};
 pub use folder::{
-    is_json_path, is_pdf_path, is_supported_path, is_svg_path, is_text_path, list_images,
+    is_ini_path, is_json_path, is_pdf_path, is_supported_path, is_svg_path, is_text_path,
+    is_toml_path, is_xml_path, list_images,
 };
 pub use format::{detect_format, SourceFormat};
 pub use pdf::PdfDocument;
-pub use text::{pretty_format_json, TextDocument, TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH};
+pub use text::{
+    pretty_format_json, pretty_format_xml, TextDocument, TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH,
+};
 
 /// The crate version, taken from `Cargo.toml` at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

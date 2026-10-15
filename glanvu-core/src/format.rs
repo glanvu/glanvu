@@ -36,6 +36,12 @@ pub enum SourceFormat {
     Json,
     /// A JSON Lines document (.jsonl), rendered with monospace typography.
     Jsonl,
+    /// An XML document (.xml), rendered with monospace typography, syntax highlighting, and pretty formatting.
+    Xml,
+    /// An INI configuration document (.ini), rendered with monospace typography and syntax highlighting.
+    Ini,
+    /// A TOML configuration document (.toml), rendered with monospace typography and syntax highlighting.
+    Toml,
 }
 
 impl SourceFormat {
@@ -60,6 +66,9 @@ impl SourceFormat {
             SourceFormat::Txt => "TXT",
             SourceFormat::Json => "JSON",
             SourceFormat::Jsonl => "JSONL",
+            SourceFormat::Xml => "XML",
+            SourceFormat::Ini => "INI",
+            SourceFormat::Toml => "TOML",
         }
     }
 
@@ -84,8 +93,46 @@ impl SourceFormat {
             "txt" | "log" => Some(SourceFormat::Txt),
             "json" => Some(SourceFormat::Json),
             "jsonl" => Some(SourceFormat::Jsonl),
+            "xml" => Some(SourceFormat::Xml),
+            "ini" | "cfg" | "conf" | "env" | "properties" | "editorconfig" | "gitconfig" => {
+                Some(SourceFormat::Ini)
+            }
+            "toml" => Some(SourceFormat::Toml),
             _ => None,
         }
+    }
+
+    /// Resolve format from file path extension or special filename (.env, .gitconfig, etc.).
+    ///
+    /// If the path ends in `.bak` (e.g. `config.toml.bak` or `.env.bak`), the `.bak` suffix is
+    /// stripped and the underlying format is resolved from the preceding stem.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext.eq_ignore_ascii_case("bak") {
+                if let Some(stem) = path.file_stem() {
+                    return Self::from_path(std::path::Path::new(stem));
+                }
+            }
+            if let Some(fmt) = Self::from_extension(ext) {
+                return Some(fmt);
+            }
+        }
+        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+            let lower = fname.to_ascii_lowercase();
+            if lower == ".env"
+                || lower.starts_with(".env.")
+                || lower == ".editorconfig"
+                || lower == ".gitconfig"
+            {
+                return Some(SourceFormat::Ini);
+            }
+        }
+        None
+    }
+
+    /// Whether this format can be encoded to by the conversion pipeline.
+    pub fn is_encode_target(self) -> bool {
+        self.to_image().is_some()
     }
 
     /// The `image` crate format used to encode this `SourceFormat`, if any.
@@ -112,6 +159,9 @@ impl SourceFormat {
             SourceFormat::Txt => None,
             SourceFormat::Json => None,
             SourceFormat::Jsonl => None,
+            SourceFormat::Xml => None,
+            SourceFormat::Ini => None,
+            SourceFormat::Toml => None,
         }
     }
 
@@ -316,5 +366,89 @@ mod tests {
         assert_eq!(SourceFormat::Jsonl.name(), "JSONL");
         assert_eq!(SourceFormat::Json.to_image(), None);
         assert_eq!(SourceFormat::Jsonl.to_image(), None);
+    }
+
+    #[test]
+    fn xml_and_ini_extensions_resolve() {
+        assert_eq!(SourceFormat::from_extension("xml"), Some(SourceFormat::Xml));
+        assert_eq!(SourceFormat::from_extension("XML"), Some(SourceFormat::Xml));
+        assert_eq!(SourceFormat::from_extension("ini"), Some(SourceFormat::Ini));
+        assert_eq!(SourceFormat::from_extension("INI"), Some(SourceFormat::Ini));
+        assert_eq!(SourceFormat::Xml.name(), "XML");
+        assert_eq!(SourceFormat::Ini.name(), "INI");
+        assert_eq!(SourceFormat::Xml.to_image(), None);
+        assert_eq!(SourceFormat::Ini.to_image(), None);
+    }
+
+    #[test]
+    fn toml_and_config_extensions_resolve() {
+        assert_eq!(
+            SourceFormat::from_extension("toml"),
+            Some(SourceFormat::Toml)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("TOML"),
+            Some(SourceFormat::Toml)
+        );
+        assert_eq!(SourceFormat::from_extension("cfg"), Some(SourceFormat::Ini));
+        assert_eq!(
+            SourceFormat::from_extension("conf"),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(SourceFormat::from_extension("env"), Some(SourceFormat::Ini));
+        assert_eq!(
+            SourceFormat::from_extension("properties"),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(SourceFormat::Toml.name(), "TOML");
+        assert_eq!(SourceFormat::Toml.to_image(), None);
+
+        // Path resolution for special dotfiles
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new(".env")),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/dir/.env.local")),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new(".editorconfig")),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/dir/.gitconfig")),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("Cargo.toml")),
+            Some(SourceFormat::Toml)
+        );
+
+        // Path resolution for .bak files
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("config.toml.bak")),
+            Some(SourceFormat::Toml)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/dir/config.TOML.BAK")),
+            Some(SourceFormat::Toml)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/dir/.env.bak")),
+            Some(SourceFormat::Ini)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("photo.png.bak")),
+            Some(SourceFormat::Png)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("doc.pdf.bak")),
+            Some(SourceFormat::Pdf)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("unknown.bak")),
+            None
+        );
     }
 }

@@ -111,6 +111,14 @@ pub fn run(args: &[String]) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    if !target.is_encode_target() {
+        eprintln!(
+            "glanvu convert: cannot convert to {} ({} is input-only)",
+            target.name(),
+            target.name()
+        );
+        return ExitCode::from(2);
+    }
     let ext = to.to_ascii_lowercase();
 
     if quality.is_some() && target != SourceFormat::Jpeg {
@@ -334,6 +342,16 @@ mod tests {
         let args = [
             "--to".to_string(),
             "svg".to_string(),
+            "input.png".to_string(),
+        ];
+        assert_eq!(run(&args), ExitCode::from(2));
+    }
+
+    #[test]
+    fn to_xml_target_is_rejected() {
+        let args = [
+            "--to".to_string(),
+            "xml".to_string(),
             "input.png".to_string(),
         ];
         assert_eq!(run(&args), ExitCode::from(2));
