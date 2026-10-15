@@ -60,7 +60,8 @@ impl TextDocument {
         let mut visual_rows = Vec::new();
 
         for (line_idx, raw_line) in content.lines().enumerate() {
-            let expanded = expand_tabs(raw_line, TAB_SIZE);
+            let cleaned = sanitize_line(raw_line);
+            let expanded = expand_tabs(&cleaned, TAB_SIZE);
             if expanded.is_empty() {
                 visual_rows.push(VisualRow {
                     line_number: Some(line_idx + 1),
@@ -212,6 +213,34 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     result
 }
 
+/// Strip ANSI escape sequences and non-printable control characters so terminal logs render cleanly.
+fn sanitize_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            while let Some(&next) = chars.peek() {
+                if (0x20..=0x3F).contains(&(next as u32)) {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let Some(&next) = chars.peek() {
+                if (0x40..=0x7E).contains(&(next as u32)) {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+        if c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -221,10 +250,18 @@ fn escape_xml(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
+            c if is_valid_xml_char(c) => out.push(c),
+            _ => {} // Drop disallowed XML 1.0 control characters
         }
     }
     out
+}
+
+fn is_valid_xml_char(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'
+    )
 }
 
 #[cfg(test)]
@@ -245,7 +282,18 @@ mod tests {
     fn text_document_paginates_long_content() {
         let lines: Vec<String> = (1..=120).map(|i| format!("Log entry {i}")).collect();
         let doc = TextDocument::from_string(lines.join("\n"));
-        assert_eq!(doc.page_count(), 3); // 120 lines / 52 = 3 pages
+        assert_eq!(doc.page_count(), 3); // 120 lines / 58 = 3 pages
+    }
+
+    #[test]
+    fn text_document_handles_ansi_and_control_chars() {
+        let content = "\x1b[31;1m[ERROR]\x1b[0m Failed with code \x07\x1b[33m404\x1b[0m";
+        let doc = TextDocument::from_string(content.to_string());
+        assert_eq!(doc.page_count(), 1);
+        assert_eq!(doc.pages[0][0].text, "[ERROR] Failed with code 404");
+        // Must rasterize to SVG without error (control chars dropped, ANSI stripped)
+        let img = doc.render_fit(0).unwrap();
+        assert_eq!(img.width, TEXT_PAGE_WIDTH);
     }
 
     #[test]
