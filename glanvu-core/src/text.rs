@@ -48,6 +48,8 @@ struct VisualRow {
     text: String,
     /// Number of columns of parent indentation to display before continuation text.
     indent_cols: usize,
+    /// Which quote character opened the string if this row starts inside an unclosed string literal.
+    string_quote: Option<char>,
     /// Whether this row starts inside an unclosed string literal from a previous wrapped row.
     starts_in_string: bool,
     /// Whether this row starts with the first character escaped by a trailing backslash.
@@ -141,6 +143,7 @@ impl TextDocument {
     pub fn from_string_with_format(content: String, format: SourceFormat) -> Self {
         let mut visual_rows = Vec::new();
         let mut in_string = false;
+        let mut string_quote: Option<char> = None;
         let mut escaped = false;
         let mut in_comment = false;
         let mut in_tag = false;
@@ -155,6 +158,7 @@ impl TextDocument {
                     line_number: Some(line_idx + 1),
                     text: String::new(),
                     indent_cols: 0,
+                    string_quote: None,
                     starts_in_string: in_string,
                     starts_escaped: escaped,
                     starts_in_comment: in_comment,
@@ -166,33 +170,43 @@ impl TextDocument {
                 });
             } else {
                 let is_ini_or_toml = format == SourceFormat::Ini || format == SourceFormat::Toml;
+                let is_yaml = format == SourceFormat::Yaml;
                 let trimmed = expanded.trim_start();
                 let is_ini_comment = is_ini_or_toml
                     && (trimmed.starts_with(';')
                         || trimmed.starts_with('#')
                         || trimmed.starts_with('!'));
+                let is_yaml_comment = is_yaml && trimmed.starts_with('#');
                 let is_ini_section = is_ini_or_toml && trimmed.starts_with('[');
                 let is_ini_kv = is_ini_or_toml
                     && !is_ini_comment
                     && !is_ini_section
                     && trimmed.contains(['=', ':']);
+                let is_yaml_kv = is_yaml
+                    && !is_yaml_comment
+                    && (find_yaml_colon(trimmed).is_some()
+                        || trimmed
+                            .strip_prefix("- ")
+                            .is_some_and(|s| find_yaml_colon(s).is_some()));
                 let mut in_ini_section = false;
 
                 let indent_spaces = expanded.chars().take_while(|&c| c == ' ').count();
                 let chunks = wrap_line(&expanded, WRAP_COLS);
                 for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
-                    let row_starts_in_string = in_string;
+                    let row_string_quote = string_quote;
+                    let row_starts_in_string = in_string || string_quote.is_some();
                     let row_starts_escaped = escaped;
                     let row_starts_in_comment = in_comment;
                     let row_starts_in_tag = in_tag;
                     let row_starts_in_cdata = in_cdata;
                     let row_starts_in_section = in_ini_section;
-                    let row_is_value_continuation = is_ini_kv && chunk_idx > 0;
+                    let row_is_value_continuation = (is_ini_kv || is_yaml_kv) && chunk_idx > 0;
                     let row_partial_delim = partial_delim;
 
                     match format {
                         SourceFormat::Json | SourceFormat::Jsonl => {
                             update_string_state(&chunk, &mut in_string, &mut escaped);
+                            string_quote = if in_string { Some('"') } else { None };
                         }
                         SourceFormat::Xml => {
                             update_xml_state(
@@ -203,6 +217,7 @@ impl TextDocument {
                                 &mut in_cdata,
                                 &mut partial_delim,
                             );
+                            string_quote = if in_string { Some('"') } else { None };
                         }
                         SourceFormat::Ini | SourceFormat::Toml => {
                             if is_ini_comment {
@@ -220,6 +235,15 @@ impl TextDocument {
                                 }
                             } else {
                                 update_string_state(&chunk, &mut in_string, &mut escaped);
+                                string_quote = if in_string { Some('"') } else { None };
+                            }
+                        }
+                        SourceFormat::Yaml => {
+                            if is_yaml_comment {
+                                in_comment = true;
+                            } else {
+                                update_yaml_string_state(&chunk, &mut string_quote, &mut escaped);
+                                in_string = string_quote.is_some();
                             }
                         }
                         _ => {}
@@ -237,6 +261,7 @@ impl TextDocument {
                         } else {
                             0
                         },
+                        string_quote: row_string_quote,
                         starts_in_string: row_starts_in_string,
                         starts_escaped: row_starts_escaped,
                         starts_in_comment: row_starts_in_comment,
@@ -248,13 +273,17 @@ impl TextDocument {
                     });
                 }
             }
-            if format != SourceFormat::Xml {
+            if format != SourceFormat::Xml && format != SourceFormat::Yaml {
+                string_quote = None;
                 in_string = false;
                 escaped = false;
                 in_comment = false;
                 in_tag = false;
                 in_cdata = false;
                 partial_delim = PartialDelim::None;
+            } else if format == SourceFormat::Yaml {
+                escaped = false;
+                in_comment = false;
             }
         }
 
@@ -263,6 +292,7 @@ impl TextDocument {
                 line_number: Some(1),
                 text: String::new(),
                 indent_cols: 0,
+                string_quote: None,
                 starts_in_string: false,
                 starts_escaped: false,
                 starts_in_comment: false,
@@ -351,6 +381,13 @@ impl TextDocument {
                         row.starts_in_string,
                         row.starts_in_comment,
                         row.starts_in_section,
+                        row.is_value_continuation,
+                    ),
+                    SourceFormat::Yaml => highlight_yaml_row(
+                        &row.text,
+                        row.indent_cols,
+                        row.string_quote,
+                        row.starts_in_comment,
                         row.is_value_continuation,
                     ),
                     _ => {
@@ -524,6 +561,41 @@ fn update_string_state(text: &str, in_string: &mut bool, escaped: &mut bool) {
         } else if c == '"' {
             *in_string = true;
         }
+    }
+}
+
+fn update_yaml_string_state(text: &str, string_quote: &mut Option<char>, escaped: &mut bool) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = *string_quote {
+            if q == '"' {
+                if *escaped {
+                    *escaped = false;
+                } else if c == '\\' {
+                    *escaped = true;
+                } else if c == '"' {
+                    *string_quote = None;
+                }
+            } else if q == '\'' && c == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    i += 1;
+                } else {
+                    *string_quote = None;
+                }
+            }
+        } else {
+            if c == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
+                break;
+            }
+            if c == '"' {
+                *string_quote = Some('"');
+            } else if c == '\'' {
+                *string_quote = Some('\'');
+            }
+        }
+        i += 1;
     }
 }
 
@@ -1645,6 +1717,535 @@ fn split_ini_comment(val: &str) -> (&str, Option<&str>) {
     (val, None)
 }
 
+fn highlight_yaml_row(
+    text: &str,
+    indent_cols: usize,
+    string_quote: Option<char>,
+    starts_in_comment: bool,
+    is_value_continuation: bool,
+) -> String {
+    let mut out = String::with_capacity(text.len() * 2 + indent_cols * 15);
+
+    let leading_spaces = text.chars().take_while(|&c| c == ' ').count();
+    let total_indent = if indent_cols > 0 {
+        indent_cols
+    } else {
+        leading_spaces
+    };
+    let num_levels = total_indent / 2;
+    let remainder_spaces = total_indent % 2;
+
+    for i in 0..num_levels {
+        let color = RAINBOW_PALETTE[i % RAINBOW_PALETTE.len()];
+        out.push_str(&format!(
+            r##"<tspan fill="{color}" fill-opacity="0.45">│ </tspan>"##
+        ));
+    }
+    for _ in 0..remainder_spaces {
+        out.push(' ');
+    }
+
+    let rest = if indent_cols > 0 {
+        text
+    } else {
+        &text[leading_spaces..]
+    };
+    if rest.is_empty() {
+        return out;
+    }
+
+    if starts_in_comment {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    if let Some(open_quote) = string_quote {
+        let mut string_content = String::new();
+        let mut closed = false;
+        let mut chars = rest.chars().peekable();
+        let mut escaped = false;
+        while let Some(c) = chars.next() {
+            string_content.push(c);
+            if open_quote == '"' {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    closed = true;
+                    break;
+                }
+            } else if open_quote == '\'' && c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    string_content.push(chars.next().unwrap());
+                } else {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        out.push_str(&format!(
+            r##"<tspan fill="#86efac">{}</tspan>"##,
+            escape_xml(&string_content)
+        ));
+        if !closed {
+            return out;
+        }
+        let remaining: String = chars.collect();
+        out.push_str(&escape_xml(&remaining));
+        return out;
+    }
+
+    if rest.starts_with('#') {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    // Directives (%YAML, %TAG)
+    if rest.starts_with('%') {
+        out.push_str(&format!(
+            r##"<tspan fill="#c084fc">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    // Document start / end markers (---, ...)
+    if rest.starts_with("---") || rest.starts_with("...") {
+        let marker = &rest[..3];
+        let trailing = &rest[3..];
+        out.push_str(&format!(
+            r##"<tspan fill="#a78bfa" font-weight="bold">{}</tspan>"##,
+            escape_xml(marker)
+        ));
+        if !trailing.is_empty() {
+            let (trail_val, comment_part) = split_yaml_comment(trailing);
+            if !trail_val.is_empty() {
+                highlight_yaml_value(&mut out, trail_val);
+            }
+            if let Some(c) = comment_part {
+                out.push_str(&format!(
+                    r##"<tspan fill="#71717a">{}</tspan>"##,
+                    escape_xml(c)
+                ));
+            }
+        }
+        return out;
+    }
+
+    if is_value_continuation {
+        let (val_part, comment_part) = split_yaml_comment(rest);
+        highlight_yaml_value(&mut out, val_part);
+        if let Some(c) = comment_part {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(c)
+            ));
+        }
+        return out;
+    }
+
+    // List item bullet
+    let (item_prefix, after_bullet) = if let Some(stripped) = rest.strip_prefix("- ") {
+        (Some("- "), stripped)
+    } else if rest == "-" {
+        (Some("-"), "")
+    } else {
+        (None, rest)
+    };
+
+    if let Some(prefix) = item_prefix {
+        out.push_str(&format!(
+            r##"<tspan fill="#fdba74" font-weight="bold">{}</tspan>"##,
+            escape_xml(prefix)
+        ));
+        if after_bullet.is_empty() {
+            return out;
+        }
+    }
+
+    if after_bullet.starts_with('#') {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(after_bullet)
+        ));
+        return out;
+    }
+
+    if let Some(colon_pos) = find_yaml_colon(after_bullet) {
+        let key = &after_bullet[..colon_pos];
+        let delim = &after_bullet[colon_pos..colon_pos + 1];
+        let val = &after_bullet[colon_pos + 1..];
+
+        let key_trimmed = key.trim_end();
+        let key_trailing = &key[key_trimmed.len()..];
+
+        out.push_str(&format!(
+            r##"<tspan fill="#93c5fd">{}</tspan>"##,
+            escape_xml(key_trimmed)
+        ));
+        out.push_str(key_trailing);
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(delim)
+        ));
+
+        let (val_part, comment_part) = split_yaml_comment(val);
+        highlight_yaml_value(&mut out, val_part);
+        if let Some(c) = comment_part {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(c)
+            ));
+        }
+        return out;
+    }
+
+    let (val_part, comment_part) = split_yaml_comment(after_bullet);
+    highlight_yaml_value(&mut out, val_part);
+    if let Some(c) = comment_part {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(c)
+        ));
+    }
+
+    out
+}
+
+fn find_yaml_colon(s: &str) -> Option<usize> {
+    let mut in_quote = None;
+    let mut escaped = false;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+
+    for i in 0..chars.len() {
+        let (byte_idx, c) = chars[i];
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && in_quote == Some('"') {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            in_quote = Some(c);
+        } else if c == '#' && (i == 0 || chars[i - 1].1.is_whitespace()) {
+            break;
+        } else if c == ':' {
+            let is_eol_or_ws = if i + 1 < chars.len() {
+                let next_char = chars[i + 1].1;
+                next_char == ' ' || next_char == '\t'
+            } else {
+                true
+            };
+            if is_eol_or_ws {
+                return Some(byte_idx);
+            }
+        }
+    }
+    None
+}
+
+fn split_yaml_comment(s: &str) -> (&str, Option<&str>) {
+    let mut in_quote = None;
+    let mut escaped = false;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+
+    for i in 0..chars.len() {
+        let (byte_idx, c) = chars[i];
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && in_quote == Some('"') {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            in_quote = Some(c);
+        } else if c == '#' {
+            let is_valid_start = if i == 0 {
+                true
+            } else {
+                chars[i - 1].1.is_whitespace()
+            };
+            if is_valid_start {
+                return (&s[..byte_idx], Some(&s[byte_idx..]));
+            }
+        }
+    }
+    (s, None)
+}
+
+fn highlight_yaml_value(out: &mut String, val: &str) {
+    let leading_ws = val
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    let trailing_ws = val
+        .chars()
+        .rev()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    let trimmed = val.trim();
+
+    out.push_str(&leading_ws);
+    if trimmed.is_empty() {
+        return;
+    }
+
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        out.push_str(&format!(
+            r##"<tspan fill="#86efac">{}</tspan>"##,
+            escape_xml(trimmed)
+        ));
+    } else if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+    {
+        highlight_yaml_flow(out, trimmed);
+    } else if matches!(trimmed, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        out.push_str(&format!(
+            r##"<tspan fill="#fdba74" font-weight="bold">{}</tspan>"##,
+            escape_xml(trimmed)
+        ));
+    } else if trimmed == "[" || trimmed == "]" || trimmed == "{" || trimmed == "}" {
+        out.push_str(&format!(
+            r##"<tspan fill="#cbd5e1">{}</tspan>"##,
+            escape_xml(trimmed)
+        ));
+    } else if trimmed.starts_with('&') || trimmed.starts_with('*') {
+        let (name, rest_val) = split_first_word(trimmed);
+        out.push_str(&format!(
+            r##"<tspan fill="#a78bfa" font-weight="bold">{}</tspan>"##,
+            escape_xml(name)
+        ));
+        if !rest_val.is_empty() {
+            out.push(' ');
+            highlight_yaml_value(out, rest_val);
+        }
+    } else if trimmed.starts_with('!') {
+        let (tag, rest_val) = split_first_word(trimmed);
+        out.push_str(&format!(
+            r##"<tspan fill="#c084fc">{}</tspan>"##,
+            escape_xml(tag)
+        ));
+        if !rest_val.is_empty() {
+            out.push(' ');
+            highlight_yaml_value(out, rest_val);
+        }
+    } else {
+        match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~" => {
+                out.push_str(&format!(
+                    r##"<tspan fill="#f472b6">{}</tspan>"##,
+                    escape_xml(trimmed)
+                ));
+            }
+            _ if is_yaml_number(trimmed) => {
+                out.push_str(&format!(
+                    r##"<tspan fill="#fdba74">{}</tspan>"##,
+                    escape_xml(trimmed)
+                ));
+            }
+            _ => {
+                out.push_str(&escape_xml(trimmed));
+            }
+        }
+    }
+    out.push_str(&trailing_ws);
+}
+
+fn highlight_yaml_flow(out: &mut String, text: &str) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '[' || c == ']' || c == '{' || c == '}' {
+            out.push_str(&format!(
+                r##"<tspan fill="#cbd5e1">{}</tspan>"##,
+                escape_xml(&c.to_string())
+            ));
+            i += 1;
+        } else if c == ',' || c == ':' {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(&c.to_string())
+            ));
+            i += 1;
+        } else if c.is_whitespace() {
+            out.push(c);
+            i += 1;
+        } else if c == '"' || c == '\'' {
+            let quote = c;
+            let mut s = String::new();
+            s.push(quote);
+            i += 1;
+            let mut escaped = false;
+            while i < chars.len() {
+                let ch = chars[i];
+                s.push(ch);
+                i += 1;
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' && quote == '"' {
+                    escaped = true;
+                } else if ch == quote {
+                    break;
+                }
+            }
+            out.push_str(&format!(
+                r##"<tspan fill="#86efac">{}</tspan>"##,
+                escape_xml(&s)
+            ));
+        } else {
+            let mut token = String::new();
+            while i < chars.len()
+                && !chars[i].is_whitespace()
+                && !matches!(chars[i], '[' | ']' | '{' | '}' | ',' | ':')
+            {
+                token.push(chars[i]);
+                i += 1;
+            }
+            let is_key = i < chars.len() && chars[i] == ':';
+            if is_key {
+                out.push_str(&format!(
+                    r##"<tspan fill="#93c5fd">{}</tspan>"##,
+                    escape_xml(&token)
+                ));
+            } else {
+                match token.to_ascii_lowercase().as_str() {
+                    "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~" => {
+                        out.push_str(&format!(
+                            r##"<tspan fill="#f472b6">{}</tspan>"##,
+                            escape_xml(&token)
+                        ));
+                    }
+                    _ if is_yaml_number(&token) => {
+                        out.push_str(&format!(
+                            r##"<tspan fill="#fdba74">{}</tspan>"##,
+                            escape_xml(&token)
+                        ));
+                    }
+                    _ if token.starts_with('&') || token.starts_with('*') => {
+                        out.push_str(&format!(
+                            r##"<tspan fill="#a78bfa" font-weight="bold">{}</tspan>"##,
+                            escape_xml(&token)
+                        ));
+                    }
+                    _ => {
+                        out.push_str(&escape_xml(&token));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_yaml_number(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return !hex.is_empty()
+            && !hex.starts_with('_')
+            && !hex.ends_with('_')
+            && !hex.contains("__")
+            && hex.chars().all(|c| c.is_ascii_hexdigit() || c == '_');
+    }
+    if let Some(oct) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        return !oct.is_empty()
+            && !oct.starts_with('_')
+            && !oct.ends_with('_')
+            && !oct.contains("__")
+            && oct.chars().all(|c| ('0'..='7').contains(&c) || c == '_');
+    }
+    if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        return !bin.is_empty()
+            && !bin.starts_with('_')
+            && !bin.ends_with('_')
+            && !bin.contains("__")
+            && bin.chars().all(|c| c == '0' || c == '1' || c == '_');
+    }
+
+    let lower = s.to_ascii_lowercase();
+    if matches!(lower.as_str(), ".inf" | "+.inf" | "-.inf" | ".nan") {
+        return true;
+    }
+
+    let s = s
+        .strip_prefix('+')
+        .or_else(|| s.strip_prefix('-'))
+        .unwrap_or(s);
+    if s.is_empty() {
+        return false;
+    }
+
+    let mut has_digit = false;
+    let mut has_dot = false;
+    let mut has_exp = false;
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            has_digit = true;
+            i += 1;
+        } else if c == '.' && !has_dot && !has_exp {
+            has_dot = true;
+            i += 1;
+        } else if (c == 'e' || c == 'E') && has_digit && !has_exp {
+            has_exp = true;
+            i += 1;
+            if i < chars.len() && (chars[i] == '+' || chars[i] == '-') {
+                i += 1;
+            }
+            if i >= chars.len() || !chars[i].is_ascii_digit() {
+                return false;
+            }
+        } else if c == '_' {
+            if i > 0
+                && chars[i - 1].is_ascii_digit()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    has_digit
+}
+
+fn split_first_word(s: &str) -> (&str, &str) {
+    if let Some(idx) = s.find(|c: char| c.is_whitespace()) {
+        (&s[..idx], s[idx..].trim_start())
+    } else {
+        (s, "")
+    }
+}
+
 const MAX_JSON_DEPTH: usize = 64;
 
 fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -2678,5 +3279,165 @@ mod tests {
         assert_eq!(img_bak.width, TEXT_PAGE_WIDTH);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yaml_highlighting() {
+        let yaml = r##"%YAML 1.2
+---
+# Application config
+app:
+  name: "glanvu"
+  version: 1.0.0
+  active: true
+  score: 98.5
+  empty: null
+  endpoint: https://api.example.com:443/v1
+  tags: [fast, image, "viewer"]
+  flow_map: {x: 10, y: 20}
+  defaults: &base_config
+    timeout: 30
+  staging:
+    <<: *base_config
+    debug: false
+  features:
+    - keyboard-first
+    - name: fast-nav
+      enabled: yes
+  raw_multiline: |
+    line one
+    line two
+...
+"##;
+        let doc = TextDocument::from_string_with_format(yaml.to_string(), SourceFormat::Yaml);
+        let svg = doc.page_svg(0).unwrap();
+
+        // Directive %YAML
+        assert!(svg.contains(r##"fill="#c084fc">%YAML"##));
+
+        // Document markers --- and ...
+        assert!(svg.contains(r##"fill="#a78bfa" font-weight="bold">---</tspan>"##));
+        assert!(svg.contains(r##"fill="#a78bfa" font-weight="bold">...</tspan>"##));
+
+        // Comment
+        assert!(svg.contains(r##"fill="#71717a"># Application config</tspan>"##));
+
+        // Keys in sky blue
+        assert!(svg.contains(r##"fill="#93c5fd">app</tspan>"##));
+        assert!(svg.contains(r##"fill="#93c5fd">version</tspan>"##));
+
+        // Strings in green
+        assert!(svg.contains(r##"fill="#86efac">&quot;glanvu&quot;</tspan>"##));
+
+        // Booleans in pink
+        assert!(svg.contains(r##"fill="#f472b6">true</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">null</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">yes</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">false</tspan>"##));
+
+        // Numbers in orange
+        assert!(svg.contains(r##"fill="#fdba74">98.5</tspan>"##));
+        assert!(svg.contains(r##"fill="#fdba74">30</tspan>"##));
+
+        // Block scalar | in bold orange
+        assert!(svg.contains(r##"fill="#fdba74" font-weight="bold">|</tspan>"##));
+
+        // Anchor &base_config and alias *base_config
+        assert!(svg.contains(r##"fill="#a78bfa" font-weight="bold">&amp;base_config</tspan>"##));
+        assert!(svg.contains(r##"fill="#a78bfa" font-weight="bold">*base_config</tspan>"##));
+
+        // Bullet item '-' in bold orange
+        assert!(svg.contains(r##"fill="#fdba74" font-weight="bold">- </tspan>"##));
+
+        // Flow collections brackets
+        assert!(svg.contains(r##"fill="#cbd5e1">[</tspan>"##));
+        assert!(svg.contains(r##"fill="#cbd5e1">{</tspan>"##));
+
+        // Rainbow indent guides
+        assert!(svg.contains(r##"fill-opacity="0.45">│ </tspan>"##));
+
+        // URL port ':443' not mistaken for a YAML key delimiter
+        assert!(svg.contains("https://api.example.com:443/v1"));
+        assert!(!svg.contains(r##"fill="#93c5fd">https://api.example.com</tspan>"##));
+    }
+
+    #[test]
+    fn text_document_loads_yaml_and_bak() {
+        let dir = std::env::temp_dir().join("glanvu-text-yaml-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // .yaml file
+        let yaml_path = dir.join("compose.yaml");
+        let yaml_content = "services:\n  app:\n    image: ubuntu:latest\n    restart: always";
+        std::fs::write(&yaml_path, yaml_content).unwrap();
+        let doc_yaml = TextDocument::load(&yaml_path).unwrap();
+        assert_eq!(doc_yaml.content(), yaml_content);
+        assert_eq!(doc_yaml.format, SourceFormat::Yaml);
+        let img_yaml = doc_yaml.render_fit(0).unwrap();
+        assert_eq!(img_yaml.width, TEXT_PAGE_WIDTH);
+
+        // .yml file
+        let yml_path = dir.join("ci.yml");
+        let yml_content = "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest";
+        std::fs::write(&yml_path, yml_content).unwrap();
+        let doc_yml = TextDocument::load(&yml_path).unwrap();
+        assert_eq!(doc_yml.content(), yml_content);
+        assert_eq!(doc_yml.format, SourceFormat::Yaml);
+        let img_yml = doc_yml.render_fit(0).unwrap();
+        assert_eq!(img_yml.width, TEXT_PAGE_WIDTH);
+
+        // .bak file
+        let bak_path = dir.join("compose.yaml.bak");
+        std::fs::write(&bak_path, yaml_content).unwrap();
+        let doc_bak = TextDocument::load(&bak_path).unwrap();
+        assert_eq!(doc_bak.content(), yaml_content);
+        assert_eq!(doc_bak.format, SourceFormat::Yaml);
+        let img_bak = doc_bak.render_fit(0).unwrap();
+        assert_eq!(img_bak.width, TEXT_PAGE_WIDTH);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yaml_numbers_and_multiline_quotes() {
+        // Valid and invalid YAML numbers
+        assert!(is_yaml_number("1_000_000"));
+        assert!(is_yaml_number("3.141_592"));
+        assert!(is_yaml_number("0xdead_beef"));
+        assert!(is_yaml_number("0o755"));
+        assert!(is_yaml_number("0b1010_0101"));
+        assert!(is_yaml_number(".inf"));
+        assert!(is_yaml_number(".nan"));
+
+        // Malformed underscore forms rejected
+        assert!(!is_yaml_number("1__2"));
+        assert!(!is_yaml_number("1_"));
+        assert!(!is_yaml_number("_1"));
+        assert!(!is_yaml_number("3._14"));
+        assert!(!is_yaml_number("3_.14"));
+        assert!(!is_yaml_number("0x__beef"));
+        assert!(!is_yaml_number("0xbeef_"));
+
+        // Wrapped double-quoted string with an apostrophe (single quote)
+        let long_double = "title: \"This is a very long string that wraps across lines and contains an apostrophe ' that should not close it\"";
+        let doc_d =
+            TextDocument::from_string_with_format(long_double.to_string(), SourceFormat::Yaml);
+        assert_eq!(doc_d.pages[0].len(), 2);
+        assert_eq!(doc_d.pages[0][1].string_quote, Some('"'));
+        let svg_d = doc_d.page_svg(0).unwrap();
+        // The wrapped part must be rendered as string green
+        assert!(svg_d.contains(r##"fill="#86efac">that should not close it&quot;</tspan>"##));
+
+        // Wrapped single-quoted string with double quotes inside
+        let long_single = "quote: 'This is a very long single-quoted string that wraps across lines and contains double-quotes \"hello\" inside'";
+        let doc_s =
+            TextDocument::from_string_with_format(long_single.to_string(), SourceFormat::Yaml);
+        assert_eq!(doc_s.pages[0].len(), 2);
+        assert_eq!(doc_s.pages[0][1].string_quote, Some('\''));
+        let svg_s = doc_s.page_svg(0).unwrap();
+        assert!(svg_s.contains(
+            r##"<tspan fill="#86efac">double-quotes &quot;hello&quot; inside&apos;</tspan>"##
+        ));
     }
 }

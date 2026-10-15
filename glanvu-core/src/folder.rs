@@ -26,7 +26,7 @@ pub fn is_pdf_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Pdf)
 }
 
-/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .cfg, .conf, .env, .properties) —
+/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .yaml, .yml, .cfg, .conf, .env, .properties) —
 /// paginated and rendered with monospace typography and line numbers. Single source of truth for that check.
 pub fn is_text_path(path: &Path) -> bool {
     matches!(
@@ -38,6 +38,7 @@ pub fn is_text_path(path: &Path) -> bool {
                 | SourceFormat::Xml
                 | SourceFormat::Ini
                 | SourceFormat::Toml
+                | SourceFormat::Yaml
         )
     )
 }
@@ -60,6 +61,11 @@ pub fn is_ini_path(path: &Path) -> bool {
 /// Whether a path's extension marks it as TOML (.toml).
 pub fn is_toml_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Toml)
+}
+
+/// Whether a path's extension marks it as YAML (.yaml, .yml).
+pub fn is_yaml_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Yaml)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -189,6 +195,16 @@ mod tests {
         assert!(is_toml_path(Path::new("/x/Cargo.TOML")));
         assert!(!is_toml_path(Path::new("/x/config.ini")));
         assert!(!is_toml_path(Path::new("/x/notes.txt")));
+    }
+
+    #[test]
+    fn is_yaml_path_is_case_insensitive() {
+        assert!(is_yaml_path(Path::new("/x/docker-compose.yaml")));
+        assert!(is_yaml_path(Path::new("/x/docker-compose.YAML")));
+        assert!(is_yaml_path(Path::new("/x/ci.yml")));
+        assert!(is_yaml_path(Path::new("/x/ci.YML")));
+        assert!(!is_yaml_path(Path::new("/x/Cargo.toml")));
+        assert!(!is_yaml_path(Path::new("/x/config.ini")));
     }
 
     #[test]

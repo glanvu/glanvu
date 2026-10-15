@@ -42,6 +42,8 @@ pub enum SourceFormat {
     Ini,
     /// A TOML configuration document (.toml), rendered with monospace typography and syntax highlighting.
     Toml,
+    /// A YAML document (.yaml, .yml), rendered with monospace typography, syntax highlighting, and rainbow indent guides.
+    Yaml,
 }
 
 impl SourceFormat {
@@ -69,6 +71,7 @@ impl SourceFormat {
             SourceFormat::Xml => "XML",
             SourceFormat::Ini => "INI",
             SourceFormat::Toml => "TOML",
+            SourceFormat::Yaml => "YAML",
         }
     }
 
@@ -98,6 +101,7 @@ impl SourceFormat {
                 Some(SourceFormat::Ini)
             }
             "toml" => Some(SourceFormat::Toml),
+            "yaml" | "yml" => Some(SourceFormat::Yaml),
             _ => None,
         }
     }
@@ -162,6 +166,7 @@ impl SourceFormat {
             SourceFormat::Xml => None,
             SourceFormat::Ini => None,
             SourceFormat::Toml => None,
+            SourceFormat::Yaml => None,
         }
     }
 
@@ -449,6 +454,42 @@ mod tests {
         assert_eq!(
             SourceFormat::from_path(std::path::Path::new("unknown.bak")),
             None
+        );
+    }
+
+    #[test]
+    fn yaml_extensions_resolve() {
+        assert_eq!(
+            SourceFormat::from_extension("yaml"),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("YAML"),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("yml"),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("YML"),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(SourceFormat::Yaml.name(), "YAML");
+        assert_eq!(SourceFormat::Yaml.to_image(), None);
+
+        // Path resolution including .bak
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("docker-compose.yml")),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/etc/k8s/pod.yaml")),
+            Some(SourceFormat::Yaml)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("config.yaml.bak")),
+            Some(SourceFormat::Yaml)
         );
     }
 }

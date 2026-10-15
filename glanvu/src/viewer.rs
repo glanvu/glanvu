@@ -5394,6 +5394,8 @@ impl ApplicationHandler for App {
                                         "xml",
                                         "ini",
                                         "toml",
+                                        "yaml",
+                                        "yml",
                                         "cfg",
                                         "conf",
                                         "env",
