@@ -3475,6 +3475,12 @@ struct App {
     find: Option<FindState>,
     /// Last grid click: (timestamp, cell_index) for double-click detection.
     last_grid_click: Option<(Instant, usize)>,
+    /// Last single-view click: (timestamp, (x, y)) for double-click fullscreen toggle.
+    last_single_click: Option<(Instant, (f64, f64))>,
+    /// Starting position of current single-view press for jitter/drag detection.
+    single_drag_start: Option<(f64, f64)>,
+    /// Whether the cursor moved significantly during the current single-view press.
+    single_drag_moved: bool,
     /// Current sort order.
     sort_mode: glanvu_viewer_core::nav::SortMode,
     /// Cached mtime string for the date overlay (updated when the path overlay fires).
@@ -3536,6 +3542,15 @@ struct App {
     /// resize keeps showing the old resolution stretched/letterboxed to the new window, which
     /// looks soft after enlarging. Debounced so a live drag-resize doesn't re-render every frame.
     pdf_rerender_at: Option<Instant>,
+    // ── Plain Text (.txt, .log) ──
+    /// Whether the current file is plain text (.txt, .log) — gates page-turn navigation (ArrowUp/ArrowDown).
+    current_is_text: bool,
+    /// Parsed current text document, kept in memory across page turns. `None` for non-text images.
+    text_doc: Option<glanvu_core::TextDocument>,
+    /// 0-based index of current page within `text_doc`. Always 0 for non-text files.
+    current_text_page: usize,
+    /// When `Some(t)`, the current text page is re-rendered at the new window size at time `t`.
+    text_rerender_at: Option<Instant>,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
@@ -3546,6 +3561,25 @@ fn confirm_overlay_text(set: bool) -> &'static str {
     } else {
         "Restore previous defaults?\n\nGlanvu won't open images\nby default anymore.\n\nEnter = confirm   Esc = cancel"
     }
+}
+
+/// Returns true if a click at `pos` at `now` qualifies as a double-click given the
+/// previous click at `last_click`. A double-click requires a time delta under 400 ms
+/// and a cursor displacement under 10.0 pixels.
+pub(crate) fn is_double_click(
+    last_click: Option<(Instant, (f64, f64))>,
+    now: Instant,
+    pos: (f64, f64),
+) -> bool {
+    last_click.is_some_and(|(t, prev)| {
+        let Some(dur) = now.checked_duration_since(t) else {
+            return false;
+        };
+        let dt = dur.as_millis();
+        let dx = pos.0 - prev.0;
+        let dy = pos.1 - prev.1;
+        dt < 400 && (dx * dx + dy * dy) < 100.0
+    })
 }
 
 const HELP_TITLE: &str = "Glanvu — keyboard shortcuts";
@@ -3566,7 +3600,7 @@ use HelpRow::{Keys, Section};
 const HELP_LEFT: &[HelpRow] = &[
     Section("Navigate"),
     Keys("← / →", "previous · next image"),
-    Keys("↑ / ↓", "turn PDF page"),
+    Keys("↑ / ↓", "turn page (PDF · text)"),
     Keys("Home / End", "first · last image"),
     Keys("F  ·  /", "find by name"),
     Keys("Enter", "directory explorer"),
@@ -3576,7 +3610,7 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("drag", "pan"),
     Keys("0  ·  1", "fit  ·  actual size (1:1)"),
     Keys("T", "turn (rotate) 90°"),
-    Keys("Space / F11", "fullscreen"),
+    Keys("Space / F11 / dbl-click", "fullscreen"),
     Keys("S", "slideshow"),
 ];
 
@@ -3585,7 +3619,7 @@ const HELP_RIGHT: &[HelpRow] = &[
     Keys("O", "sort order (name / date)"),
     Keys("I", "image info"),
     Keys("R", "rename"),
-    Keys("C  ·  Shift+C", "copy image · copy path"),
+    Keys("C  ·  Shift+C", "copy content · copy path"),
     Keys("F5", "refresh from disk"),
     Keys("Del / Backspace", "move to Trash"),
     Section("Grid selection"),
@@ -3775,6 +3809,65 @@ impl App {
         self.redraw();
     }
 
+    /// (Re)load the parsed text document for the current file and render its first page.
+    fn refresh_text_doc(&mut self) {
+        self.text_doc = if self.current_is_text {
+            self.nav
+                .current_path()
+                .and_then(|p| glanvu_core::TextDocument::load(p).ok())
+        } else {
+            None
+        };
+        if self.text_doc.is_some() {
+            self.render_current_text_page();
+        }
+    }
+
+    /// Turn the current text document's page by `delta` (±1), clamped at the first/last page.
+    fn turn_text_page(&mut self, delta: i32) {
+        let Some(doc) = self.text_doc.as_ref() else {
+            return;
+        };
+        let Some(new_page) = clamped_page_turn(self.current_text_page, delta, doc.page_count())
+        else {
+            return; // clamped: no-op at the first/last page
+        };
+        self.current_text_page = new_page;
+        self.render_current_text_page();
+    }
+
+    /// Render `self.current_text_page` of the current text document at the window's resolution
+    /// and upload it as the displayed texture, resetting zoom/pan to fit.
+    fn render_current_text_page(&mut self) {
+        let Some(doc) = self.text_doc.as_ref() else {
+            return;
+        };
+        let (win_w, win_h) = self.win_size();
+        let page_size = doc.page_size(self.current_text_page);
+        let render_result = page_size.and_then(|(pw, ph)| {
+            let (out_w, out_h) =
+                glanvu_core::fit_within(pw, ph, win_w.max(1.0) as u32, win_h.max(1.0) as u32);
+            doc.render_page(self.current_text_page, out_w, out_h)
+        });
+        match render_result {
+            Ok(img) => {
+                self.img_size = (img.width, img.height);
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.set_image(&img);
+                }
+                self.state = ViewState::fit();
+                self.flash_overlay();
+            }
+            Err(e) => {
+                eprintln!(
+                    "glanvu: failed to render text page {}: {e}",
+                    self.current_text_page + 1
+                );
+            }
+        }
+        self.redraw();
+    }
+
     /// The SVG deep-zoom viewport quad to composite this frame: a draw for the currently CACHED
     /// viewport texture (if any), placed at its image-space region over the base. Pure/read-only —
     /// the scheduling of new renders lives in `plan_svg_viewport` (timer-driven from
@@ -3897,6 +3990,14 @@ impl App {
     }
 
     fn copy_image_to_clipboard(&mut self) {
+        if let Some(doc) = self.text_doc.as_ref() {
+            match Clipboard::new().and_then(|mut cb| cb.set_text(doc.content().to_string())) {
+                Ok(()) => self.show_status("Text copied"),
+                Err(_) => self.show_status("Copy failed"),
+            }
+            self.redraw();
+            return;
+        }
         let Some(img) = self.nav.current_image() else {
             return;
         };
@@ -3959,6 +4060,12 @@ impl App {
             lines.push(format!(
                 "page {} of {}",
                 self.current_pdf_page + 1,
+                doc.page_count()
+            ));
+        } else if let Some(doc) = self.text_doc.as_ref() {
+            lines.push(format!(
+                "page {} of {}",
+                self.current_text_page + 1,
                 doc.page_count()
             ));
         }
@@ -4528,6 +4635,7 @@ impl App {
         self.rename = None;
         self.confirm_rename = None;
         self.find = None;
+        self.last_single_click = None;
         self.mode = ViewMode::Single; // leave Empty/Grid state
 
         let dir = path
@@ -4578,6 +4686,7 @@ impl App {
 
     fn enter_grid(&mut self) {
         self.stop_slideshow();
+        self.last_single_click = None;
         self.mode = ViewMode::Grid;
         // Start with the current image as the sole selection (fresh each time the grid opens).
         self.grid.select_single(self.nav.index);
@@ -4596,6 +4705,7 @@ impl App {
 
     fn enter_single(&mut self, idx: usize) {
         self.mode = ViewMode::Single;
+        self.last_single_click = None;
         if let Some(res) = self.nav.show_index(idx) {
             self.apply_nav_result(res);
         }
@@ -4638,10 +4748,13 @@ impl App {
     }
 
     fn apply_nav_result(&mut self, res: glanvu_viewer_core::nav::ShowResult) {
+        self.last_single_click = None;
         self.img_size = res.img_size;
         self.current_is_svg = glanvu_core::is_svg_path(&res.path);
         self.current_is_pdf = glanvu_core::is_pdf_path(&res.path);
         self.current_pdf_page = 0;
+        self.current_is_text = glanvu_core::is_text_path(&res.path);
+        self.current_text_page = 0;
         if let (Some(gpu), Some(img)) = (self.gpu.as_mut(), self.nav.current_image()) {
             gpu.set_image(img);
         }
@@ -4655,6 +4768,7 @@ impl App {
         // PDF has no async re-render worker (D13): refresh_pdf_doc renders the correct-resolution
         // page synchronously, immediately replacing the texture uploaded a few lines above.
         self.refresh_pdf_doc();
+        self.refresh_text_doc();
         self.update_title(res.index, res.total, &res.path);
         self.flash_overlay();
 
@@ -4823,11 +4937,19 @@ impl App {
         } else {
             None
         };
-        // Page overlay (top-right, "N/M") — same timer as the path/date overlays, PDF only.
-        let page_overlay_text = if overlay_active && self.current_is_pdf {
-            self.pdf_doc
-                .as_ref()
-                .map(|doc| format!("{}/{}", self.current_pdf_page + 1, doc.page_count()))
+        // Page overlay (top-right, "N/M") — same timer as the path/date overlays, PDF and text documents.
+        let page_overlay_text = if overlay_active {
+            if self.current_is_pdf {
+                self.pdf_doc
+                    .as_ref()
+                    .map(|doc| format!("{}/{}", self.current_pdf_page + 1, doc.page_count()))
+            } else if self.current_is_text {
+                self.text_doc
+                    .as_ref()
+                    .map(|doc| format!("{}/{}", self.current_text_page + 1, doc.page_count()))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -4915,6 +5037,7 @@ impl ApplicationHandler for App {
         // Same idea for PDF: the initial page render in `run()` happens before a real window
         // exists, so re-render at the now-known window size.
         self.refresh_pdf_doc();
+        self.refresh_text_doc();
         self.draw();
         self.redraw();
     }
@@ -4944,6 +5067,9 @@ impl ApplicationHandler for App {
                     self.schedule_svg_rerender();
                     if self.current_is_pdf {
                         self.pdf_rerender_at = Some(Instant::now() + SVG_RERENDER_DEBOUNCE);
+                    }
+                    if self.current_is_text {
+                        self.text_rerender_at = Some(Instant::now() + SVG_RERENDER_DEBOUNCE);
                     }
                 }
                 self.redraw();
@@ -5249,10 +5375,10 @@ impl ApplicationHandler for App {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_title("Open image — Glanvu")
                                 .add_filter(
-                                    "Images",
+                                    "Supported files",
                                     &[
                                         "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp",
-                                        "svg", "pdf",
+                                        "svg", "pdf", "txt", "log",
                                     ],
                                 )
                                 .add_filter("All files", &["*"])
@@ -5551,11 +5677,13 @@ impl ApplicationHandler for App {
                             self.apply_nav_result(res);
                         }
                     }
-                    // Down/Up: page-turn a multi-page PDF (clamped, no wraparound); for every
-                    // other file, fall through to today's next/prev-file behavior (D13).
+                    // Down/Up: page-turn a multi-page PDF or text document (clamped, no wraparound);
+                    // for every other file, fall through to today's next/prev-file behavior (D13).
                     Key::Named(NamedKey::ArrowDown) => {
                         if self.current_is_pdf {
                             self.turn_pdf_page(1);
+                        } else if self.current_is_text {
+                            self.turn_text_page(1);
                         } else {
                             self.stop_slideshow();
                             if let Some(res) = self.nav.next() {
@@ -5566,6 +5694,8 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowUp) => {
                         if self.current_is_pdf {
                             self.turn_pdf_page(-1);
+                        } else if self.current_is_text {
+                            self.turn_text_page(-1);
                         } else {
                             self.stop_slideshow();
                             if let Some(res) = self.nav.prev() {
@@ -5765,7 +5895,46 @@ impl ApplicationHandler for App {
                         }
                         return; // don't start drag when clicking in the panel
                     }
-                    self.dragging = state == ElementState::Pressed;
+                    if self.mode == ViewMode::Single {
+                        let modal_active =
+                            self.modal_text().is_some() || self.help_visible || self.about_visible;
+                        if state == ElementState::Pressed {
+                            if !modal_active {
+                                let now = Instant::now();
+                                let pos = (self.cursor.x, self.cursor.y);
+                                if is_double_click(self.last_single_click, now, pos) {
+                                    self.last_single_click = None;
+                                    self.single_drag_start = None;
+                                    self.single_drag_moved = false;
+                                    self.dragging = false;
+                                    self.toggle_fullscreen();
+                                    self.flash_overlay();
+                                    self.redraw();
+                                } else {
+                                    self.single_drag_start = Some(pos);
+                                    self.single_drag_moved = false;
+                                    self.dragging = true;
+                                }
+                            } else {
+                                self.dragging = false;
+                            }
+                        } else {
+                            self.dragging = false;
+                            if !modal_active
+                                && !self.single_drag_moved
+                                && self.single_drag_start.is_some()
+                            {
+                                self.last_single_click =
+                                    Some((Instant::now(), (self.cursor.x, self.cursor.y)));
+                            } else {
+                                self.last_single_click = None;
+                            }
+                            self.single_drag_start = None;
+                            self.single_drag_moved = false;
+                        }
+                    } else {
+                        self.dragging = state == ElementState::Pressed;
+                    }
                 }
                 // Donation link click detection. Hit zones are computed during render (exact text
                 // metrics), so here we just test the cursor against them — no geometry duplication.
@@ -5790,6 +5959,13 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 if self.dragging && self.mode == ViewMode::Single {
+                    if let Some(start) = self.single_drag_start {
+                        let dx = position.x - start.0;
+                        let dy = position.y - start.1;
+                        if dx * dx + dy * dy > 25.0 {
+                            self.single_drag_moved = true;
+                        }
+                    }
                     self.state.pan.0 += (position.x - self.cursor.x) as f32;
                     self.state.pan.1 -= (position.y - self.cursor.y) as f32;
                     self.redraw();
@@ -5992,6 +6168,16 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Plain text page re-render on resize settle. Synchronous like PDF.
+        if let Some(t) = self.text_rerender_at {
+            if now >= t {
+                self.text_rerender_at = None;
+                if self.current_is_text {
+                    self.render_current_text_page();
+                }
+            }
+        }
+
         // Decide whether to (re)render the SVG deep-zoom viewport now that events have settled.
         // Returns a wakeup while debouncing a scale change so this re-runs to enqueue after settle.
         let vp_win = self
@@ -6014,6 +6200,7 @@ impl ApplicationHandler for App {
             self.status_until,
             self.svg_rerender_at,
             self.pdf_rerender_at,
+            self.text_rerender_at,
             svg_poll_deadline,
             tile_poll_deadline,
             vp_debounce_deadline,
@@ -6046,6 +6233,7 @@ pub fn run(path: &str) -> ExitCode {
     let img_size = (first_image.width, first_image.height);
     let current_is_svg = glanvu_core::is_svg_path(&first_path);
     let current_is_pdf = glanvu_core::is_pdf_path(&first_path);
+    let current_is_text = glanvu_core::is_text_path(&first_path);
 
     let dir = first_path
         .parent()
@@ -6111,6 +6299,9 @@ pub fn run(path: &str) -> ExitCode {
         confirm_rename: None,
         find: None,
         last_grid_click: None,
+        last_single_click: None,
+        single_drag_start: None,
+        single_drag_moved: false,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
         current_is_svg,
@@ -6133,6 +6324,10 @@ pub fn run(path: &str) -> ExitCode {
         pdf_doc: None,
         current_pdf_page: 0,
         pdf_rerender_at: None,
+        current_is_text,
+        text_doc: None,
+        current_text_page: 0,
+        text_rerender_at: None,
     };
 
     match event_loop.run_app(&mut app) {
@@ -6217,6 +6412,9 @@ pub fn run_empty() -> ExitCode {
         confirm_rename: None,
         find: None,
         last_grid_click: None,
+        last_single_click: None,
+        single_drag_start: None,
+        single_drag_moved: false,
         sort_mode: glanvu_viewer_core::nav::SortMode::default(),
         date_text: String::new(),
         current_is_svg: false,
@@ -6239,6 +6437,10 @@ pub fn run_empty() -> ExitCode {
         pdf_doc: None,
         current_pdf_page: 0,
         pdf_rerender_at: None,
+        current_is_text: false,
+        text_doc: None,
+        current_text_page: 0,
+        text_rerender_at: None,
     };
 
     match event_loop.run_app(&mut app) {
@@ -6253,10 +6455,11 @@ pub fn run_empty() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamped_page_turn, human_size, ideal_window_size, image_scale, pad_region, region_covers,
-        tile_mvp, visible_image_rect, FindState, TextInput, ViewMode, ViewState,
+        clamped_page_turn, human_size, ideal_window_size, image_scale, is_double_click, pad_region,
+        region_covers, tile_mvp, visible_image_rect, FindState, TextInput, ViewMode, ViewState,
     };
     use std::path::PathBuf;
+    use std::time::Instant;
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() <= eps
@@ -6463,6 +6666,7 @@ mod tests {
             limit: 8,
             scroll_y: 0.0,
         });
+        let mut last_single_click = Some((Instant::now(), (10.0, 10.0)));
         let mut mode = ViewMode::Grid;
 
         // Verify pre-conditions
@@ -6474,6 +6678,7 @@ mod tests {
         assert!(rename.is_some());
         assert!(confirm_rename.is_some());
         assert!(find.is_some());
+        assert!(last_single_click.is_some());
         assert_eq!(mode, ViewMode::Grid);
 
         // Simulated state reset block matching open_file_path:
@@ -6485,6 +6690,7 @@ mod tests {
         rename = None;
         confirm_rename = None;
         find = None;
+        last_single_click = None;
         mode = ViewMode::Single;
 
         // Verify post-conditions
@@ -6496,7 +6702,37 @@ mod tests {
         assert!(rename.is_none());
         assert!(confirm_rename.is_none());
         assert!(find.is_none());
+        assert!(last_single_click.is_none());
         assert_eq!(mode, ViewMode::Single);
+    }
+
+    #[test]
+    fn double_click_within_threshold_returns_true() {
+        let t0 = Instant::now();
+        let last = Some((t0, (100.0, 100.0)));
+        let t1 = t0 + std::time::Duration::from_millis(200);
+        assert!(is_double_click(last, t1, (102.0, 101.0)));
+    }
+
+    #[test]
+    fn double_click_exceeding_duration_returns_false() {
+        let t0 = Instant::now();
+        let last = Some((t0, (100.0, 100.0)));
+        let t1 = t0 + std::time::Duration::from_millis(450);
+        assert!(!is_double_click(last, t1, (100.0, 100.0)));
+    }
+
+    #[test]
+    fn double_click_exceeding_distance_returns_false() {
+        let t0 = Instant::now();
+        let last = Some((t0, (100.0, 100.0)));
+        let t1 = t0 + std::time::Duration::from_millis(100);
+        assert!(!is_double_click(last, t1, (120.0, 100.0)));
+    }
+
+    #[test]
+    fn double_click_without_previous_click_returns_false() {
+        assert!(!is_double_click(None, Instant::now(), (100.0, 100.0)));
     }
 
     #[cfg(target_os = "macos")]

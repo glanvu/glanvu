@@ -30,6 +30,8 @@ pub enum SourceFormat {
     /// `image` crate. Input-only, like `Svg` (see D13 in the decision log): `to_image()` returns
     /// `None`, and converting/viewing always operates on a single page (page 1 by default).
     Pdf,
+    /// A plain text or log document format (.txt, .log), rendered with monospace typography.
+    Txt,
 }
 
 impl SourceFormat {
@@ -51,6 +53,7 @@ impl SourceFormat {
             SourceFormat::Tga => "TGA",
             SourceFormat::Svg => "SVG",
             SourceFormat::Pdf => "PDF",
+            SourceFormat::Txt => "TXT",
         }
     }
 
@@ -72,13 +75,14 @@ impl SourceFormat {
             "tga" => Some(SourceFormat::Tga),
             "svg" => Some(SourceFormat::Svg),
             "pdf" => Some(SourceFormat::Pdf),
+            "txt" | "log" => Some(SourceFormat::Txt),
             _ => None,
         }
     }
 
     /// The `image` crate format used to encode this `SourceFormat`, if any.
     ///
-    /// `None` for `Svg` and `Pdf`: neither is an `image`-crate encode target (no raster→vector
+    /// `None` for `Svg`, `Pdf`, and `Txt`: neither is an `image`-crate encode target (no raster→vector
     /// or raster→document conversion).
     pub(crate) fn to_image(self) -> Option<image::ImageFormat> {
         match self {
@@ -97,6 +101,7 @@ impl SourceFormat {
             SourceFormat::Tga => Some(image::ImageFormat::Tga),
             SourceFormat::Svg => None,
             SourceFormat::Pdf => None,
+            SourceFormat::Txt => None,
         }
     }
 

@@ -17,16 +17,18 @@ mod error;
 mod folder;
 mod format;
 mod pdf;
+mod text;
 
 pub use convert::{convert_file, encode_to_file, ConvertOptions, Rotation};
 pub use decode::{
-    decode_bytes, decode_path, decode_pdf_page, decode_svg_at_size, decode_thumbnail, fit_within,
-    read_meta_path, DecodedImage, ImageMeta, SvgDocument,
+    decode_bytes, decode_path, decode_pdf_page, decode_svg_at_size, decode_text_page,
+    decode_thumbnail, fit_within, read_meta_path, DecodedImage, ImageMeta, SvgDocument,
 };
 pub use error::{Error, Result};
-pub use folder::{is_pdf_path, is_supported_path, is_svg_path, list_images};
+pub use folder::{is_pdf_path, is_supported_path, is_svg_path, is_text_path, list_images};
 pub use format::{detect_format, SourceFormat};
 pub use pdf::PdfDocument;
+pub use text::{TextDocument, TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH};
 
 /// The crate version, taken from `Cargo.toml` at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

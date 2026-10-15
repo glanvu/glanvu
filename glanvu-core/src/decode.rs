@@ -11,9 +11,10 @@ use std::sync::{Arc, OnceLock};
 use resvg::{tiny_skia, usvg};
 
 use crate::error::{Error, Result};
-use crate::folder::{is_pdf_path, is_svg_path};
+use crate::folder::{is_pdf_path, is_svg_path, is_text_path};
 use crate::format::{sniff_pdf, sniff_svg, SourceFormat};
 use crate::pdf::PdfDocument;
+use crate::text::TextDocument;
 
 /// A decoded image, normalized to 8-bit RGBA.
 #[derive(Debug, Clone)]
@@ -63,6 +64,9 @@ pub fn decode_path<P: AsRef<Path>>(path: P) -> Result<DecodedImage> {
     if is_pdf_path(path) {
         return decode_pdf_page0(&PdfDocument::load(path)?);
     }
+    if is_text_path(path) {
+        return TextDocument::load(path)?.render_fit(0);
+    }
     let img = open_reader(path)?.decode().map_err(map_image_error)?;
     Ok(to_decoded(img))
 }
@@ -108,6 +112,20 @@ pub fn decode_svg_at_size<P: AsRef<Path>>(path: P, w: u32, h: u32) -> Result<Dec
     decode_svg_bytes(&read_file(path)?, Some((w.max(1), h.max(1))))
 }
 
+/// Rasterize page `page_index` (0-based) of a plain text document at an explicit pixel size.
+pub fn decode_text_page<P: AsRef<Path>>(
+    path: P,
+    page_index: usize,
+    w: u32,
+    h: u32,
+) -> Result<DecodedImage> {
+    let path = path.as_ref();
+    if !is_text_path(path) {
+        return Err(Error::UnsupportedFormat);
+    }
+    TextDocument::load(path)?.render_page(page_index, w.max(1), h.max(1))
+}
+
 /// Decode and resize to a thumbnail that fits within `max_w × max_h`, preserving aspect ratio.
 ///
 /// Uses `thumbnail()` from the `image` crate (nearest/triangle, fast for preview generation).
@@ -127,6 +145,12 @@ pub fn decode_thumbnail<P: AsRef<Path>>(path: P, max_w: u32, max_h: u32) -> Resu
         // One thumbnail per PDF *file* (page 0), not one per page — same one-tile-per-file
         // convention as every other format in the grid (see D13 in the decision log).
         let doc = PdfDocument::load(path)?;
+        let (w, h) = doc.page_size(0)?;
+        let (tw, th) = fit_within(w, h, max_w.max(1), max_h.max(1));
+        return doc.render_page(0, tw, th);
+    }
+    if is_text_path(path) {
+        let doc = TextDocument::load(path)?;
         let (w, h) = doc.page_size(0)?;
         let (tw, th) = fit_within(w, h, max_w.max(1), max_h.max(1));
         return doc.render_page(0, tw, th);
@@ -164,6 +188,18 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
             width: w.round().max(1.0) as u32,
             height: h.round().max(1.0) as u32,
             format: SourceFormat::Pdf,
+            file_size,
+            page_count: Some(doc.page_count() as u32),
+        });
+    }
+
+    if is_text_path(path) {
+        let doc = TextDocument::load(path)?;
+        let (w, h) = doc.page_size(0)?;
+        return Ok(ImageMeta {
+            width: w.round().max(1.0) as u32,
+            height: h.round().max(1.0) as u32,
+            format: SourceFormat::Txt,
             file_size,
             page_count: Some(doc.page_count() as u32),
         });
@@ -357,7 +393,7 @@ impl SvgDocument {
     }
 }
 
-fn decode_svg_bytes(bytes: &[u8], target: Option<(u32, u32)>) -> Result<DecodedImage> {
+pub(crate) fn decode_svg_bytes(bytes: &[u8], target: Option<(u32, u32)>) -> Result<DecodedImage> {
     let doc = SvgDocument::from_bytes(bytes)?;
     let (w, h) = target.unwrap_or((
         doc.width.round().max(1.0) as u32,
