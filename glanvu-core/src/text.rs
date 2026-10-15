@@ -66,6 +66,12 @@ struct VisualRow {
     is_value_continuation: bool,
     /// Partial XML delimiter carried from the end of the previous visual row.
     partial_delim: PartialDelim,
+    /// Whether this row is inside a fenced Markdown code block.
+    starts_in_code_block: bool,
+    /// Markdown heading level (1-6) if this row is part of a heading.
+    heading_level: Option<u8>,
+    /// Whether this row is a wrapped continuation of a Markdown blockquote.
+    is_blockquote_continuation: bool,
 }
 
 /// A parsed plain text document, paginated and ready to render.
@@ -149,6 +155,7 @@ impl TextDocument {
         let mut in_tag = false;
         let mut in_cdata = false;
         let mut partial_delim = PartialDelim::None;
+        let mut code_fence_state: Option<(char, usize)> = None;
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let cleaned = sanitize_line(raw_line);
@@ -167,10 +174,14 @@ impl TextDocument {
                     starts_in_section: false,
                     is_value_continuation: false,
                     partial_delim,
+                    starts_in_code_block: code_fence_state.is_some(),
+                    heading_level: None,
+                    is_blockquote_continuation: false,
                 });
             } else {
                 let is_ini_or_toml = format == SourceFormat::Ini || format == SourceFormat::Toml;
                 let is_yaml = format == SourceFormat::Yaml;
+                let is_md = format == SourceFormat::Md;
                 let trimmed = expanded.trim_start();
                 let is_ini_comment = is_ini_or_toml
                     && (trimmed.starts_with(';')
@@ -190,6 +201,31 @@ impl TextDocument {
                             .is_some_and(|s| find_yaml_colon(s).is_some()));
                 let mut in_ini_section = false;
 
+                let (is_code_fence, is_closing_fence) = if is_md {
+                    if let Some((open_char, open_len)) = code_fence_state {
+                        let count = trimmed.chars().take_while(|&c| c == open_char).count();
+                        if count >= open_len && trimmed[count..].trim().is_empty() {
+                            (true, true)
+                        } else {
+                            (false, false)
+                        }
+                    } else if parse_code_fence(trimmed).is_some() {
+                        (true, false)
+                    } else {
+                        (false, false)
+                    }
+                } else {
+                    (false, false)
+                };
+
+                let line_starts_in_code_block = code_fence_state.is_some();
+                let is_blockquote = is_md && !line_starts_in_code_block && trimmed.starts_with('>');
+                let heading_level = if is_md && !line_starts_in_code_block {
+                    parse_heading_level(trimmed)
+                } else {
+                    None
+                };
+
                 let indent_spaces = expanded.chars().take_while(|&c| c == ' ').count();
                 let chunks = wrap_line(&expanded, WRAP_COLS);
                 for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
@@ -202,6 +238,13 @@ impl TextDocument {
                     let row_starts_in_section = in_ini_section;
                     let row_is_value_continuation = (is_ini_kv || is_yaml_kv) && chunk_idx > 0;
                     let row_partial_delim = partial_delim;
+                    let row_starts_in_code_block = if is_code_fence {
+                        false
+                    } else {
+                        line_starts_in_code_block
+                    };
+                    let row_heading_level = heading_level;
+                    let row_is_blockquote_continuation = is_blockquote && chunk_idx > 0;
 
                     match format {
                         SourceFormat::Json | SourceFormat::Jsonl => {
@@ -270,10 +313,24 @@ impl TextDocument {
                         starts_in_section: row_starts_in_section,
                         is_value_continuation: row_is_value_continuation,
                         partial_delim: row_partial_delim,
+                        starts_in_code_block: row_starts_in_code_block,
+                        heading_level: row_heading_level,
+                        is_blockquote_continuation: row_is_blockquote_continuation,
                     });
                 }
+
+                if is_code_fence {
+                    if is_closing_fence {
+                        code_fence_state = None;
+                    } else if let Some((ch, count, _)) = parse_code_fence(trimmed) {
+                        code_fence_state = Some((ch, count));
+                    }
+                }
             }
-            if format != SourceFormat::Xml && format != SourceFormat::Yaml {
+            if format != SourceFormat::Xml
+                && format != SourceFormat::Yaml
+                && format != SourceFormat::Md
+            {
                 string_quote = None;
                 in_string = false;
                 escaped = false;
@@ -284,6 +341,10 @@ impl TextDocument {
             } else if format == SourceFormat::Yaml {
                 escaped = false;
                 in_comment = false;
+            } else if format == SourceFormat::Md {
+                escaped = false;
+                in_comment = false;
+                string_quote = None;
             }
         }
 
@@ -301,6 +362,9 @@ impl TextDocument {
                 starts_in_section: false,
                 is_value_continuation: false,
                 partial_delim: PartialDelim::None,
+                starts_in_code_block: false,
+                heading_level: None,
+                is_blockquote_continuation: false,
             });
         }
 
@@ -389,6 +453,13 @@ impl TextDocument {
                         row.string_quote,
                         row.starts_in_comment,
                         row.is_value_continuation,
+                    ),
+                    SourceFormat::Md => highlight_md_row(
+                        &row.text,
+                        row.indent_cols,
+                        row.starts_in_code_block,
+                        row.heading_level,
+                        row.is_blockquote_continuation,
                     ),
                     _ => {
                         let mut s = String::with_capacity(row.indent_cols + row.text.len());
@@ -2246,6 +2317,501 @@ fn split_first_word(s: &str) -> (&str, &str) {
     }
 }
 
+fn parse_code_fence(s: &str) -> Option<(char, usize, &str)> {
+    let trimmed = s.trim_start();
+    let fence_char = trimmed.chars().next()?;
+    if fence_char == '`' || fence_char == '~' {
+        let count = trimmed.chars().take_while(|&c| c == fence_char).count();
+        if count >= 3 {
+            return Some((fence_char, count, trimmed[count..].trim()));
+        }
+    }
+    None
+}
+
+fn parse_heading_level(s: &str) -> Option<u8> {
+    let count = s.chars().take_while(|&c| c == '#').count();
+    if count > 0 && count <= 6 {
+        let next = s.chars().nth(count);
+        if next == Some(' ') || next == Some('\t') || next.is_none() {
+            return Some(count as u8);
+        }
+    }
+    None
+}
+
+fn is_horizontal_rule(s: &str) -> bool {
+    let non_ws: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if non_ws.len() < 3 {
+        return false;
+    }
+    let first = non_ws[0];
+    (first == '-' || first == '*' || first == '_') && non_ws.iter().all(|&c| c == first)
+}
+
+fn is_table_separator(s: &str) -> bool {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
+}
+
+fn highlight_md_row(
+    text: &str,
+    indent_cols: usize,
+    starts_in_code_block: bool,
+    heading_level: Option<u8>,
+    is_blockquote_continuation: bool,
+) -> String {
+    let mut out = String::with_capacity(text.len() * 2 + indent_cols * 15);
+
+    let leading_spaces = text.chars().take_while(|&c| c == ' ').count();
+    let total_indent = if indent_cols > 0 {
+        indent_cols
+    } else {
+        leading_spaces
+    };
+    let num_levels = total_indent / 2;
+    let remainder_spaces = total_indent % 2;
+
+    for i in 0..num_levels {
+        let color = RAINBOW_PALETTE[i % RAINBOW_PALETTE.len()];
+        out.push_str(&format!(
+            r##"<tspan fill="{color}" fill-opacity="0.45">│ </tspan>"##
+        ));
+    }
+    for _ in 0..remainder_spaces {
+        out.push(' ');
+    }
+
+    let rest = if indent_cols > 0 {
+        text
+    } else {
+        &text[leading_spaces..]
+    };
+    if rest.is_empty() {
+        return out;
+    }
+
+    // Fenced code block delimiters (opening or closing fence)
+    if !starts_in_code_block {
+        if let Some((ch, len, info)) = parse_code_fence(rest) {
+            let delim: String = std::iter::repeat_n(ch, len).collect();
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(&delim)
+            ));
+            if !info.is_empty() {
+                let ws_len = rest[delim.len()..]
+                    .chars()
+                    .take_while(|&c| c == ' ' || c == '\t')
+                    .count();
+                let ws = &rest[delim.len()..delim.len() + ws_len];
+                out.push_str(ws);
+                out.push_str(&format!(
+                    r##"<tspan fill="#7dd3fc">{}</tspan>"##,
+                    escape_xml(info)
+                ));
+            }
+            return out;
+        }
+    }
+
+    // Content inside a fenced code block
+    if starts_in_code_block {
+        out.push_str(&format!(
+            r##"<tspan fill="#86efac">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    // Blockquote continuation row
+    if is_blockquote_continuation {
+        out.push_str(r##"<tspan fill="#94a3b8" font-style="italic">"##);
+        highlight_md_inline(&mut out, rest);
+        out.push_str("</tspan>");
+        return out;
+    }
+
+    // Heading (chunk 0 or continuation)
+    if let Some(level) = heading_level {
+        let (color, weight) = match level {
+            1 => ("#fbbf24", "bold"), // H1: Amber Gold
+            2 => ("#38bdf8", "bold"), // H2: Sky Blue
+            3 => ("#34d399", "bold"), // H3: Emerald
+            4 => ("#a78bfa", "bold"), // H4: Purple
+            5 => ("#f472b6", "bold"), // H5: Pink
+            _ => ("#94a3b8", "bold"), // H6: Slate
+        };
+        let prefix_len = if rest.starts_with('#') {
+            rest.chars().take_while(|&c| c == '#').count()
+        } else {
+            0
+        };
+        if prefix_len > 0 {
+            let prefix = &rest[..prefix_len];
+            let after_hash = &rest[prefix_len..];
+            let ws_len = after_hash
+                .chars()
+                .take_while(|&c| c == ' ' || c == '\t')
+                .count();
+            let ws = &after_hash[..ws_len];
+            let content = &after_hash[ws_len..];
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a" font-weight="{weight}">{}</tspan>"##,
+                escape_xml(prefix)
+            ));
+            out.push_str(ws);
+            out.push_str(&format!(
+                r##"<tspan fill="{color}" font-weight="{weight}">"##
+            ));
+            highlight_md_inline(&mut out, content);
+            out.push_str("</tspan>");
+        } else {
+            out.push_str(&format!(
+                r##"<tspan fill="{color}" font-weight="{weight}">"##
+            ));
+            highlight_md_inline(&mut out, rest);
+            out.push_str("</tspan>");
+        }
+        return out;
+    }
+
+    // Blockquote start
+    if rest.starts_with('>') {
+        let quote_count = rest.chars().take_while(|&c| c == '>').count();
+        let prefix = &rest[..quote_count];
+        let after_quote = &rest[quote_count..];
+        let ws_len = after_quote
+            .chars()
+            .take_while(|&c| c == ' ' || c == '\t')
+            .count();
+        let ws = &after_quote[..ws_len];
+        let content = &after_quote[ws_len..];
+        out.push_str(&format!(
+            r##"<tspan fill="#38bdf8" font-weight="bold">{}</tspan>"##,
+            escape_xml(prefix)
+        ));
+        out.push_str(ws);
+        out.push_str(r##"<tspan fill="#94a3b8" font-style="italic">"##);
+        highlight_md_inline(&mut out, content);
+        out.push_str("</tspan>");
+        return out;
+    }
+
+    // HTML comment in Markdown
+    if rest.starts_with("<!--") {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    // Horizontal rule
+    if is_horizontal_rule(rest) {
+        out.push_str(&format!(
+            r##"<tspan fill="#71717a">{}</tspan>"##,
+            escape_xml(rest)
+        ));
+        return out;
+    }
+
+    // Unordered bullet list / task list item
+    let bullet_prefix = if rest.starts_with("- ") {
+        Some("- ")
+    } else if rest.starts_with("* ") {
+        Some("* ")
+    } else if rest.starts_with("+ ") {
+        Some("+ ")
+    } else {
+        None
+    };
+
+    if let Some(prefix) = bullet_prefix {
+        out.push_str(&format!(
+            r##"<tspan fill="#fdba74" font-weight="bold">{}</tspan>"##,
+            escape_xml(prefix)
+        ));
+        let after_bullet = &rest[prefix.len()..];
+        if let Some(after_box) = after_bullet.strip_prefix("[ ] ") {
+            out.push_str(r##"<tspan fill="#71717a" font-weight="bold">[ ] </tspan>"##);
+            highlight_md_inline(&mut out, after_box);
+        } else if let Some(after_box) = after_bullet
+            .strip_prefix("[x] ")
+            .or_else(|| after_bullet.strip_prefix("[X] "))
+        {
+            out.push_str(r##"<tspan fill="#34d399" font-weight="bold">[x] </tspan>"##);
+            highlight_md_inline(&mut out, after_box);
+        } else {
+            highlight_md_inline(&mut out, after_bullet);
+        }
+        return out;
+    }
+
+    // Ordered list item (e.g. "1. ")
+    if let Some(dot_idx) = rest.find(". ") {
+        let num_part = &rest[..dot_idx];
+        if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
+            let prefix = &rest[..dot_idx + 2];
+            let after_num = &rest[dot_idx + 2..];
+            out.push_str(&format!(
+                r##"<tspan fill="#93c5fd" font-weight="bold">{}</tspan>"##,
+                escape_xml(prefix)
+            ));
+            highlight_md_inline(&mut out, after_num);
+            return out;
+        }
+    }
+
+    // Table row
+    if rest.starts_with('|') || (rest.ends_with('|') && rest.contains('|')) {
+        if is_table_separator(rest) {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(rest)
+            ));
+            return out;
+        }
+        highlight_md_table_row(&mut out, rest);
+        return out;
+    }
+
+    // Regular paragraph
+    highlight_md_inline(&mut out, rest);
+    out
+}
+
+fn highlight_md_table_row(out: &mut String, text: &str) {
+    let mut i = 0;
+    let chars: Vec<char> = text.chars().collect();
+    while i < chars.len() {
+        if chars[i] == '|' {
+            out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+            i += 1;
+        } else {
+            let mut cell = String::new();
+            while i < chars.len() && chars[i] != '|' {
+                cell.push(chars[i]);
+                i += 1;
+            }
+            highlight_md_inline(out, &cell);
+        }
+    }
+}
+
+fn highlight_md_inline(out: &mut String, text: &str) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut plain_buf = String::new();
+
+    let flush = |out: &mut String, buf: &mut String| {
+        if !buf.is_empty() {
+            out.push_str(&escape_xml(buf));
+            buf.clear();
+        }
+    };
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // 1. Inline code: `code`
+        if c == '`' {
+            if let Some(close_idx) = chars[i + 1..].iter().position(|&ch| ch == '`') {
+                let end = i + 1 + close_idx;
+                flush(out, &mut plain_buf);
+                let code_content: String = chars[i + 1..end].iter().collect();
+                out.push_str(r##"<tspan fill="#71717a">`</tspan>"##);
+                out.push_str(&format!(
+                    r##"<tspan fill="#86efac">{}</tspan>"##,
+                    escape_xml(&code_content)
+                ));
+                out.push_str(r##"<tspan fill="#71717a">`</tspan>"##);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // 2. Images: ![alt](url)
+        if c == '!' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            if let Some(close_bracket) = chars[i + 2..].iter().position(|&ch| ch == ']') {
+                let bracket_end = i + 2 + close_bracket;
+                if bracket_end + 1 < chars.len() && chars[bracket_end + 1] == '(' {
+                    if let Some(close_paren) =
+                        chars[bracket_end + 2..].iter().position(|&ch| ch == ')')
+                    {
+                        let paren_end = bracket_end + 2 + close_paren;
+                        flush(out, &mut plain_buf);
+                        let alt_text: String = chars[i + 2..bracket_end].iter().collect();
+                        let url_text: String = chars[bracket_end + 2..paren_end].iter().collect();
+                        out.push_str(r##"<tspan fill="#c084fc">![</tspan>"##);
+                        out.push_str(&format!(
+                            r##"<tspan fill="#c084fc">{}</tspan>"##,
+                            escape_xml(&alt_text)
+                        ));
+                        out.push_str(&format!(
+                            r##"<tspan fill="#71717a">]({})</tspan>"##,
+                            escape_xml(&url_text)
+                        ));
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 3. Links: [text](url)
+        if c == '[' {
+            if let Some(close_bracket) = chars[i + 1..].iter().position(|&ch| ch == ']') {
+                let bracket_end = i + 1 + close_bracket;
+                if bracket_end + 1 < chars.len() && chars[bracket_end + 1] == '(' {
+                    if let Some(close_paren) =
+                        chars[bracket_end + 2..].iter().position(|&ch| ch == ')')
+                    {
+                        let paren_end = bracket_end + 2 + close_paren;
+                        flush(out, &mut plain_buf);
+                        let link_text: String = chars[i + 1..bracket_end].iter().collect();
+                        let url_text: String = chars[bracket_end + 2..paren_end].iter().collect();
+                        out.push_str(r##"<tspan fill="#71717a">[</tspan>"##);
+                        out.push_str(&format!(
+                            r##"<tspan fill="#38bdf8" text-decoration="underline">{}</tspan>"##,
+                            escape_xml(&link_text)
+                        ));
+                        out.push_str(&format!(
+                            r##"<tspan fill="#71717a">]({})</tspan>"##,
+                            escape_xml(&url_text)
+                        ));
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 4. Bold + Italic: ***text*** or ___text___
+        if (i + 2 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*')
+            || (i + 2 < chars.len()
+                && chars[i] == '_'
+                && chars[i + 1] == '_'
+                && chars[i + 2] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 3)..chars.len().saturating_sub(2) {
+                if chars[j] == delim && chars[j + 1] == delim && chars[j + 2] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                flush(out, &mut plain_buf);
+                let content: String = chars[i + 3..end].iter().collect();
+                out.push_str(&format!(
+                    r##"<tspan fill="#71717a">{0}{0}{0}</tspan><tspan fill="#ffffff" font-weight="bold" font-style="italic">{1}</tspan><tspan fill="#71717a">{0}{0}{0}</tspan>"##,
+                    delim,
+                    escape_xml(&content)
+                ));
+                i = end + 3;
+                continue;
+            }
+        }
+
+        // 5. Bold: **text** or __text__
+        if (i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*')
+            || (i + 1 < chars.len() && chars[i] == '_' && chars[i + 1] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == delim && chars[j + 1] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                flush(out, &mut plain_buf);
+                let content: String = chars[i + 2..end].iter().collect();
+                out.push_str(&format!(
+                    r##"<tspan fill="#71717a">{0}{0}</tspan><tspan fill="#ffffff" font-weight="bold">{1}</tspan><tspan fill="#71717a">{0}{0}</tspan>"##,
+                    delim,
+                    escape_xml(&content)
+                ));
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // 6. Strikethrough: ~~text~~
+        if i + 1 < chars.len() && chars[i] == '~' && chars[i + 1] == '~' {
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == '~' && chars[j + 1] == '~' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                flush(out, &mut plain_buf);
+                let content: String = chars[i + 2..end].iter().collect();
+                out.push_str(&format!(
+                    r##"<tspan fill="#71717a">~~</tspan><tspan fill="#94a3b8" text-decoration="line-through">{}</tspan><tspan fill="#71717a">~~</tspan>"##,
+                    escape_xml(&content)
+                ));
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // 7. Italic: *text* (when not followed by space and closing not preceded by space)
+        if c == '*' && i + 1 < chars.len() && chars[i + 1] != ' ' {
+            let mut close_idx = None;
+            for j in (i + 1)..chars.len() {
+                if chars[j] == '*' && chars[j - 1] != ' ' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                flush(out, &mut plain_buf);
+                let content: String = chars[i + 1..end].iter().collect();
+                out.push_str(&format!(
+                    r##"<tspan fill="#71717a">*</tspan><tspan fill="#e4e4e7" font-style="italic">{}</tspan><tspan fill="#71717a">*</tspan>"##,
+                    escape_xml(&content)
+                ));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // 8. HTML tag: <tag ...>
+        if c == '<'
+            && i + 1 < chars.len()
+            && (chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '/')
+        {
+            if let Some(close_idx) = chars[i + 1..].iter().position(|&ch| ch == '>') {
+                let end = i + 1 + close_idx;
+                flush(out, &mut plain_buf);
+                let tag_str: String = chars[i..=end].iter().collect();
+                out.push_str(&format!(
+                    r##"<tspan fill="#7dd3fc">{}</tspan>"##,
+                    escape_xml(&tag_str)
+                ));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        plain_buf.push(c);
+        i += 1;
+    }
+
+    flush(out, &mut plain_buf);
+}
+
 const MAX_JSON_DEPTH: usize = 64;
 
 fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -3439,5 +4005,163 @@ app:
         assert!(svg_s.contains(
             r##"<tspan fill="#86efac">double-quotes &quot;hello&quot; inside&apos;</tspan>"##
         ));
+    }
+
+    #[test]
+    fn md_highlighting() {
+        let md = r##"# Heading 1
+## Heading 2
+### Heading 3
+#### Heading 4
+##### Heading 5
+###### Heading 6
+
+> This is a quote
+> with multiple lines
+
+- Bullet item
+* Another bullet
++ Plus bullet
+1. Numbered item
+2. Second item
+- [ ] Incomplete task
+- [x] Completed task
+
+---
+
+Inline `code`, **bold**, *italic*, ***bold italic***, ~~strike~~.
+And [Link](https://example.com) or ![Img](photo.jpg).
+
+```rust
+fn main() {
+    println!("Hello, Markdown!");
+}
+```
+
+| Header 1 | Header 2 |
+|----------|----------|
+| Val 1    | Val 2    |
+
+    indented code or list
+"##;
+        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        let svg = doc.page_svg(0).unwrap();
+
+        // Headings H1..H6
+        assert!(svg.contains(r##"fill="#fbbf24" font-weight="bold">Heading 1</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Heading 2</tspan>"##));
+        assert!(svg.contains(r##"fill="#34d399" font-weight="bold">Heading 3</tspan>"##));
+        assert!(svg.contains(r##"fill="#a78bfa" font-weight="bold">Heading 4</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6" font-weight="bold">Heading 5</tspan>"##));
+        assert!(svg.contains(r##"fill="#94a3b8" font-weight="bold">Heading 6</tspan>"##));
+
+        // Blockquotes
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">&gt;</tspan>"##));
+        assert!(svg.contains(r##"fill="#94a3b8" font-style="italic">This is a quote</tspan>"##));
+
+        // Bullets and numbers
+        assert!(svg.contains(r##"fill="#fdba74" font-weight="bold">- </tspan>"##));
+        assert!(svg.contains(r##"fill="#fdba74" font-weight="bold">* </tspan>"##));
+        assert!(svg.contains(r##"fill="#fdba74" font-weight="bold">+ </tspan>"##));
+        assert!(svg.contains(r##"fill="#93c5fd" font-weight="bold">1. </tspan>"##));
+        assert!(svg.contains(r##"fill="#93c5fd" font-weight="bold">2. </tspan>"##));
+
+        // Task checkboxes
+        assert!(svg.contains(r##"fill="#71717a" font-weight="bold">[ ] </tspan>"##));
+        assert!(svg.contains(r##"fill="#34d399" font-weight="bold">[x] </tspan>"##));
+
+        // Horizontal rule
+        assert!(svg.contains(r##"fill="#71717a">---</tspan>"##));
+
+        // Inline formatting
+        assert!(svg.contains(r##"fill="#86efac">code</tspan>"##));
+        assert!(svg.contains(r##"font-weight="bold">bold</tspan>"##));
+        assert!(svg.contains(r##"font-style="italic">italic</tspan>"##));
+        assert!(svg.contains(r##"font-weight="bold" font-style="italic">bold italic</tspan>"##));
+        assert!(svg.contains(r##"text-decoration="line-through">strike</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" text-decoration="underline">Link</tspan>"##));
+        assert!(svg.contains(r##"fill="#c084fc">Img</tspan>"##));
+
+        // Code block
+        assert!(svg.contains(r##"fill="#71717a">```</tspan>"##));
+        assert!(svg.contains(r##"fill="#86efac">fn main() {</tspan>"##));
+        assert!(svg.contains(r##"fill="#86efac">println!(&quot;Hello, Markdown!&quot;);</tspan>"##));
+
+        // Table
+        assert!(svg.contains(r##"fill="#71717a">|</tspan>"##));
+        assert!(svg.contains("Header 1"));
+        assert!(svg.contains(r##"fill="#71717a">|----------|----------|</tspan>"##));
+
+        // Rainbow indent guides
+        assert!(svg.contains(r##"fill-opacity="0.45">│ </tspan>"##));
+    }
+
+    #[test]
+    fn text_document_loads_md_and_bak() {
+        let dir = std::env::temp_dir().join("glanvu-text-md-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // .md file
+        let md_path = dir.join("README.md");
+        let md_content = "# Glanvu\n\nFast image viewer.\n- Feature 1\n- Feature 2";
+        std::fs::write(&md_path, md_content).unwrap();
+        let doc_md = TextDocument::load(&md_path).unwrap();
+        assert_eq!(doc_md.content(), md_content);
+        assert_eq!(doc_md.format, SourceFormat::Md);
+        let img_md = doc_md.render_fit(0).unwrap();
+        assert_eq!(img_md.width, TEXT_PAGE_WIDTH);
+
+        // .markdown file
+        let markdown_path = dir.join("guide.markdown");
+        let markdown_content = "## Guide\nSome text with `code`.";
+        std::fs::write(&markdown_path, markdown_content).unwrap();
+        let doc_markdown = TextDocument::load(&markdown_path).unwrap();
+        assert_eq!(doc_markdown.content(), markdown_content);
+        assert_eq!(doc_markdown.format, SourceFormat::Md);
+        let img_markdown = doc_markdown.render_fit(0).unwrap();
+        assert_eq!(img_markdown.width, TEXT_PAGE_WIDTH);
+
+        // .bak file
+        let bak_path = dir.join("README.md.bak");
+        std::fs::write(&bak_path, md_content).unwrap();
+        let doc_bak = TextDocument::load(&bak_path).unwrap();
+        assert_eq!(doc_bak.content(), md_content);
+        assert_eq!(doc_bak.format, SourceFormat::Md);
+        let img_bak = doc_bak.render_fit(0).unwrap();
+        assert_eq!(img_bak.width, TEXT_PAGE_WIDTH);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn md_code_fence_matching_and_nesting() {
+        let md = r##"```markdown
+In this code block, ~~~ should not close it!
+And # Not A Heading should not be styled as heading.
+```
+
+After code block, this is # Real Heading
+
+~~~~
+Here ``` is not a closing fence
+~~~~
+"##;
+        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        let svg = doc.page_svg(0).unwrap();
+
+        // ~~~ inside ``` block rendered as code green
+        assert!(svg
+            .contains(r##"fill="#86efac">In this code block, ~~~ should not close it!</tspan>"##));
+        // Heading inside ``` block rendered as code green, not heading
+        assert!(svg.contains(
+            r##"fill="#86efac">And # Not A Heading should not be styled as heading.</tspan>"##
+        ));
+
+        // Outside code block
+        assert!(svg.contains(r##"After code block"##));
+
+        // ``` inside ~~~~ block rendered as code green
+        assert!(svg.contains(r##"fill="#86efac">Here ``` is not a closing fence</tspan>"##));
     }
 }

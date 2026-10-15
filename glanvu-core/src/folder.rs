@@ -26,7 +26,7 @@ pub fn is_pdf_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Pdf)
 }
 
-/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .yaml, .yml, .cfg, .conf, .env, .properties) —
+/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .yaml, .yml, .md, .markdown, .cfg, .conf, .env, .properties) —
 /// paginated and rendered with monospace typography and line numbers. Single source of truth for that check.
 pub fn is_text_path(path: &Path) -> bool {
     matches!(
@@ -39,6 +39,7 @@ pub fn is_text_path(path: &Path) -> bool {
                 | SourceFormat::Ini
                 | SourceFormat::Toml
                 | SourceFormat::Yaml
+                | SourceFormat::Md
         )
     )
 }
@@ -66,6 +67,11 @@ pub fn is_toml_path(path: &Path) -> bool {
 /// Whether a path's extension marks it as YAML (.yaml, .yml).
 pub fn is_yaml_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Yaml)
+}
+
+/// Whether a path's extension marks it as Markdown (.md, .markdown).
+pub fn is_md_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Md)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -205,6 +211,16 @@ mod tests {
         assert!(is_yaml_path(Path::new("/x/ci.YML")));
         assert!(!is_yaml_path(Path::new("/x/Cargo.toml")));
         assert!(!is_yaml_path(Path::new("/x/config.ini")));
+    }
+
+    #[test]
+    fn is_md_path_is_case_insensitive() {
+        assert!(is_md_path(Path::new("/x/README.md")));
+        assert!(is_md_path(Path::new("/x/README.MD")));
+        assert!(is_md_path(Path::new("/x/spec.markdown")));
+        assert!(is_md_path(Path::new("/x/spec.MARKDOWN")));
+        assert!(!is_md_path(Path::new("/x/Cargo.toml")));
+        assert!(!is_md_path(Path::new("/x/config.yaml")));
     }
 
     #[test]

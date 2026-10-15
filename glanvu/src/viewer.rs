@@ -5396,6 +5396,8 @@ impl ApplicationHandler for App {
                                         "toml",
                                         "yaml",
                                         "yml",
+                                        "md",
+                                        "markdown",
                                         "cfg",
                                         "conf",
                                         "env",

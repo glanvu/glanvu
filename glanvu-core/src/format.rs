@@ -44,6 +44,8 @@ pub enum SourceFormat {
     Toml,
     /// A YAML document (.yaml, .yml), rendered with monospace typography, syntax highlighting, and rainbow indent guides.
     Yaml,
+    /// A Markdown document (.md, .markdown), rendered with monospace typography, syntax highlighting, and formatting.
+    Md,
 }
 
 impl SourceFormat {
@@ -72,6 +74,7 @@ impl SourceFormat {
             SourceFormat::Ini => "INI",
             SourceFormat::Toml => "TOML",
             SourceFormat::Yaml => "YAML",
+            SourceFormat::Md => "Markdown",
         }
     }
 
@@ -102,6 +105,7 @@ impl SourceFormat {
             }
             "toml" => Some(SourceFormat::Toml),
             "yaml" | "yml" => Some(SourceFormat::Yaml),
+            "md" | "markdown" => Some(SourceFormat::Md),
             _ => None,
         }
     }
@@ -167,6 +171,7 @@ impl SourceFormat {
             SourceFormat::Ini => None,
             SourceFormat::Toml => None,
             SourceFormat::Yaml => None,
+            SourceFormat::Md => None,
         }
     }
 
@@ -490,6 +495,36 @@ mod tests {
         assert_eq!(
             SourceFormat::from_path(std::path::Path::new("config.yaml.bak")),
             Some(SourceFormat::Yaml)
+        );
+    }
+
+    #[test]
+    fn md_extensions_resolve() {
+        assert_eq!(SourceFormat::from_extension("md"), Some(SourceFormat::Md));
+        assert_eq!(SourceFormat::from_extension("MD"), Some(SourceFormat::Md));
+        assert_eq!(
+            SourceFormat::from_extension("markdown"),
+            Some(SourceFormat::Md)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("MARKDOWN"),
+            Some(SourceFormat::Md)
+        );
+        assert_eq!(SourceFormat::Md.name(), "Markdown");
+        assert_eq!(SourceFormat::Md.to_image(), None);
+
+        // Path resolution including .bak
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("README.md")),
+            Some(SourceFormat::Md)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("/docs/spec.markdown")),
+            Some(SourceFormat::Md)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("README.md.bak")),
+            Some(SourceFormat::Md)
         );
     }
 }

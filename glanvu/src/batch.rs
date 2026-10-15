@@ -368,6 +368,16 @@ mod tests {
     }
 
     #[test]
+    fn to_md_target_is_rejected() {
+        let args = [
+            "--to".to_string(),
+            "md".to_string(),
+            "input.png".to_string(),
+        ];
+        assert_eq!(run(&args), ExitCode::from(2));
+    }
+
+    #[test]
     fn parse_crop_valid_and_invalid() {
         assert_eq!(parse_crop("0,0,800x600"), Some((0, 0, 800, 600)));
         assert_eq!(parse_crop("10, 20, 30X40"), Some((10, 20, 30, 40)));
