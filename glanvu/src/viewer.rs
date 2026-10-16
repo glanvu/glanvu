@@ -3612,7 +3612,7 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("drag", "pan"),
     Keys("0  ·  1", "fit  ·  actual size (1:1)"),
     Keys("T", "turn (rotate) 90°"),
-    Keys("R", "render mode (md/docs)"),
+    Keys("M", "render mode (md/csv)"),
     Keys("Space / F11 / dbl-click", "fullscreen"),
     Keys("S", "slideshow"),
 ];
@@ -5677,9 +5677,8 @@ impl ApplicationHandler for App {
                             self.redraw();
                         }
                     }
-                    // R: toggle render mode for formats with multiple modes (e.g. Markdown);
-                    // otherwise begin inline rename. F2 always begins rename.
-                    Key::Character("r") | Key::Character("R") => {
+                    // M: toggle render mode for formats with multiple modes (e.g. Markdown, CSV/TSV).
+                    Key::Character("m") | Key::Character("M") => {
                         if let Some(fmt) = self.current_format() {
                             let count = fmt.render_mode_count();
                             if count > 1 {
@@ -5690,12 +5689,13 @@ impl ApplicationHandler for App {
                                 self.show_status(&format!("Render: {mode_name}"));
                                 self.refresh_text_doc();
                                 self.redraw();
-                                return;
                             }
                         }
+                    }
+                    // R / F2: begin inline rename.
+                    Key::Character("r") | Key::Character("R") | Key::Named(NamedKey::F2) => {
                         self.begin_rename();
                     }
-                    Key::Named(NamedKey::F2) => self.begin_rename(),
                     // F5: force a full refresh (re-scan + drop all caches).
                     Key::Named(NamedKey::F5) => self.force_refresh(),
                     Key::Named(NamedKey::Space) | Key::Named(NamedKey::F11) => {
