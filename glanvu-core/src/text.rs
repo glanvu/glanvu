@@ -115,6 +115,14 @@ struct VisualRow {
     is_table_row: bool,
     /// Whether this row is a Markdown table header row.
     is_table_header: bool,
+    /// Whether this row is a Markdown/CSV table separator line.
+    is_table_separator: bool,
+    /// Preserved cell boundaries for table rows.
+    table_cells: Option<Vec<String>>,
+    /// For wrapped table row chunks, the starting column index (0-based).
+    table_col_start: usize,
+    /// Whether this row is the last chunk of its source line (always true for non-wrapped rows).
+    is_last_chunk: bool,
 }
 
 /// A parsed plain text document, paginated and ready to render.
@@ -269,13 +277,18 @@ impl TextDocument {
         let mut in_frontmatter = false;
         let mut past_frontmatter = false;
 
-        let raw_lines: Vec<&str> = content.lines().collect();
-        for (line_idx, &raw_line) in raw_lines.iter().enumerate() {
-            let cleaned = sanitize_line(raw_line);
+        let cleaned_lines: Vec<String> = content.lines().map(sanitize_line).collect();
+        let is_md_reader = format == SourceFormat::Md && render_mode == 1;
+        let mut aligned_md_tables = if is_md_reader {
+            build_aligned_markdown_tables(&cleaned_lines, layout)
+        } else {
+            std::collections::HashMap::new()
+        };
+        for (line_idx, cleaned) in cleaned_lines.iter().enumerate() {
             let expanded = if format == SourceFormat::Tsv {
-                cleaned
+                cleaned.clone()
             } else {
-                expand_tabs(&cleaned, TAB_SIZE)
+                expand_tabs(cleaned, TAB_SIZE)
             };
             if expanded.is_empty() {
                 visual_rows.push(VisualRow {
@@ -297,6 +310,10 @@ impl TextDocument {
                     is_frontmatter: in_frontmatter,
                     is_table_row: false,
                     is_table_header: false,
+                    is_table_separator: false,
+                    table_cells: None,
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 });
             } else {
                 let is_ini_or_toml = format == SourceFormat::Ini || format == SourceFormat::Toml;
@@ -368,21 +385,36 @@ impl TextDocument {
                     None
                 };
 
+                let row_is_table_separator = is_md
+                    && !is_frontmatter_line
+                    && !line_starts_in_code_block
+                    && is_table_separator(trimmed);
+                let is_list_item = is_markdown_list_item(trimmed);
                 let is_table_row = is_md
                     && !is_frontmatter_line
                     && !line_starts_in_code_block
-                    && (trimmed.starts_with('|')
-                        || (trimmed.ends_with('|') && trimmed.contains('|')));
+                    && heading_level.is_none()
+                    && !is_blockquote
+                    && !is_list_item
+                    && ((trimmed.starts_with('|')
+                        || (trimmed.ends_with('|') && trimmed.contains('|')))
+                        || row_is_table_separator);
                 let is_table_header = is_table_row
-                    && line_idx + 1 < raw_lines.len()
-                    && is_table_separator(raw_lines[line_idx + 1].trim());
+                    && !row_is_table_separator
+                    && line_idx + 1 < cleaned_lines.len()
+                    && is_table_separator(cleaned_lines[line_idx + 1].trim());
 
                 let is_md_reader = is_md && render_mode == 1;
-                let line_to_wrap =
-                    if is_md_reader && !is_frontmatter_line && !line_starts_in_code_block {
-                        strip_markdown_urls_for_reader(&expanded)
+                let (line_to_wrap, row_table_cells) =
+                    if let Some(aligned) = aligned_md_tables.remove(&line_idx) {
+                        match aligned {
+                            AlignedTableEntry::Separator(s) => (s, None),
+                            AlignedTableEntry::Row(text, cells) => (text, Some(cells)),
+                        }
+                    } else if is_md_reader && !is_frontmatter_line && !line_starts_in_code_block {
+                        (strip_markdown_urls_for_reader(&expanded), None)
                     } else {
-                        expanded.clone()
+                        (expanded.clone(), None)
                     };
 
                 let indent_spaces = line_to_wrap.chars().take_while(|&c| c == ' ').count();
@@ -409,7 +441,20 @@ impl TextDocument {
                     };
                     wrap_line(&line_to_wrap, wrap_limit)
                 };
+                let num_chunks = chunks.len();
+                let mut running_table_col = 0usize;
                 for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
+                    let is_chunk_0 = chunk_idx == 0;
+                    let is_last_chunk = chunk_idx + 1 == num_chunks;
+                    let chunk_table_col_start = running_table_col;
+                    if is_table_row && !row_is_table_separator {
+                        running_table_col = table_row_chunk_end_col(
+                            &chunk,
+                            running_table_col,
+                            is_chunk_0,
+                            is_last_chunk,
+                        );
+                    }
                     let row_string_quote = string_quote;
                     let row_starts_in_string = in_string || string_quote.is_some();
                     let row_starts_escaped = escaped;
@@ -500,6 +545,10 @@ impl TextDocument {
                         is_frontmatter: is_frontmatter_line,
                         is_table_row,
                         is_table_header,
+                        is_table_separator: row_is_table_separator,
+                        table_cells: row_table_cells.clone(),
+                        table_col_start: chunk_table_col_start,
+                        is_last_chunk,
                     });
                 }
 
@@ -552,6 +601,10 @@ impl TextDocument {
                 is_frontmatter: false,
                 is_table_row: false,
                 is_table_header: false,
+                is_table_separator: false,
+                table_cells: None,
+                table_col_start: 0,
+                is_last_chunk: true,
             });
         }
 
@@ -576,10 +629,26 @@ impl TextDocument {
         layout: PageLayout,
         delimiter: char,
     ) -> Self {
+        let max_width: usize = match layout {
+            PageLayout::Portrait => 114,
+            PageLayout::Landscape => 154,
+        };
+        let max_cols = (max_width + 3) / 6;
         let records = parse_csv_rows(&content, delimiter);
-        let num_cols = records.iter().map(|r| r.len()).max().unwrap_or(0);
+        let total_cols = records.iter().map(|r| r.len()).max().unwrap_or(0);
+        let (num_cols, has_overflow) = if total_cols > max_cols && max_cols > 1 {
+            (max_cols - 1, true)
+        } else {
+            (total_cols.min(max_cols), false)
+        };
+        let omitted_cols = if has_overflow {
+            total_cols - num_cols
+        } else {
+            0
+        };
+        let total_display_cols = if has_overflow { num_cols + 1 } else { num_cols };
 
-        if records.is_empty() || num_cols == 0 {
+        if records.is_empty() || total_display_cols == 0 {
             return Self {
                 content,
                 pages: vec![vec![VisualRow {
@@ -601,6 +670,10 @@ impl TextDocument {
                     is_frontmatter: false,
                     is_table_row: true,
                     is_table_header: false,
+                    is_table_separator: false,
+                    table_cells: None,
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 }]],
                 format,
                 layout,
@@ -614,8 +687,8 @@ impl TextDocument {
         } else {
             &records[..]
         };
-        let mut align_right = vec![false; num_cols];
-        for (c, align) in align_right.iter_mut().enumerate() {
+        let mut align_right = vec![false; total_display_cols];
+        for (c, align) in align_right.iter_mut().take(num_cols).enumerate() {
             let mut non_empty_count = 0usize;
             let mut numeric_count = 0usize;
             for r in data_rows {
@@ -635,32 +708,51 @@ impl TextDocument {
         }
 
         // Available table character width
-        let max_width: usize = match layout {
-            PageLayout::Portrait => 114,
-            PageLayout::Landscape => 154,
-        };
-        let divider_chars = num_cols.saturating_sub(1) * 3; // " │ " is 3 chars
+        let divider_chars = total_display_cols.saturating_sub(1) * 3; // " | " is 3 chars
         let available_space = max_width.saturating_sub(divider_chars);
 
         // Compute natural width per column
-        let mut col_widths = vec![3usize; num_cols];
+        let mut col_widths = vec![3usize; total_display_cols];
         for r in &records {
-            for (c, cell) in r.iter().enumerate() {
+            for (c, cell) in r.iter().take(num_cols).enumerate() {
                 let cell_len = cell.chars().count();
                 col_widths[c] = col_widths[c].max(cell_len);
             }
         }
+        let min_overflow_w = if has_overflow {
+            let overflow_label = format!("+{omitted_cols} more");
+            let len = overflow_label.chars().count();
+            col_widths[num_cols] = col_widths[num_cols].max(len);
+            len
+        } else {
+            0
+        };
 
         // Proportionally scale / shrink wide columns if total exceeds available space
         let mut total_w: usize = col_widths.iter().sum();
         if total_w > available_space && available_space > 0 {
             while total_w > available_space {
-                let max_w = *col_widths.iter().max().unwrap_or(&0);
-                if max_w <= 6 {
+                let mut max_w = 0;
+                for (c, &w) in col_widths.iter().enumerate() {
+                    let min_w = if has_overflow && c == num_cols {
+                        min_overflow_w
+                    } else {
+                        1
+                    };
+                    if w > min_w && w > max_w {
+                        max_w = w;
+                    }
+                }
+                if max_w == 0 {
                     break;
                 }
-                for w in &mut col_widths {
-                    if *w == max_w && total_w > available_space {
+                for (c, w) in col_widths.iter_mut().enumerate() {
+                    let min_w = if has_overflow && c == num_cols {
+                        min_overflow_w
+                    } else {
+                        1
+                    };
+                    if *w == max_w && *w > min_w && total_w > available_space {
                         *w -= 1;
                         total_w -= 1;
                     }
@@ -669,8 +761,8 @@ impl TextDocument {
         }
 
         // Helper to format a single record
-        let format_row = |row: &[String]| -> String {
-            let mut formatted_cells = Vec::with_capacity(num_cols);
+        let format_row = |row: &[String], is_header: bool| -> (String, Vec<String>) {
+            let mut formatted_cells = Vec::with_capacity(total_display_cols);
             for c in 0..num_cols {
                 let width = col_widths[c];
                 let raw_val = row.get(c).map(|s| s.as_str()).unwrap_or("");
@@ -698,10 +790,33 @@ impl TextDocument {
                 };
                 formatted_cells.push(aligned);
             }
-            formatted_cells.join(" │ ")
+            if has_overflow {
+                let width = col_widths[num_cols];
+                let label = if is_header {
+                    format!("+{omitted_cols} more")
+                } else {
+                    "…".to_string()
+                };
+                let cell_chars: Vec<char> = label.chars().collect();
+                let truncated = if cell_chars.len() > width {
+                    if width > 1 {
+                        let keep = width - 1;
+                        let mut s: String = cell_chars[..keep].iter().collect();
+                        s.push('…');
+                        s
+                    } else {
+                        "…".to_string()
+                    }
+                } else {
+                    label
+                };
+                formatted_cells.push(format!("{truncated:<width$}"));
+            }
+            let joined = formatted_cells.join(" | ");
+            (joined, formatted_cells)
         };
 
-        let header_text = format_row(&records[0]);
+        let (header_text, header_cells) = format_row(&records[0], true);
 
         // Separator row: "──────┼────────────────┼────────"
         let sep_parts: Vec<String> = col_widths.iter().map(|&w| "─".repeat(w)).collect();
@@ -739,6 +854,10 @@ impl TextDocument {
                     is_frontmatter: false,
                     is_table_row: true,
                     is_table_header: true,
+                    is_table_separator: false,
+                    table_cells: Some(header_cells),
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 },
                 VisualRow {
                     line_number: None,
@@ -759,6 +878,10 @@ impl TextDocument {
                     is_frontmatter: false,
                     is_table_row: true,
                     is_table_header: false,
+                    is_table_separator: true,
+                    table_cells: None,
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 },
             ]);
         } else {
@@ -783,6 +906,10 @@ impl TextDocument {
                     is_frontmatter: false,
                     is_table_row: true,
                     is_table_header: true,
+                    is_table_separator: false,
+                    table_cells: Some(header_cells.clone()),
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 });
                 page_rows.push(VisualRow {
                     line_number: None,
@@ -803,11 +930,16 @@ impl TextDocument {
                     is_frontmatter: false,
                     is_table_row: true,
                     is_table_header: false,
+                    is_table_separator: true,
+                    table_cells: None,
+                    table_col_start: 0,
+                    is_last_chunk: true,
                 });
                 for rec in chunk {
+                    let (rec_text, rec_cells) = format_row(rec, false);
                     page_rows.push(VisualRow {
                         line_number: None,
-                        text: format_row(rec),
+                        text: rec_text,
                         indent_cols: 0,
                         string_quote: None,
                         starts_in_string: false,
@@ -824,6 +956,10 @@ impl TextDocument {
                         is_frontmatter: false,
                         is_table_row: true,
                         is_table_header: false,
+                        is_table_separator: false,
+                        table_cells: Some(rec_cells),
+                        table_col_start: 0,
+                        is_last_chunk: true,
                     });
                 }
                 pages.push(page_rows);
@@ -941,6 +1077,11 @@ impl TextDocument {
                         row.is_frontmatter,
                         row.is_table_row,
                         row.is_table_header,
+                        row.is_table_separator,
+                        row.table_cells.as_deref(),
+                        row.table_col_start,
+                        row.line_number.is_some(),
+                        row.is_last_chunk,
                         self.render_mode,
                         self.layout,
                     ),
@@ -951,7 +1092,11 @@ impl TextDocument {
                             detect_csv_delimiter(&self.content)
                         };
                         if self.render_mode == 1 {
-                            highlight_csv_table_row(&row.text, row.is_table_header)
+                            highlight_csv_table_row(
+                                &row.text,
+                                row.is_table_header,
+                                row.table_cells.as_deref(),
+                            )
                         } else {
                             highlight_csv_raw_row(&row.text, delimiter, row.indent_cols)
                         }
@@ -1021,6 +1166,41 @@ fn expand_tabs(s: &str, tab_size: usize) -> String {
     out
 }
 
+fn find_wrap_break_pos(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    search_start: usize,
+) -> Option<usize> {
+    let candidates: Vec<usize> = (search_start..end)
+        .filter(|&i| chars[i].is_whitespace())
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut depth_at = vec![0i32; end - start];
+    let mut d = 0i32;
+    for (offset, &c) in chars[start..end].iter().enumerate() {
+        if c == '[' || c == '(' {
+            d += 1;
+        }
+        depth_at[offset] = d;
+        if c == ']' || c == ')' {
+            d = d.saturating_sub(1);
+        }
+    }
+
+    for &pos in candidates.iter().rev() {
+        let offset = pos - start;
+        if depth_at[offset] == 0 {
+            return Some(pos + 1);
+        }
+    }
+
+    candidates.last().map(|&pos| pos + 1)
+}
+
 fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     if line.chars().count() <= max_cols {
         return vec![line.to_string()];
@@ -1039,11 +1219,8 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
 
     // First chunk uses full max_cols
     let first_end = (start + max_cols).min(chars.len());
-    let search_start = start + max_cols.saturating_sub(max_cols / 5);
-    let break_pos = chars[search_start..first_end]
-        .iter()
-        .rposition(|&c| c.is_whitespace())
-        .map(|pos| search_start + pos + 1);
+    let search_start = start + max_cols.saturating_sub(max_cols / 2);
+    let break_pos = find_wrap_break_pos(&chars, start, first_end, search_start);
     let actual_first_end = break_pos.unwrap_or(first_end);
     result.push(chars[start..actual_first_end].iter().collect());
     start = actual_first_end;
@@ -1056,11 +1233,8 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
             break;
         }
 
-        let search_start = start + cont_max.saturating_sub(cont_max / 5);
-        let break_pos = chars[search_start..end]
-            .iter()
-            .rposition(|&c| c.is_whitespace())
-            .map(|pos| search_start + pos + 1);
+        let search_start = start + cont_max.saturating_sub(cont_max / 2);
+        let break_pos = find_wrap_break_pos(&chars, start, end, search_start);
 
         let actual_end = break_pos.unwrap_or(end);
         result.push(chars[start..actual_end].iter().collect());
@@ -2904,6 +3078,15 @@ fn is_table_separator(s: &str) -> bool {
         .all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
 }
 
+fn is_markdown_list_item(trimmed: &str) -> bool {
+    trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || (trimmed
+            .find(". ")
+            .is_some_and(|pos| pos > 0 && trimmed[..pos].chars().all(|c| c.is_ascii_digit())))
+}
+
 struct MarkdownLinkInfo {
     is_image: bool,
     text_start: usize,
@@ -3011,6 +3194,766 @@ fn strip_markdown_urls_for_reader(text: &str) -> String {
     out
 }
 
+fn find_matching_backtick_run(chars: &[char], start: usize, run_len: usize) -> Option<usize> {
+    let mut k = start;
+    while k < chars.len() {
+        if chars[k] == '`' {
+            let mut close_len = 1;
+            while k + close_len < chars.len() && chars[k + close_len] == '`' {
+                close_len += 1;
+            }
+            if close_len == run_len {
+                return Some(k);
+            }
+            k += close_len;
+        } else {
+            k += 1;
+        }
+    }
+    None
+}
+
+fn split_markdown_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    let s = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let s = if let Some(prefix) = s.strip_suffix('|') {
+        let num_backslashes = prefix.chars().rev().take_while(|&c| c == '\\').count();
+        if num_backslashes % 2 == 0 {
+            prefix
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            let mut run_len = 1;
+            while i + run_len < chars.len() && chars[i + run_len] == '`' {
+                run_len += 1;
+            }
+            if let Some(end) = find_matching_backtick_run(&chars, i + run_len, run_len) {
+                for ch in &chars[i..end + run_len] {
+                    current.push(*ch);
+                }
+                i = end + run_len;
+            } else {
+                for _ in 0..run_len {
+                    current.push('`');
+                }
+                i += run_len;
+            }
+        } else if c == '\\' {
+            let mut bs_len = 1;
+            while i + bs_len < chars.len() && chars[i + bs_len] == '\\' {
+                bs_len += 1;
+            }
+            if bs_len % 2 == 1 && chars.get(i + bs_len) == Some(&'|') {
+                for _ in 0..(bs_len - 1) {
+                    current.push('\\');
+                }
+                current.push('|');
+                i += bs_len + 1;
+            } else {
+                for _ in 0..bs_len {
+                    current.push('\\');
+                }
+                i += bs_len;
+            }
+        } else if c == '|' {
+            cells.push(current.trim().to_string());
+            current = String::new();
+            i += 1;
+        } else {
+            current.push(c);
+            i += 1;
+        }
+    }
+    cells.push(current.trim().to_string());
+    cells
+}
+
+fn markdown_visual_text(cell: &str) -> String {
+    let chars: Vec<char> = cell.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // 1. Inline code: `code`
+        if c == '`' {
+            if let Some(close_idx) = chars[i + 1..].iter().position(|&ch| ch == '`') {
+                let end = i + 1 + close_idx;
+                let code_content: String = chars[i + 1..end].iter().collect();
+                out.push_str(&code_content);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // 2. Images & Links: ![alt](url) or [text](url)
+        if let Some(link) = parse_markdown_link(&chars, i) {
+            let text_content: String = chars[link.text_start..link.text_end].iter().collect();
+            if link.is_image {
+                out.push_str("🖼 ");
+            }
+            out.push_str(&text_content);
+            i = link.next_index;
+            continue;
+        }
+
+        // 3. Bold + Italic: ***text*** or ___text___
+        if (i + 2 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*')
+            || (i + 2 < chars.len()
+                && chars[i] == '_'
+                && chars[i + 1] == '_'
+                && chars[i + 2] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 3)..chars.len().saturating_sub(2) {
+                if chars[j] == delim && chars[j + 1] == delim && chars[j + 2] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 3..end].iter().collect();
+                out.push_str(&content);
+                i = end + 3;
+                continue;
+            }
+        }
+
+        // 4. Bold: **text** or __text__
+        if (i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*')
+            || (i + 1 < chars.len() && chars[i] == '_' && chars[i + 1] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == delim && chars[j + 1] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 2..end].iter().collect();
+                out.push_str(&content);
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // 5. Strikethrough: ~~text~~
+        if i + 1 < chars.len() && chars[i] == '~' && chars[i + 1] == '~' {
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == '~' && chars[j + 1] == '~' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 2..end].iter().collect();
+                out.push_str(&content);
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // 6. Italic: *text* (when not followed by space and closing not preceded by space)
+        if c == '*' && i + 1 < chars.len() && chars[i + 1] != ' ' {
+            let mut close_idx = None;
+            for j in (i + 1)..chars.len() {
+                if chars[j] == '*' && chars[j - 1] != ' ' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 1..end].iter().collect();
+                out.push_str(&content);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // 7. HTML tag: <tag ...>
+        if c == '<'
+            && i + 1 < chars.len()
+            && (chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '/')
+        {
+            if let Some(close_idx) = chars[i + 1..].iter().position(|&ch| ch == '>') {
+                let end = i + 1 + close_idx;
+                let tag_str: String = chars[i..=end].iter().collect();
+                out.push_str(&tag_str);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    out
+}
+
+fn char_display_width(c: char) -> usize {
+    let u = c as u32;
+    if u < 0x20 || (0x7F..=0x9F).contains(&u) {
+        0
+    } else if (0x1100..=0x115F).contains(&u)
+        || (0x2329..=0x232A).contains(&u)
+        || ((0x2E80..=0xA4CF).contains(&u) && u != 0x303F)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE19).contains(&u)
+        || (0xFE30..=0xFE6F).contains(&u)
+        || (0xFF01..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x1F000..=0x1FAFF).contains(&u)
+        || (0x20000..=0x3FFFF).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn str_display_width(s: &str) -> usize {
+    s.chars().map(char_display_width).sum()
+}
+
+fn take_display_width(s: &str, max_width: usize) -> String {
+    let mut current_width = 0;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = char_display_width(c);
+        if current_width + w > max_width {
+            break;
+        }
+        current_width += w;
+        out.push(c);
+    }
+    out
+}
+
+fn truncate_balanced_link_text(text: &str, total_label_budget: usize) -> String {
+    if total_label_budget <= 1 {
+        return "…".to_string();
+    }
+    let content_budget = total_label_budget - 1;
+    let candidate = take_display_width(text, content_budget);
+    let mut unclosed = 0;
+    let mut chars = candidate.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if c == '[' {
+            unclosed += 1;
+        } else if c == ']' && unclosed > 0 {
+            unclosed -= 1;
+        }
+    }
+    let take_budget = content_budget.saturating_sub(unclosed);
+    let mut result = take_display_width(text, take_budget);
+    let mut final_unclosed = 0;
+    let mut res_chars = result.chars().peekable();
+    while let Some(c) = res_chars.next() {
+        if c == '\\' {
+            res_chars.next();
+        } else if c == '[' {
+            final_unclosed += 1;
+        } else if c == ']' && final_unclosed > 0 {
+            final_unclosed -= 1;
+        }
+    }
+    result.push('…');
+    for _ in 0..final_unclosed {
+        result.push(']');
+    }
+    result
+}
+
+fn truncate_markdown_cell(raw: &str, width: usize) -> String {
+    if width <= 1 {
+        return "…".to_string();
+    }
+    let mut budget = width - 1;
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // 1. Inline code: `code`
+        if c == '`' {
+            if let Some(close_idx) = chars[i + 1..].iter().position(|&ch| ch == '`') {
+                let end = i + 1 + close_idx;
+                let code_content: String = chars[i + 1..end].iter().collect();
+                let vlen = str_display_width(&code_content);
+                if vlen <= budget {
+                    out.push('`');
+                    out.push_str(&code_content);
+                    out.push('`');
+                    budget -= vlen;
+                    i = end + 1;
+                    continue;
+                } else {
+                    let trunc = take_display_width(&code_content, budget);
+                    out.push('`');
+                    out.push_str(&trunc);
+                    out.push('…');
+                    out.push('`');
+                    return out;
+                }
+            }
+        }
+
+        // 2. Images & Links: ![alt](url) or [text](url)
+        if let Some(link) = parse_markdown_link(&chars, i) {
+            let text_content: String = chars[link.text_start..link.text_end].iter().collect();
+            let remaining_w = budget + 1;
+            if link.is_image {
+                // "🖼 " prefix has display width 3
+                let vlen = 3 + str_display_width(&text_content);
+                if vlen <= budget {
+                    out.push_str(&chars[i..link.next_index].iter().collect::<String>());
+                    budget -= vlen;
+                    i = link.next_index;
+                    continue;
+                } else if remaining_w <= 3 {
+                    out.push('…');
+                    return out;
+                } else {
+                    let img_label_budget = remaining_w - 3;
+                    let trunc = truncate_balanced_link_text(&text_content, img_label_budget);
+                    out.push_str(&format!("![{trunc}]()"));
+                    return out;
+                }
+            } else {
+                let vlen = str_display_width(&text_content);
+                if vlen <= budget {
+                    out.push_str(&chars[i..link.next_index].iter().collect::<String>());
+                    budget -= vlen;
+                    i = link.next_index;
+                    continue;
+                } else {
+                    let trunc = truncate_balanced_link_text(&text_content, remaining_w);
+                    out.push_str(&format!("[{trunc}]()"));
+                    return out;
+                }
+            }
+        }
+
+        // 3. Bold + Italic: ***text*** or ___text___
+        if (i + 2 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*')
+            || (i + 2 < chars.len()
+                && chars[i] == '_'
+                && chars[i + 1] == '_'
+                && chars[i + 2] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 3)..chars.len().saturating_sub(2) {
+                if chars[j] == delim && chars[j + 1] == delim && chars[j + 2] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 3..end].iter().collect();
+                let vlen = str_display_width(&content);
+                let delim_str: String = std::iter::repeat_n(delim, 3).collect();
+                if vlen <= budget {
+                    out.push_str(&delim_str);
+                    out.push_str(&content);
+                    out.push_str(&delim_str);
+                    budget -= vlen;
+                    i = end + 3;
+                    continue;
+                } else {
+                    let trunc = take_display_width(&content, budget);
+                    out.push_str(&format!("{delim_str}{trunc}…{delim_str}"));
+                    return out;
+                }
+            }
+        }
+
+        // 4. Bold: **text** or __text__
+        if (i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*')
+            || (i + 1 < chars.len() && chars[i] == '_' && chars[i + 1] == '_')
+        {
+            let delim = chars[i];
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == delim && chars[j + 1] == delim {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 2..end].iter().collect();
+                let vlen = str_display_width(&content);
+                let delim_str: String = std::iter::repeat_n(delim, 2).collect();
+                if vlen <= budget {
+                    out.push_str(&delim_str);
+                    out.push_str(&content);
+                    out.push_str(&delim_str);
+                    budget -= vlen;
+                    i = end + 2;
+                    continue;
+                } else {
+                    let trunc = take_display_width(&content, budget);
+                    out.push_str(&format!("{delim_str}{trunc}…{delim_str}"));
+                    return out;
+                }
+            }
+        }
+
+        // 5. Strikethrough: ~~text~~
+        if i + 1 < chars.len() && chars[i] == '~' && chars[i + 1] == '~' {
+            let mut close_idx = None;
+            for j in (i + 2)..chars.len().saturating_sub(1) {
+                if chars[j] == '~' && chars[j + 1] == '~' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 2..end].iter().collect();
+                let vlen = str_display_width(&content);
+                if vlen <= budget {
+                    out.push_str("~~");
+                    out.push_str(&content);
+                    out.push_str("~~");
+                    budget -= vlen;
+                    i = end + 2;
+                    continue;
+                } else {
+                    let trunc = take_display_width(&content, budget);
+                    out.push_str(&format!("~~{trunc}…~~"));
+                    return out;
+                }
+            }
+        }
+
+        // 6. Italic: *text* (when not followed by space and closing not preceded by space)
+        if c == '*' && i + 1 < chars.len() && chars[i + 1] != ' ' {
+            let mut close_idx = None;
+            for j in (i + 1)..chars.len() {
+                if chars[j] == '*' && chars[j - 1] != ' ' {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = close_idx {
+                let content: String = chars[i + 1..end].iter().collect();
+                let vlen = str_display_width(&content);
+                if vlen <= budget {
+                    out.push('*');
+                    out.push_str(&content);
+                    out.push('*');
+                    budget -= vlen;
+                    i = end + 1;
+                    continue;
+                } else {
+                    let trunc = take_display_width(&content, budget);
+                    out.push_str(&format!("*{trunc}…*"));
+                    return out;
+                }
+            }
+        }
+
+        // 7. Plain character
+        let cw = char_display_width(c);
+        if cw <= budget {
+            out.push(c);
+            budget -= cw;
+            i += 1;
+        } else {
+            out.push('…');
+            return out;
+        }
+    }
+
+    out.push('…');
+    out
+}
+
+#[derive(Debug, Clone)]
+enum AlignedTableEntry {
+    Separator(String),
+    Row(String, Vec<String>),
+}
+
+fn build_aligned_markdown_tables<S: AsRef<str>>(
+    raw_lines: &[S],
+    layout: PageLayout,
+) -> std::collections::HashMap<usize, AlignedTableEntry> {
+    let mut aligned_lines = std::collections::HashMap::new();
+    let mut i = 0;
+    let mut in_code_block: Option<(char, usize)> = None;
+    let mut in_frontmatter = false;
+    let mut past_frontmatter = false;
+
+    let max_width: usize = match layout {
+        PageLayout::Portrait => 114,
+        PageLayout::Landscape => 154,
+    };
+    let max_cols = (max_width + 3) / 6;
+
+    while i < raw_lines.len() {
+        let trimmed = raw_lines[i].as_ref().trim();
+
+        if !past_frontmatter {
+            if i == 0 && trimmed == "---" {
+                in_frontmatter = true;
+                i += 1;
+                continue;
+            } else if in_frontmatter {
+                if trimmed == "---" || trimmed == "..." {
+                    in_frontmatter = false;
+                    past_frontmatter = true;
+                }
+                i += 1;
+                continue;
+            }
+        }
+
+        if let Some((fence_char, fence_count)) = in_code_block {
+            if let Some((c, count, info)) = parse_code_fence(trimmed) {
+                if c == fence_char && count >= fence_count && info.is_empty() {
+                    in_code_block = None;
+                }
+            }
+            i += 1;
+            continue;
+        } else if let Some((c, count, _)) = parse_code_fence(trimmed) {
+            in_code_block = Some((c, count));
+            i += 1;
+            continue;
+        }
+
+        let is_row = parse_heading_level(trimmed).is_none()
+            && !trimmed.starts_with('>')
+            && !is_markdown_list_item(trimmed)
+            && (trimmed.starts_with('|') || (trimmed.ends_with('|') && trimmed.contains('|')));
+        if is_row && i + 1 < raw_lines.len() && is_table_separator(raw_lines[i + 1].as_ref().trim())
+        {
+            let table_start = i;
+            let sep_idx = i + 1;
+            let mut table_end = sep_idx;
+            while table_end + 1 < raw_lines.len() {
+                let next_trimmed = raw_lines[table_end + 1].as_ref().trim();
+                let next_is_row = parse_heading_level(next_trimmed).is_none()
+                    && !next_trimmed.starts_with('>')
+                    && !is_markdown_list_item(next_trimmed)
+                    && (next_trimmed.starts_with('|')
+                        || (next_trimmed.ends_with('|') && next_trimmed.contains('|')));
+                if next_is_row && !is_table_separator(next_trimmed) {
+                    table_end += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let header_cells = split_markdown_row(raw_lines[table_start].as_ref());
+            let sep_cells = split_markdown_row(raw_lines[sep_idx].as_ref());
+            let mut data_rows: Vec<Vec<String>> = Vec::new();
+            for line in &raw_lines[sep_idx + 1..=table_end] {
+                data_rows.push(split_markdown_row(line.as_ref()));
+            }
+
+            let total_cols = header_cells
+                .len()
+                .max(sep_cells.len())
+                .max(data_rows.iter().map(|r| r.len()).max().unwrap_or(0));
+
+            let (num_cols, has_overflow) = if total_cols > max_cols && max_cols > 1 {
+                (max_cols - 1, true)
+            } else {
+                (total_cols.min(max_cols), false)
+            };
+            let omitted_cols = if has_overflow {
+                total_cols - num_cols
+            } else {
+                0
+            };
+            let total_display_cols = if has_overflow { num_cols + 1 } else { num_cols };
+
+            if total_display_cols > 0 {
+                let mut align_right = vec![false; total_display_cols];
+                for (c, align) in align_right.iter_mut().take(num_cols).enumerate() {
+                    if let Some(sep_cell) = sep_cells.get(c) {
+                        let t = sep_cell.trim();
+                        if t.ends_with(':') && !t.starts_with(':') {
+                            *align = true;
+                            continue;
+                        }
+                        if t.starts_with(':') {
+                            *align = false;
+                            continue;
+                        }
+                    }
+                    let mut non_empty = 0usize;
+                    let mut numeric = 0usize;
+                    for r in &data_rows {
+                        if let Some(cell) = r.get(c) {
+                            let t = cell.trim();
+                            if !t.is_empty() {
+                                non_empty += 1;
+                                if is_numeric_field(t) {
+                                    numeric += 1;
+                                }
+                            }
+                        }
+                    }
+                    if non_empty > 0 && numeric * 10 >= non_empty * 7 {
+                        *align = true;
+                    }
+                }
+
+                let divider_chars = total_display_cols.saturating_sub(1) * 3;
+                let available_space = max_width.saturating_sub(divider_chars);
+
+                let min_col_w = if available_space >= total_display_cols * 3 {
+                    3
+                } else {
+                    1
+                };
+                let mut col_widths = vec![min_col_w; total_display_cols];
+                for (c, cell) in header_cells.iter().enumerate().take(num_cols) {
+                    let vlen = str_display_width(&markdown_visual_text(cell));
+                    col_widths[c] = col_widths[c].max(vlen);
+                }
+                for r in &data_rows {
+                    for (c, cell) in r.iter().enumerate().take(num_cols) {
+                        let vlen = str_display_width(&markdown_visual_text(cell));
+                        col_widths[c] = col_widths[c].max(vlen);
+                    }
+                }
+                let min_overflow_w = if has_overflow {
+                    let overflow_label = format!("+{omitted_cols} more");
+                    let len = overflow_label.chars().count();
+                    col_widths[num_cols] = col_widths[num_cols].max(len);
+                    len
+                } else {
+                    0
+                };
+
+                let mut total_w: usize = col_widths.iter().sum();
+                if total_w > available_space && available_space > 0 {
+                    while total_w > available_space {
+                        let mut max_w = 0;
+                        for (c, &w) in col_widths.iter().enumerate() {
+                            let min_w = if has_overflow && c == num_cols {
+                                min_overflow_w
+                            } else {
+                                1
+                            };
+                            if w > min_w && w > max_w {
+                                max_w = w;
+                            }
+                        }
+                        if max_w == 0 {
+                            break;
+                        }
+                        for (c, w) in col_widths.iter_mut().enumerate() {
+                            let min_w = if has_overflow && c == num_cols {
+                                min_overflow_w
+                            } else {
+                                1
+                            };
+                            if *w == max_w && *w > min_w && total_w > available_space {
+                                *w -= 1;
+                                total_w -= 1;
+                            }
+                        }
+                    }
+                }
+
+                let format_cells = |cells: &[String], is_header: bool| -> (String, Vec<String>) {
+                    let mut formatted = Vec::with_capacity(total_display_cols);
+                    for c in 0..num_cols {
+                        let width = col_widths[c];
+                        let raw = cells.get(c).map(|s| s.as_str()).unwrap_or("");
+                        let visual = markdown_visual_text(raw);
+                        let vlen = str_display_width(&visual);
+                        let cell_str = if vlen > width {
+                            let truncated = truncate_markdown_cell(raw, width);
+                            let t_vlen = str_display_width(&markdown_visual_text(&truncated));
+                            let pad = width.saturating_sub(t_vlen);
+                            if align_right[c] {
+                                format!("{}{truncated}", " ".repeat(pad))
+                            } else {
+                                format!("{truncated}{}", " ".repeat(pad))
+                            }
+                        } else {
+                            let padding = width.saturating_sub(vlen);
+                            if align_right[c] {
+                                format!("{}{raw}", " ".repeat(padding))
+                            } else {
+                                format!("{raw}{}", " ".repeat(padding))
+                            }
+                        };
+                        formatted.push(cell_str);
+                    }
+                    if has_overflow {
+                        let width = col_widths[num_cols];
+                        let label = if is_header {
+                            format!("+{omitted_cols} more")
+                        } else {
+                            "…".to_string()
+                        };
+                        let cell_chars: Vec<char> = label.chars().collect();
+                        let truncated = if cell_chars.len() > width {
+                            if width > 1 {
+                                let keep = width - 1;
+                                let mut s: String = cell_chars[..keep].iter().collect();
+                                s.push('…');
+                                s
+                            } else {
+                                "…".to_string()
+                            }
+                        } else {
+                            label
+                        };
+                        formatted.push(format!("{truncated:<width$}"));
+                    }
+                    let joined = formatted.join(" | ");
+                    (joined, formatted)
+                };
+
+                let (hdr_text, hdr_cells) = format_cells(&header_cells, true);
+                aligned_lines.insert(table_start, AlignedTableEntry::Row(hdr_text, hdr_cells));
+                let sep_parts: Vec<String> = col_widths.iter().map(|&w| "─".repeat(w)).collect();
+                aligned_lines.insert(sep_idx, AlignedTableEntry::Separator(sep_parts.join("─┼─")));
+                for (row_offset, d_row) in data_rows.iter().enumerate() {
+                    let line_idx = sep_idx + 1 + row_offset;
+                    let (row_text, row_cells) = format_cells(d_row, false);
+                    aligned_lines.insert(line_idx, AlignedTableEntry::Row(row_text, row_cells));
+                }
+            }
+
+            i = table_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    aligned_lines
+}
+
 #[allow(clippy::too_many_arguments)]
 fn highlight_md_row(
     text: &str,
@@ -3021,6 +3964,11 @@ fn highlight_md_row(
     is_frontmatter: bool,
     is_table_row: bool,
     is_table_header: bool,
+    is_table_separator: bool,
+    table_cells: Option<&[String]>,
+    table_col_start: usize,
+    is_chunk_0: bool,
+    is_last_chunk: bool,
     render_mode: u8,
     layout: PageLayout,
 ) -> String {
@@ -3034,6 +3982,8 @@ fn highlight_md_row(
             is_frontmatter,
             is_table_row,
             is_table_header,
+            is_table_separator,
+            table_cells,
             layout,
         )
     } else {
@@ -3044,6 +3994,10 @@ fn highlight_md_row(
             heading_level,
             is_blockquote_continuation,
             is_table_row,
+            is_table_separator,
+            table_col_start,
+            is_chunk_0,
+            is_last_chunk,
         )
     }
 }
@@ -3058,9 +4012,124 @@ fn highlight_md_reader_row(
     is_frontmatter: bool,
     is_table_row: bool,
     is_table_header: bool,
+    is_table_separator: bool,
+    table_cells: Option<&[String]>,
     layout: PageLayout,
 ) -> String {
     let mut out = String::with_capacity(text.len() * 2 + indent_cols * 15);
+
+    // Frontmatter block (YAML metadata header in Markdown)
+    if is_frontmatter {
+        let trimmed = text.trim();
+        if trimmed == "---" || trimmed == "..." {
+            out.push_str(r##"<tspan fill="#52525b">─── metadata ───</tspan>"##);
+        } else {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a" font-style="italic">{}</tspan>"##,
+                escape_xml(text)
+            ));
+        }
+        return out;
+    }
+
+    // Content inside a fenced code block
+    if starts_in_code_block {
+        out.push_str(&format!(
+            r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="16">{}</tspan>"##,
+            escape_xml(text)
+        ));
+        return out;
+    }
+
+    // Table rows (aligned or raw) and separators bypass indentation, headings, and block formatting
+    if is_table_row || is_table_separator {
+        if is_table_separator {
+            if text.contains('┼') || text.trim().starts_with('─') {
+                out.push_str(&format!(
+                    r##"<tspan fill="#3f3f46">{}</tspan>"##,
+                    escape_xml(text)
+                ));
+            } else {
+                let rule_len = if layout == PageLayout::Landscape {
+                    108
+                } else {
+                    76
+                };
+                let rule = "─".repeat(rule_len);
+                out.push_str(&format!(r##"<tspan fill="#3f3f46">{rule}</tspan>"##));
+            }
+            return out;
+        }
+        highlight_md_reader_table_row(&mut out, text, is_table_header, table_cells);
+        return out;
+    }
+
+    // Fenced code block delimiters (opening or closing fence)
+    let trimmed = text.trim();
+    if let Some((_ch, _len, info)) = parse_code_fence(trimmed) {
+        if !info.is_empty() {
+            out.push_str(&format!(
+                r##"<tspan fill="#52525b">╭─ </tspan><tspan fill="#7dd3fc" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="15">{}</tspan>"##,
+                escape_xml(info)
+            ));
+        } else {
+            let rule_len = if layout == PageLayout::Landscape {
+                90
+            } else {
+                65
+            };
+            let rule = "─".repeat(rule_len);
+            out.push_str(&format!(r##"<tspan fill="#52525b">╰{rule}</tspan>"##));
+        }
+        return out;
+    }
+
+    // Heading (chunk 0 or continuation)
+    if let Some(level) = heading_level {
+        let (color, weight, size) = match level {
+            1 => ("#fbbf24", "bold", "24"), // H1: Amber Gold, 24px
+            2 => ("#38bdf8", "bold", "21"), // H2: Sky Blue, 21px
+            3 => ("#34d399", "bold", "19"), // H3: Emerald, 19px
+            4 => ("#a78bfa", "bold", "18"), // H4: Purple, 18px
+            5 => ("#f472b6", "bold", "17"), // H5: Pink, 17px
+            _ => ("#94a3b8", "bold", "16"), // H6: Slate, 16px
+        };
+        let stripped = text.trim_start();
+        let prefix_len = if stripped.starts_with('#') {
+            stripped.chars().take_while(|&c| c == '#').count()
+        } else {
+            0
+        };
+        let content = if prefix_len > 0 {
+            stripped[prefix_len..].trim_start()
+        } else {
+            stripped
+        };
+        out.push_str(&format!(
+            r##"<tspan fill="{color}" font-weight="{weight}" font-size="{size}">"##
+        ));
+        highlight_md_reader_inline(&mut out, content, Some(color));
+        out.push_str("</tspan>");
+        return out;
+    }
+
+    // Blockquote
+    if is_blockquote_continuation || trimmed.starts_with('>') {
+        out.push_str(r##"<tspan fill="#38bdf8" font-weight="bold">▎ </tspan>"##);
+        let content = if !is_blockquote_continuation && trimmed.starts_with('>') {
+            let mut s = trimmed;
+            while let Some(after) = s.strip_prefix('>') {
+                s = after.trim_start();
+            }
+            s
+        } else {
+            trimmed
+        };
+        out.push_str(r##"<tspan fill="#cbd5e1" font-style="italic">"##);
+        highlight_md_reader_inline(&mut out, content, None);
+        out.push_str("</tspan>");
+        return out;
+    }
 
     let leading_spaces = text.chars().take_while(|&c| c == ' ').count();
     let total_indent = if indent_cols > 0 {
@@ -3071,7 +4140,7 @@ fn highlight_md_reader_row(
     let num_levels = total_indent / 2;
     let remainder_spaces = total_indent % 2;
 
-    if total_indent > 0 && !starts_in_code_block {
+    if total_indent > 0 {
         for i in 0..num_levels {
             let color = RAINBOW_PALETTE[i % RAINBOW_PALETTE.len()];
             out.push_str(&format!(
@@ -3089,103 +4158,6 @@ fn highlight_md_reader_row(
         &text[leading_spaces..]
     };
     if rest.is_empty() {
-        return out;
-    }
-
-    // Frontmatter block (YAML metadata header in Markdown)
-    if is_frontmatter {
-        let trimmed = rest.trim();
-        if trimmed == "---" || trimmed == "..." {
-            out.push_str(r##"<tspan fill="#52525b">─── metadata ───</tspan>"##);
-        } else {
-            out.push_str(&format!(
-                r##"<tspan fill="#71717a" font-style="italic">{}</tspan>"##,
-                escape_xml(rest)
-            ));
-        }
-        return out;
-    }
-
-    // Fenced code block delimiters (opening or closing fence)
-    if !starts_in_code_block {
-        if let Some((_ch, _len, info)) = parse_code_fence(rest) {
-            if !info.is_empty() {
-                out.push_str(&format!(
-                    r##"<tspan fill="#52525b">╭─ </tspan><tspan fill="#7dd3fc" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="15">{}</tspan>"##,
-                    escape_xml(info)
-                ));
-            } else {
-                let rule_len = if layout == PageLayout::Landscape {
-                    90
-                } else {
-                    65
-                };
-                let rule = "─".repeat(rule_len);
-                out.push_str(&format!(r##"<tspan fill="#52525b">╰{rule}</tspan>"##));
-            }
-            return out;
-        }
-    }
-
-    // Content inside a fenced code block
-    if starts_in_code_block {
-        out.push_str(&format!(
-            r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="16">{}</tspan>"##,
-            escape_xml(rest)
-        ));
-        return out;
-    }
-
-    // Blockquote continuation row
-    if is_blockquote_continuation {
-        out.push_str(r##"<tspan fill="#38bdf8" font-weight="bold">▎ </tspan>"##);
-        out.push_str(r##"<tspan fill="#cbd5e1" font-style="italic">"##);
-        highlight_md_reader_inline(&mut out, rest);
-        out.push_str("</tspan>");
-        return out;
-    }
-
-    // Heading (chunk 0 or continuation)
-    if let Some(level) = heading_level {
-        let (color, weight, size) = match level {
-            1 => ("#fbbf24", "bold", "24"), // H1: Amber Gold, 24px
-            2 => ("#38bdf8", "bold", "21"), // H2: Sky Blue, 21px
-            3 => ("#34d399", "bold", "19"), // H3: Emerald, 19px
-            4 => ("#a78bfa", "bold", "18"), // H4: Purple, 18px
-            5 => ("#f472b6", "bold", "17"), // H5: Pink, 17px
-            _ => ("#94a3b8", "bold", "16"), // H6: Slate, 16px
-        };
-        let prefix_len = if rest.starts_with('#') {
-            rest.chars().take_while(|&c| c == '#').count()
-        } else {
-            0
-        };
-        let content = if prefix_len > 0 {
-            rest[prefix_len..].trim_start()
-        } else {
-            rest
-        };
-        out.push_str(&format!(
-            r##"<tspan fill="{color}" font-weight="{weight}" font-size="{size}">"##
-        ));
-        highlight_md_reader_inline(&mut out, content);
-        out.push_str("</tspan>");
-        return out;
-    }
-
-    // Blockquote start
-    if rest.starts_with('>') {
-        let quote_count = rest.chars().take_while(|&c| c == '>').count();
-        let after_quote = &rest[quote_count..];
-        let ws_len = after_quote
-            .chars()
-            .take_while(|&c| c == ' ' || c == '\t')
-            .count();
-        let content = &after_quote[ws_len..];
-        out.push_str(r##"<tspan fill="#38bdf8" font-weight="bold">▎ </tspan>"##);
-        out.push_str(r##"<tspan fill="#cbd5e1" font-style="italic">"##);
-        highlight_md_reader_inline(&mut out, content);
-        out.push_str("</tspan>");
         return out;
     }
 
@@ -3225,16 +4197,16 @@ fn highlight_md_reader_row(
         let after_bullet = &rest[prefix.len()..];
         if let Some(after_box) = after_bullet.strip_prefix("[ ] ") {
             out.push_str(r##"<tspan fill="#71717a">☐ </tspan>"##);
-            highlight_md_reader_inline(&mut out, after_box);
+            highlight_md_reader_inline(&mut out, after_box, None);
         } else if let Some(after_box) = after_bullet
             .strip_prefix("[x] ")
             .or_else(|| after_bullet.strip_prefix("[X] "))
         {
             out.push_str(r##"<tspan fill="#34d399" font-weight="bold">☑ </tspan>"##);
-            highlight_md_reader_inline(&mut out, after_box);
+            highlight_md_reader_inline(&mut out, after_box, None);
         } else {
             out.push_str(r##"<tspan fill="#fdba74" font-weight="bold">• </tspan>"##);
-            highlight_md_reader_inline(&mut out, after_bullet);
+            highlight_md_reader_inline(&mut out, after_bullet, None);
         }
         return out;
     }
@@ -3249,36 +4221,68 @@ fn highlight_md_reader_row(
                 r##"<tspan fill="#93c5fd" font-weight="bold">{}</tspan>"##,
                 escape_xml(prefix)
             ));
-            highlight_md_reader_inline(&mut out, after_num);
+            highlight_md_reader_inline(&mut out, after_num, None);
             return out;
         }
-    }
-
-    // Table row
-    if is_table_row || rest.starts_with('|') || (rest.ends_with('|') && rest.contains('|')) {
-        if is_table_separator(rest) {
-            let rule_len = if layout == PageLayout::Landscape {
-                108
-            } else {
-                76
-            };
-            let rule = "─".repeat(rule_len);
-            out.push_str(&format!(r##"<tspan fill="#3f3f46">{rule}</tspan>"##));
-            return out;
-        }
-        highlight_md_reader_table_row(&mut out, rest, is_table_header);
-        return out;
     }
 
     // Regular paragraph
-    highlight_md_reader_inline(&mut out, rest);
+    highlight_md_reader_inline(&mut out, rest, None);
     out
 }
 
-fn highlight_md_reader_table_row(out: &mut String, text: &str, is_header: bool) {
+fn highlight_md_reader_table_row(
+    out: &mut String,
+    text: &str,
+    is_header: bool,
+    table_cells: Option<&[String]>,
+) {
+    if let Some(cells) = table_cells {
+        for (col_idx, part) in cells.iter().enumerate() {
+            if col_idx > 0 {
+                out.push_str(r##"<tspan fill="#3f3f46"> | </tspan>"##);
+            }
+            let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+            if is_header {
+                out.push_str(&format!(r##"<tspan fill="{color}" font-weight="bold">"##));
+            } else {
+                out.push_str(&format!(r##"<tspan fill="{color}">"##));
+            }
+            highlight_md_reader_inline(out, part, Some(color));
+            out.push_str("</tspan>");
+        }
+        return;
+    }
+
+    let delim = if text.contains(" | ") {
+        " | "
+    } else if text.contains(" │ ") {
+        " │ "
+    } else {
+        ""
+    };
+
+    if !delim.is_empty() {
+        let parts: Vec<&str> = text.split(delim).collect();
+        for (col_idx, part) in parts.iter().enumerate() {
+            if col_idx > 0 {
+                out.push_str(r##"<tspan fill="#3f3f46"> | </tspan>"##);
+            }
+            let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+            if is_header {
+                out.push_str(&format!(r##"<tspan fill="{color}" font-weight="bold">"##));
+            } else {
+                out.push_str(&format!(r##"<tspan fill="{color}">"##));
+            }
+            highlight_md_reader_inline(out, part, Some(color));
+            out.push_str("</tspan>");
+        }
+        return;
+    }
+
     let raw_cells: Vec<&str> = text.split('|').collect();
     if raw_cells.len() < 2 {
-        highlight_md_reader_inline(out, text);
+        highlight_md_reader_inline(out, text, None);
         return;
     }
 
@@ -3293,26 +4297,27 @@ fn highlight_md_reader_table_row(out: &mut String, text: &str, is_header: bool) 
     };
 
     if has_leading_pipe {
-        out.push_str(r##"<tspan fill="#52525b">│</tspan>"##);
+        out.push_str(r##"<tspan fill="#3f3f46">|</tspan>"##);
     }
 
     for (idx, cell) in cells_slice.iter().enumerate() {
+        let color = CSV_PALETTE[idx % CSV_PALETTE.len()];
         let trimmed = cell.trim();
         out.push(' ');
         if is_header {
-            out.push_str(r##"<tspan fill="#38bdf8" font-weight="bold">"##);
-            highlight_md_reader_inline(out, trimmed);
-            out.push_str("</tspan>");
+            out.push_str(&format!(r##"<tspan fill="{color}" font-weight="bold">"##));
         } else {
-            highlight_md_reader_inline(out, trimmed);
+            out.push_str(&format!(r##"<tspan fill="{color}">"##));
         }
-        out.push(' ');
+        highlight_md_reader_inline(out, trimmed, Some(color));
+        out.push_str("</tspan> ");
         if idx + 1 < cells_slice.len() || has_trailing_pipe {
-            out.push_str(r##"<tspan fill="#52525b">│</tspan>"##);
+            out.push_str(r##"<tspan fill="#3f3f46">|</tspan>"##);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn highlight_md_source_row(
     text: &str,
     indent_cols: usize,
@@ -3320,6 +4325,10 @@ fn highlight_md_source_row(
     heading_level: Option<u8>,
     is_blockquote_continuation: bool,
     is_table_row: bool,
+    is_table_separator: bool,
+    table_col_start: usize,
+    is_chunk_0: bool,
+    is_last_chunk: bool,
 ) -> String {
     let mut out = String::with_capacity(text.len() + indent_cols + 64);
 
@@ -3373,11 +4382,16 @@ fn highlight_md_source_row(
         return out;
     }
 
-    // Blockquote continuation row
-    if is_blockquote_continuation {
-        out.push_str(r##"<tspan fill="#94a3b8" font-style="italic">"##);
-        highlight_md_source_inline(&mut out, rest);
-        out.push_str("</tspan>");
+    // Table rows and separators
+    if is_table_row || is_table_separator {
+        if is_table_separator {
+            out.push_str(&format!(
+                r##"<tspan fill="#71717a">{}</tspan>"##,
+                escape_xml(rest)
+            ));
+            return out;
+        }
+        highlight_md_source_table_row(&mut out, rest, table_col_start, is_chunk_0, is_last_chunk);
         return out;
     }
 
@@ -3413,15 +4427,23 @@ fn highlight_md_source_row(
             out.push_str(&format!(
                 r##"<tspan fill="{color}" font-weight="{weight}">"##
             ));
-            highlight_md_source_inline(&mut out, content);
+            highlight_md_source_inline(&mut out, content, Some(color));
             out.push_str("</tspan>");
         } else {
             out.push_str(&format!(
                 r##"<tspan fill="{color}" font-weight="{weight}">"##
             ));
-            highlight_md_source_inline(&mut out, rest);
+            highlight_md_source_inline(&mut out, rest, Some(color));
             out.push_str("</tspan>");
         }
+        return out;
+    }
+
+    // Blockquote continuation row
+    if is_blockquote_continuation {
+        out.push_str(r##"<tspan fill="#94a3b8" font-style="italic">"##);
+        highlight_md_source_inline(&mut out, rest, None);
+        out.push_str("</tspan>");
         return out;
     }
 
@@ -3442,7 +4464,7 @@ fn highlight_md_source_row(
         ));
         out.push_str(ws);
         out.push_str(r##"<tspan fill="#94a3b8" font-style="italic">"##);
-        highlight_md_source_inline(&mut out, content);
+        highlight_md_source_inline(&mut out, content, None);
         out.push_str("</tspan>");
         return out;
     }
@@ -3484,15 +4506,15 @@ fn highlight_md_source_row(
         let after_bullet = &rest[prefix.len()..];
         if let Some(after_box) = after_bullet.strip_prefix("[ ] ") {
             out.push_str(r##"<tspan fill="#71717a" font-weight="bold">[ ] </tspan>"##);
-            highlight_md_source_inline(&mut out, after_box);
+            highlight_md_source_inline(&mut out, after_box, None);
         } else if let Some(after_box) = after_bullet
             .strip_prefix("[x] ")
             .or_else(|| after_bullet.strip_prefix("[X] "))
         {
             out.push_str(r##"<tspan fill="#34d399" font-weight="bold">[x] </tspan>"##);
-            highlight_md_source_inline(&mut out, after_box);
+            highlight_md_source_inline(&mut out, after_box, None);
         } else {
-            highlight_md_source_inline(&mut out, after_bullet);
+            highlight_md_source_inline(&mut out, after_bullet, None);
         }
         return out;
     }
@@ -3507,48 +4529,166 @@ fn highlight_md_source_row(
                 r##"<tspan fill="#93c5fd" font-weight="bold">{}</tspan>"##,
                 escape_xml(prefix)
             ));
-            highlight_md_source_inline(&mut out, after_num);
+            highlight_md_source_inline(&mut out, after_num, None);
             return out;
         }
-    }
-
-    // Table row
-    if is_table_row || rest.starts_with('|') || (rest.ends_with('|') && rest.contains('|')) {
-        if is_table_separator(rest) {
-            out.push_str(&format!(
-                r##"<tspan fill="#71717a">{}</tspan>"##,
-                escape_xml(rest)
-            ));
-            return out;
-        }
-        highlight_md_source_table_row(&mut out, rest);
-        return out;
     }
 
     // Regular paragraph
-    highlight_md_source_inline(&mut out, rest);
+    highlight_md_source_inline(&mut out, rest, None);
     out
 }
 
-fn highlight_md_source_table_row(out: &mut String, text: &str) {
+fn find_table_pipe_indices(chars: &[char]) -> Vec<usize> {
+    let mut pipe_indices = Vec::new();
     let mut i = 0;
-    let chars: Vec<char> = text.chars().collect();
     while i < chars.len() {
-        if chars[i] == '|' {
-            out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+        let c = chars[i];
+        if c == '`' {
+            let mut run_len = 1;
+            while i + run_len < chars.len() && chars[i + run_len] == '`' {
+                run_len += 1;
+            }
+            if let Some(end) = find_matching_backtick_run(chars, i + run_len, run_len) {
+                i = end + run_len;
+            } else {
+                i += run_len;
+            }
+        } else if c == '\\' {
+            let mut bs_len = 1;
+            while i + bs_len < chars.len() && chars[i + bs_len] == '\\' {
+                bs_len += 1;
+            }
+            if bs_len % 2 == 1 && chars.get(i + bs_len) == Some(&'|') {
+                i += bs_len + 1;
+            } else {
+                i += bs_len;
+            }
+        } else if c == '|' {
+            pipe_indices.push(i);
             i += 1;
         } else {
-            let mut cell = String::new();
-            while i < chars.len() && chars[i] != '|' {
-                cell.push(chars[i]);
-                i += 1;
-            }
-            highlight_md_source_inline(out, &cell);
+            i += 1;
         }
+    }
+    pipe_indices
+}
+
+fn table_row_chunk_end_col(
+    text: &str,
+    start_col: usize,
+    is_chunk_0: bool,
+    is_last_chunk: bool,
+) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let pipe_indices = find_table_pipe_indices(&chars);
+    if pipe_indices.is_empty() {
+        return start_col;
+    }
+    let has_leading_border =
+        is_chunk_0 && chars[..pipe_indices[0]].iter().all(|c| c.is_whitespace());
+    let has_trailing_border = is_last_chunk
+        && pipe_indices.len() > (if has_leading_border { 1 } else { 0 })
+        && chars[pipe_indices.last().copied().unwrap() + 1..]
+            .iter()
+            .all(|c| c.is_whitespace());
+    let content_len = if has_trailing_border {
+        pipe_indices.len().saturating_sub(1)
+    } else {
+        pipe_indices.len()
+    };
+    if has_leading_border {
+        content_len.saturating_sub(1)
+    } else {
+        start_col + content_len
     }
 }
 
-fn highlight_md_source_inline(out: &mut String, text: &str) {
+fn highlight_md_source_table_row(
+    out: &mut String,
+    text: &str,
+    start_col: usize,
+    is_chunk_0: bool,
+    is_last_chunk: bool,
+) {
+    let chars: Vec<char> = text.chars().collect();
+    let pipe_indices = find_table_pipe_indices(&chars);
+
+    if pipe_indices.is_empty() {
+        let color = CSV_PALETTE[start_col % CSV_PALETTE.len()];
+        out.push_str(&format!(r##"<tspan fill="{color}">"##));
+        highlight_md_source_inline(out, text, Some(color));
+        out.push_str("</tspan>");
+        return;
+    }
+
+    let has_leading_border =
+        is_chunk_0 && chars[..pipe_indices[0]].iter().all(|c| c.is_whitespace());
+    let has_trailing_border = is_last_chunk
+        && pipe_indices.len() > (if has_leading_border { 1 } else { 0 })
+        && chars[pipe_indices.last().copied().unwrap() + 1..]
+            .iter()
+            .all(|c| c.is_whitespace());
+
+    let (content_pipes, trailing_pipe) = if has_trailing_border {
+        let last_idx = pipe_indices.len() - 1;
+        (&pipe_indices[..last_idx], Some(pipe_indices[last_idx]))
+    } else {
+        (&pipe_indices[..], None)
+    };
+
+    let mut col_idx = if has_leading_border { 0 } else { start_col };
+    let mut curr_char_idx = 0usize;
+
+    if has_leading_border {
+        let leading_ws: String = chars[..content_pipes[0]].iter().collect();
+        out.push_str(&leading_ws);
+        out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+        curr_char_idx = content_pipes[0] + 1;
+        for &pipe_idx in &content_pipes[1..] {
+            let cell: String = chars[curr_char_idx..pipe_idx].iter().collect();
+            if !cell.is_empty() {
+                let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+                out.push_str(&format!(r##"<tspan fill="{color}">"##));
+                highlight_md_source_inline(out, &cell, Some(color));
+                out.push_str("</tspan>");
+            }
+            col_idx += 1;
+            out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+            curr_char_idx = pipe_idx + 1;
+        }
+    } else {
+        for &pipe_idx in content_pipes {
+            let cell: String = chars[curr_char_idx..pipe_idx].iter().collect();
+            if !cell.is_empty() {
+                let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+                out.push_str(&format!(r##"<tspan fill="{color}">"##));
+                highlight_md_source_inline(out, &cell, Some(color));
+                out.push_str("</tspan>");
+            }
+            col_idx += 1;
+            out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+            curr_char_idx = pipe_idx + 1;
+        }
+    }
+
+    let end_idx = trailing_pipe.unwrap_or(chars.len());
+    let cell: String = chars[curr_char_idx..end_idx].iter().collect();
+    if !cell.is_empty() {
+        let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+        out.push_str(&format!(r##"<tspan fill="{color}">"##));
+        highlight_md_source_inline(out, &cell, Some(color));
+        out.push_str("</tspan>");
+    }
+
+    if let Some(t_pipe) = trailing_pipe {
+        out.push_str(r##"<tspan fill="#71717a">|</tspan>"##);
+        let trailing_ws: String = chars[t_pipe + 1..].iter().collect();
+        out.push_str(&trailing_ws);
+    }
+}
+
+fn highlight_md_source_inline(out: &mut String, text: &str, base_color: Option<&str>) {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut plain_buf = String::new();
@@ -3599,8 +4739,9 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
                 out.push_str(r##"<tspan fill="#71717a">)</tspan>"##);
             } else {
                 out.push_str(r##"<tspan fill="#71717a">[</tspan>"##);
+                let link_text_color = base_color.unwrap_or("#38bdf8");
                 out.push_str(&format!(
-                    r##"<tspan fill="#38bdf8" text-decoration="underline">{}</tspan>"##,
+                    r##"<tspan fill="{link_text_color}" text-decoration="underline">{}</tspan>"##,
                     escape_xml(&text_content)
                 ));
                 out.push_str(r##"<tspan fill="#71717a">](</tspan>"##);
@@ -3637,8 +4778,9 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
                     r##"<tspan fill="#71717a">{}</tspan>"##,
                     escape_xml(&delim_str)
                 ));
+                let bold_color = base_color.unwrap_or("#ffffff");
                 out.push_str(&format!(
-                    r##"<tspan fill="#ffffff" font-weight="bold" font-style="italic">{}</tspan>"##,
+                    r##"<tspan fill="{bold_color}" font-weight="bold" font-style="italic">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 out.push_str(&format!(
@@ -3670,8 +4812,9 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
                     r##"<tspan fill="#71717a">{}</tspan>"##,
                     escape_xml(&delim_str)
                 ));
+                let bold_color = base_color.unwrap_or("#ffffff");
                 out.push_str(&format!(
-                    r##"<tspan fill="#ffffff" font-weight="bold">{}</tspan>"##,
+                    r##"<tspan fill="{bold_color}" font-weight="bold">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 out.push_str(&format!(
@@ -3696,8 +4839,9 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 2..end].iter().collect();
                 out.push_str(r##"<tspan fill="#71717a">~~</tspan>"##);
+                let strike_color = base_color.unwrap_or("#94a3b8");
                 out.push_str(&format!(
-                    r##"<tspan fill="#94a3b8" text-decoration="line-through">{}</tspan>"##,
+                    r##"<tspan fill="{strike_color}" text-decoration="line-through">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 out.push_str(r##"<tspan fill="#71717a">~~</tspan>"##);
@@ -3719,8 +4863,9 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 1..end].iter().collect();
                 out.push_str(r##"<tspan fill="#71717a">*</tspan>"##);
+                let italic_color = base_color.unwrap_or("#cbd5e1");
                 out.push_str(&format!(
-                    r##"<tspan fill="#cbd5e1" font-style="italic">{}</tspan>"##,
+                    r##"<tspan fill="{italic_color}" font-style="italic">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 out.push_str(r##"<tspan fill="#71717a">*</tspan>"##);
@@ -3754,7 +4899,7 @@ fn highlight_md_source_inline(out: &mut String, text: &str) {
     flush(out, &mut plain_buf);
 }
 
-fn highlight_md_reader_inline(out: &mut String, text: &str) {
+fn highlight_md_reader_inline(out: &mut String, text: &str, base_color: Option<&str>) {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut plain_buf = String::new();
@@ -3794,8 +4939,9 @@ fn highlight_md_reader_inline(out: &mut String, text: &str) {
                     escape_xml(&text_content)
                 ));
             } else {
+                let link_text_color = base_color.unwrap_or("#38bdf8");
                 out.push_str(&format!(
-                    r##"<tspan fill="#38bdf8" text-decoration="underline">{}</tspan>"##,
+                    r##"<tspan fill="{link_text_color}" text-decoration="underline">{}</tspan>"##,
                     escape_xml(&text_content)
                 ));
             }
@@ -3821,8 +4967,9 @@ fn highlight_md_reader_inline(out: &mut String, text: &str) {
             if let Some(end) = close_idx {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 3..end].iter().collect();
+                let bold_color = base_color.unwrap_or("#ffffff");
                 out.push_str(&format!(
-                    r##"<tspan fill="#ffffff" font-weight="bold" font-style="italic">{}</tspan>"##,
+                    r##"<tspan fill="{bold_color}" font-weight="bold" font-style="italic">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 i = end + 3;
@@ -3845,8 +4992,9 @@ fn highlight_md_reader_inline(out: &mut String, text: &str) {
             if let Some(end) = close_idx {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 2..end].iter().collect();
+                let bold_color = base_color.unwrap_or("#ffffff");
                 out.push_str(&format!(
-                    r##"<tspan fill="#ffffff" font-weight="bold">{}</tspan>"##,
+                    r##"<tspan fill="{bold_color}" font-weight="bold">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 i = end + 2;
@@ -3866,8 +5014,9 @@ fn highlight_md_reader_inline(out: &mut String, text: &str) {
             if let Some(end) = close_idx {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 2..end].iter().collect();
+                let strike_color = base_color.unwrap_or("#94a3b8");
                 out.push_str(&format!(
-                    r##"<tspan fill="#94a3b8" text-decoration="line-through">{}</tspan>"##,
+                    r##"<tspan fill="{strike_color}" text-decoration="line-through">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 i = end + 2;
@@ -3887,8 +5036,9 @@ fn highlight_md_reader_inline(out: &mut String, text: &str) {
             if let Some(end) = close_idx {
                 flush(out, &mut plain_buf);
                 let content: String = chars[i + 1..end].iter().collect();
+                let italic_color = base_color.unwrap_or("#e4e4e7");
                 out.push_str(&format!(
-                    r##"<tspan fill="#e4e4e7" font-style="italic">{}</tspan>"##,
+                    r##"<tspan fill="{italic_color}" font-style="italic">{}</tspan>"##,
                     escape_xml(&content)
                 ));
                 i = end + 1;
@@ -4616,28 +5766,57 @@ fn highlight_csv_raw_row(text: &str, delimiter: char, indent_cols: usize) -> Str
     out
 }
 
-fn highlight_csv_table_row(text: &str, is_header: bool) -> String {
+fn highlight_csv_table_row(text: &str, is_header: bool, table_cells: Option<&[String]>) -> String {
     if text.contains('┼') || text.starts_with('─') {
         return format!(r##"<tspan fill="#3f3f46">{}</tspan>"##, escape_xml(text));
     }
 
     let mut out = String::with_capacity(text.len() * 3);
-    let parts: Vec<&str> = text.split(" │ ").collect();
-    for (col_idx, part) in parts.iter().enumerate() {
-        if col_idx > 0 {
-            out.push_str(r##"<tspan fill="#3f3f46"> │ </tspan>"##);
+    if let Some(cells) = table_cells {
+        for (col_idx, part) in cells.iter().enumerate() {
+            if col_idx > 0 {
+                out.push_str(r##"<tspan fill="#3f3f46"> | </tspan>"##);
+            }
+            let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+            let escaped = escape_xml(part);
+            if is_header {
+                out.push_str(&format!(
+                    r##"<tspan fill="{color}" font-weight="bold">{escaped}</tspan>"##
+                ));
+            } else {
+                out.push_str(&format!(r##"<tspan fill="{color}">{escaped}</tspan>"##));
+            }
         }
-        let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
-        let escaped = escape_xml(part);
-        if is_header {
-            out.push_str(&format!(
-                r##"<tspan fill="{color}" font-weight="bold">{escaped}</tspan>"##
-            ));
-        } else {
-            out.push_str(&format!(r##"<tspan fill="{color}">{escaped}</tspan>"##));
-        }
+        return out;
     }
-    out
+
+    let delim = if text.contains(" | ") {
+        " | "
+    } else if text.contains(" │ ") {
+        " │ "
+    } else {
+        ""
+    };
+
+    if !delim.is_empty() {
+        let parts: Vec<&str> = text.split(delim).collect();
+        for (col_idx, part) in parts.iter().enumerate() {
+            if col_idx > 0 {
+                out.push_str(r##"<tspan fill="#3f3f46"> | </tspan>"##);
+            }
+            let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+            let escaped = escape_xml(part);
+            if is_header {
+                out.push_str(&format!(
+                    r##"<tspan fill="{color}" font-weight="bold">{escaped}</tspan>"##
+                ));
+            } else {
+                out.push_str(&format!(r##"<tspan fill="{color}">{escaped}</tspan>"##));
+            }
+        }
+        return out;
+    }
+    escape_xml(text)
 }
 
 #[cfg(test)]
@@ -5419,9 +6598,9 @@ fn main() {
         assert!(svg.contains(r##"println!(&quot;Hello, Markdown!&quot;);</tspan>"##));
 
         // Table
-        assert!(svg.contains(r##"fill="#52525b">│</tspan>"##));
-        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Header 1</tspan>"##));
-        assert!(svg.contains(r##"fill="#3f3f46">────────────────────────────────────────────────────────────────────────────</tspan>"##));
+        assert!(svg.contains(r##"fill="#3f3f46"> | </tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Header 1"##));
+        assert!(svg.contains("─┼─"));
 
         // Rainbow indent guides
         assert!(svg.contains(r##"fill-opacity="0.45">│ </tspan>"##));
@@ -5431,6 +6610,8 @@ fn main() {
         assert_eq!(doc_src.render_mode(), 0);
         let svg_src = doc_src.page_svg(0).unwrap();
         assert!(svg_src.contains(r##"fill="#71717a" font-weight="bold">#</tspan>"##));
+        assert!(svg_src.contains(r##"fill="#71717a">|</tspan>"##));
+        assert!(svg_src.contains(r##"fill="#38bdf8"> Val 1"##));
         assert!(svg_src.contains(r##">1</text>"##));
     }
 
@@ -5542,10 +6723,11 @@ Here ``` is not a closing fence
             1,
         );
         let svg = doc.page_svg(0).unwrap();
-        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Col 1</tspan>"##));
-        assert!(svg.contains(r##"fill="#3f3f46">────────────────────────────────────────────────────────────────────────────</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Col 1"##));
+        assert!(svg.contains(r##"fill="#34d399" font-weight="bold">Col 2"##));
+        assert!(svg.contains("─┼─"));
         assert!(svg.contains("✓ draft with"));
-        assert!(svg.contains(r##"fill="#38bdf8" text-decoration="underline">Link</tspan>"##));
+        assert!(svg.contains(r##"fill="#34d399" text-decoration="underline">Link</tspan>"##));
         assert!(svg.contains('✎'));
     }
 
@@ -5579,7 +6761,7 @@ Here ``` is not a closing fence
         assert!(svg.contains(r##"fill="#71717a" font-weight="bold">[ ] </tspan>"##));
         assert!(svg.contains(r##"fill="#71717a">|</tspan>"##));
         assert!(svg.contains("https://example.com"));
-        assert!(svg.contains(r##">1</text>"##));
+        assert!(svg.contains(r##"fill="#38bdf8"> 1 </tspan>"##));
     }
 
     #[test]
@@ -5623,12 +6805,120 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
         assert_eq!(doc_reader.page_count(), 1);
         let svg = doc_reader.page_svg(0).unwrap();
         assert!(svg.contains("Cell 1"));
-        assert!(svg.contains(&long_cell));
+        assert!(svg.contains('…'));
+        assert!(svg.contains("AAAA"));
 
         // In Source (raw) mode, table rows wrap to avoid extending past the canvas margin
         let doc_source = TextDocument::from_string_with_format(md, SourceFormat::Md);
         let svg_source = doc_source.page_svg(0).unwrap();
         assert!(svg_source.contains("Cell 1"));
+    }
+
+    #[test]
+    fn md_table_column_alignment_and_rainbow() {
+        let md = r#"| Product | Price | Qty | Description |
+|:---|---:|---:|:---|
+| Widget | $19.99 | 100 | Standard `tool` |
+| Gadget | $129.50 | 5 | Deluxe [link](https://example.com) |
+"#;
+        // Mode 1: Reader mode
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_reader = doc_reader.page_svg(0).unwrap();
+
+        // Check header columns rainbow colors: col 0 (#38bdf8), col 1 (#34d399), col 2 (#fbbf24), col 3 (#f472b6)
+        assert!(svg_reader.contains(r##"fill="#38bdf8" font-weight="bold">Product"##));
+        assert!(svg_reader.contains(r##"fill="#34d399" font-weight="bold">"##));
+        assert!(svg_reader.contains(r##"fill="#fbbf24" font-weight="bold">"##));
+        assert!(svg_reader.contains(r##"fill="#f472b6" font-weight="bold">Description"##));
+
+        // Check dividers and separator
+        assert!(svg_reader.contains(r##"fill="#3f3f46"> | </tspan>"##));
+        assert!(svg_reader.contains("─┼─"));
+
+        // Check numeric right alignment (prices and quantities right aligned)
+        assert!(svg_reader.contains("$19.99"));
+        assert!(svg_reader.contains("$129.50"));
+
+        // Inline markdown preserved
+        assert!(svg_reader.contains(r##"fill="#86efac""##));
+        assert!(svg_reader.contains("tool</tspan>"));
+        assert!(svg_reader.contains(r##"fill="#f472b6" text-decoration="underline">link</tspan>"##));
+
+        // Mode 0: Source mode
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+
+        // Raw pipes preserved in #71717a
+        assert!(svg_source.contains(r##"fill="#71717a">|</tspan>"##));
+
+        // Raw cells colored in rainbow order
+        assert!(svg_source.contains(r##"fill="#38bdf8"> Product </tspan>"##));
+        assert!(svg_source.contains(r##"fill="#34d399"> Price </tspan>"##));
+        assert!(svg_source.contains(r##"fill="#fbbf24"> Qty </tspan>"##));
+        assert!(svg_source.contains(r##"fill="#f472b6"> Description </tspan>"##));
+
+        // Test escaped pipe in source mode stays within single cell rainbow span
+        let md_escaped = "| Key \\| Extra | Value |\n|---|---|\n| a\\|b | 42 |\n";
+        let doc_escaped = TextDocument::from_string_with_options(
+            md_escaped.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_escaped = doc_escaped.page_svg(0).unwrap();
+        assert!(svg_escaped.contains(r##"fill="#38bdf8"> a\|b </tspan>"##));
+        assert!(svg_escaped.contains(r##"fill="#34d399"> 42 </tspan>"##));
+
+        // Test wide CJK unicode and truncated styled link
+        let long_link = format!("[{}](https://example.com)", "A".repeat(120));
+        let md_cjk = format!("| 言語 | Description |\n|:---|:---|\n| 日本語 | {long_link} |\n");
+        let doc_cjk = TextDocument::from_string_with_options(
+            md_cjk,
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_cjk = doc_cjk.page_svg(0).unwrap();
+        assert!(svg_cjk.contains("日本語"));
+        // Truncated link retains link markup and column-matching underline styling
+        assert!(svg_cjk.contains(r##"fill="#34d399" text-decoration="underline">"##));
+        assert!(svg_cjk.contains('…'));
+    }
+
+    #[test]
+    fn markdown_source_wrapped_table_row_preserves_column_palette() {
+        let md = r#"| Area | Subarea | Topic | Key Sources | Status | Notes |
+|:---|:---|:---|:---|:---|:---|
+| 08-knowledge | 01-projects | 1.1-glanvu | [Projects](https://example.com/p) [Apple Pay CA](https://example.com/a) [TAA/TANK](https://example.com/t) [Card->COU->CQ](https://example.com/c) | ✓ draft | Long notes that continue across the row |
+"#;
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Col 3 (Key Sources) is pink #f472b6; its link texts must retain #f472b6
+        assert!(svg.contains(r##"fill="#f472b6" text-decoration="underline">Projects</tspan>"##));
+        assert!(
+            svg.contains(r##"fill="#f472b6" text-decoration="underline">Apple Pay CA</tspan>"##)
+        );
+        assert!(svg.contains(r##"fill="#f472b6" text-decoration="underline">TAA/TANK</tspan>"##));
+        assert!(svg.contains(
+            r##"fill="#f472b6" text-decoration="underline">Card-&gt;COU-&gt;CQ</tspan>"##
+        ));
+        // Col 4 (Status) is purple #a78bfa
+        assert!(svg.contains(r##"fill="#a78bfa"> ✓ draft </tspan>"##));
     }
 
     #[test]
@@ -5683,7 +6973,7 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
         assert!(svg.contains("Mechanical Keyboard"));
 
         // Column dividers and separator line
-        assert!(svg.contains(" │ "));
+        assert!(svg.contains(" | "));
         assert!(svg.contains("─┼─"));
 
         // Numeric alignment: price and quantity columns right-aligned with spaces
@@ -5759,7 +7049,7 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
         );
         assert_eq!(doc_table.render_mode(), 1);
         let svg_table = doc_table.page_svg(0).unwrap();
-        assert!(svg_table.contains(" │ "));
+        assert!(svg_table.contains(" | "));
         assert!(svg_table.contains("─┼─"));
         assert!(svg_table.contains("Alpha"));
     }
@@ -5800,5 +7090,544 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
         assert_eq!(img_bak.width, TEXT_PAGE_WIDTH);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wide_csv_table_mode_does_not_panic() {
+        // 50 columns
+        let header = (0..50)
+            .map(|i| format!("Col{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row1 = (0..50)
+            .map(|i| format!("val{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let csv = format!("{header}\n{row1}\n");
+
+        let doc_portrait = TextDocument::from_string_with_options(
+            csv.clone(),
+            SourceFormat::Csv,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_p = doc_portrait.page_svg(0).unwrap();
+        assert!(svg_p.contains(" | "));
+
+        let doc_landscape = TextDocument::from_string_with_options(
+            csv,
+            SourceFormat::Csv,
+            PageLayout::Landscape,
+            1,
+        );
+        let svg_l = doc_landscape.page_svg(0).unwrap();
+        assert!(svg_l.contains(" | "));
+    }
+
+    #[test]
+    fn markdown_table_with_bullet_and_numeric_first_col() {
+        let md = "\
+| Rank | Item | Note |
+|---|---|---|
+| 1 | - bullet-like text | simple |
+| 100 | another | value |
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        assert!(svg.contains(" | "));
+        // Verify it was NOT rendered as an unordered list bullet symbol
+        assert!(!svg.contains("• "));
+        assert!(!svg.contains(r##"fill="#fdba74" font-weight="bold">• </tspan>"##));
+        // Verify rainbow column palette is used
+        assert!(svg.contains(r##"fill="#38bdf8""##));
+        assert!(svg.contains(r##"fill="#34d399""##));
+    }
+
+    #[test]
+    fn markdown_visual_text_preserves_literals() {
+        assert_eq!(markdown_visual_text("file_name_test"), "file_name_test");
+        assert_eq!(markdown_visual_text("`a_b_c`"), "a_b_c");
+        assert_eq!(markdown_visual_text("**bold**"), "bold");
+        assert_eq!(markdown_visual_text("*italic*"), "italic");
+        assert_eq!(markdown_visual_text("[link](url)"), "link");
+        assert_eq!(markdown_visual_text("![img](url)"), "🖼 img");
+    }
+
+    #[test]
+    fn code_fence_closing_requires_empty_info() {
+        let md = "\
+```rust
+| A | B |
+|---|---|
+| 1 | 2 |
+```info
+| X | Y |
+|---|---|
+| 3 | 4 |
+```
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The table inside the code block should not be transformed to aligned " │ " table
+        assert!(!svg.contains("─┼─"));
+    }
+
+    #[test]
+    fn markdown_table_cell_with_backticks_not_code_fence() {
+        let md = "\
+| Code | Description |
+|---|---|
+| ```example``` | Value |
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Should be formatted as a table row, not a code fence
+        assert!(svg.contains(" | "));
+        assert!(!svg.contains("╭─"));
+    }
+
+    #[test]
+    fn markdown_table_cell_and_paragraph_with_cross_character() {
+        let md = "\
+| Symbol | Name |
+|---|---|
+| `┼` | cross |
+
+The symbol ┼ is a box-drawing cross character.
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The table row should render with column rainbow and inline code
+        assert!(svg.contains(" | "));
+        assert!(svg.contains("─┼─"));
+        assert!(svg.contains(r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace">┼</tspan>"##));
+        // The paragraph containing ┼ should NOT be rendered as a separator rule
+        assert!(svg.contains("The symbol ┼ is a box-drawing cross character."));
+    }
+
+    #[test]
+    fn markdown_table_cell_with_literal_divider_string() {
+        let md = "\
+| Pattern | Meaning |
+|---|---|
+| `a │ b` | options |
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The inline code should contain the full unbroken string "a │ b"
+        assert!(svg.contains(r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace">a │ b</tspan>"##));
+        // And the second column should still be formatted with the second color
+        assert!(svg.contains(r##"<tspan fill="#34d399">"##));
+        assert!(svg.contains("options"));
+    }
+
+    #[test]
+    fn truncate_markdown_image_cell_respects_width() {
+        let truncated = truncate_markdown_cell("![abcdef](url)", 5);
+        let visual = markdown_visual_text(&truncated);
+        let vlen = str_display_width(&visual);
+        assert!(vlen <= 5, "visual length {vlen} exceeded width 5");
+        assert_eq!(visual, "🖼 a…");
+
+        let truncated_narrow = truncate_markdown_cell("![abcdef](url)", 3);
+        assert_eq!(truncated_narrow, "…");
+    }
+
+    #[test]
+    fn markdown_table_explicit_left_alignment_numeric_column() {
+        let md = "\
+| ID | Value |
+|:---|:---|
+| 1 | 100 |
+| 20 | 200 |
+";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Column 1 is explicitly left-aligned (:---), so "1" must be left-aligned ("1  │")
+        assert!(svg.contains("1 "));
+        assert!(!svg.contains(" 1 │"));
+    }
+
+    #[test]
+    fn markdown_table_unmatched_backtick_does_not_swallow_pipes() {
+        let row = "| a`b | second |";
+        let cells = split_markdown_row(row);
+        assert_eq!(cells, vec!["a`b", "second"]);
+
+        let md = "\
+| Name | Desc |
+|---|---|
+| a`b | second |
+";
+        // Mode 1: Reader
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_reader = doc_reader.page_svg(0).unwrap();
+        assert!(svg_reader.contains("a`b"));
+        assert!(svg_reader.contains("second"));
+
+        // Mode 0: Source
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+        assert!(svg_source.contains("a`b"));
+        assert!(svg_source.contains("second"));
+    }
+
+    #[test]
+    fn wide_tables_indicate_omitted_columns() {
+        // 50 columns
+        let header = (0..50)
+            .map(|i| format!("Col{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = (0..50)
+            .map(|i| format!("val{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let csv = format!("{header}\n{row}\n");
+
+        let doc_csv =
+            TextDocument::from_string_with_options(csv, SourceFormat::Csv, PageLayout::Portrait, 1);
+        let svg_csv = doc_csv.page_svg(0).unwrap();
+        // In portrait, max_cols is 19, so 18 columns shown + overflow indicator "+32 more"
+        assert!(
+            svg_csv.contains("+32 more"),
+            "CSV overflow header not found in SVG"
+        );
+        assert!(
+            svg_csv.contains("…"),
+            "CSV overflow ellipsis not found in SVG"
+        );
+
+        // Markdown table with 50 columns
+        let md_header = format!(
+            "| {} |",
+            (0..50)
+                .map(|i| format!("Col{i}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let md_sep = format!(
+            "| {} |",
+            (0..50).map(|_| "---").collect::<Vec<_>>().join(" | ")
+        );
+        let md_row = format!(
+            "| {} |",
+            (0..50)
+                .map(|i| format!("val{i}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let md = format!("{md_header}\n{md_sep}\n{md_row}\n");
+
+        let doc_md =
+            TextDocument::from_string_with_options(md, SourceFormat::Md, PageLayout::Portrait, 1);
+        let svg_md = doc_md.page_svg(0).unwrap();
+        assert!(
+            svg_md.contains("+32 more"),
+            "MD overflow header not found in SVG"
+        );
+        assert!(
+            svg_md.contains("…"),
+            "MD overflow ellipsis not found in SVG"
+        );
+    }
+
+    #[test]
+    fn markdown_table_truncation_preserves_inline_code_literals() {
+        let md = format!(
+            "| A | B |\n|---|---|\n| prefix `*literal*` {} | x |\n",
+            "z".repeat(150)
+        );
+        let doc =
+            TextDocument::from_string_with_options(md, SourceFormat::Md, PageLayout::Portrait, 1);
+        let svg = doc.page_svg(0).unwrap();
+        // The inline code must preserve literal asterisks and not convert to italics
+        assert!(svg.contains(r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace">*literal*</tspan>"##));
+        assert!(!svg.contains(r##"font-style="italic">literal"##));
+    }
+
+    #[test]
+    fn markdown_heading_with_pipes_renders_as_heading() {
+        let md = "# Left | Right |\n";
+        // Reader mode: should be H1 (font-size 24, #fbbf24)
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_reader = doc_reader.page_svg(0).unwrap();
+        assert!(svg_reader.contains(r##"font-size="24""##));
+        assert!(svg_reader.contains("Left | Right"));
+
+        // Source mode: should be H1 (#fbbf24)
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+        assert!(svg_source.contains(r##"fill="#fbbf24""##));
+        assert!(svg_source.contains("#"));
+    }
+
+    #[test]
+    fn markdown_table_truncation_nested_brackets_link() {
+        let md = format!(
+            "| A | B |\n|---|---|\n| [A [{}] tail](https://example.com) | y |\n",
+            "x".repeat(150)
+        );
+        let doc =
+            TextDocument::from_string_with_options(md, SourceFormat::Md, PageLayout::Portrait, 1);
+        let svg = doc.page_svg(0).unwrap();
+        // The link must be recognized as a link, underlined in #38bdf8, without stray unstyled "[A "
+        assert!(svg.contains(r##"<tspan fill="#38bdf8" text-decoration="underline">"##));
+        assert!(!svg.contains(r##">[A <"##));
+    }
+
+    #[test]
+    fn markdown_code_block_with_literal_gt_does_not_render_as_blockquote() {
+        let md = "```\n> **literal**\n```\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Should render inside monospace code span, NOT blockquote ▎
+        assert!(svg.contains("&gt; **literal**"));
+        assert!(!svg.contains("▎"));
+    }
+
+    #[test]
+    fn markdown_table_cell_starting_with_gt_renders_as_table_not_blockquote() {
+        let md = "| Col1 | Col2 |\n|---|---|\n| > **literal** | Val2 |\n";
+        // Reader mode:
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_reader = doc_reader.page_svg(0).unwrap();
+        assert!(!svg_reader.contains("▎"));
+        assert!(svg_reader.contains('|'));
+        assert!(svg_reader.contains("&gt;"));
+
+        // Source mode:
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+        assert!(svg_source.contains(r##"fill="#71717a">|"##));
+        assert!(svg_source.contains("&gt;"));
+    }
+
+    #[test]
+    fn truncate_markdown_cell_image_budget_le_3_preserves_prefix() {
+        let truncated = truncate_markdown_cell("Hello ![alt](https://example.com/img.png)", 8);
+        assert_eq!(truncated, "Hello …");
+    }
+
+    #[test]
+    fn markdown_nested_blockquotes_strip_all_markers() {
+        let md = ">> nested quote\n> > spaced nested quote\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // In reader mode, should strip all leading quote markers
+        assert!(svg.contains("nested quote"));
+        assert!(svg.contains("spaced nested quote"));
+        assert!(!svg.contains("&gt;"));
+    }
+
+    #[test]
+    fn markdown_list_item_with_pipes_not_absorbed_into_table() {
+        let md = "| A | B |\n|---|---|\n| x | y |\n- unrelated |\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The list item must be rendered as a bullet item, not aligned table row
+        assert!(svg.contains("• "));
+        assert!(svg.contains("unrelated |"));
+
+        // Header with list syntax should not be treated as table header
+        let md_list_hdr = "- keep | this |\n|---|---|\n| x | y |\n";
+        let doc2 = TextDocument::from_string_with_options(
+            md_list_hdr.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg2 = doc2.page_svg(0).unwrap();
+        assert!(svg2.contains("• "));
+        assert!(svg2.contains("keep | this"));
+    }
+
+    #[test]
+    fn markdown_wrapped_blockquote_preserves_literal_gt_in_continuation() {
+        let md = format!("> {}{}", "a".repeat(116), "> comparison\n");
+        let doc =
+            TextDocument::from_string_with_options(md, SourceFormat::Md, PageLayout::Portrait, 1);
+        let svg = doc.page_svg(0).unwrap();
+        // The literal '>' wrapped into the continuation chunk must be preserved (&gt; in XML)
+        assert!(svg.contains("&gt; comparison"));
+    }
+
+    #[test]
+    fn markdown_table_row_trailing_escaped_pipe_preserved() {
+        let md = "| A | B |\n|---|---|\n| a | b\\|\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The escaped pipe at the end of the line must be preserved in reader mode cell
+        assert!(svg.contains("b|"));
+        assert!(!svg.contains(r"b\"));
+    }
+
+    #[test]
+    fn markdown_source_table_empty_cell_advances_column_palette() {
+        let md = "| A || C |\n|---|---|---|\n| a || c |\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Column 0 is CSV_PALETTE[0], Column 1 is empty, Column 2 is CSV_PALETTE[2]
+        let col0_color = CSV_PALETTE[0];
+        let col2_color = CSV_PALETTE[2];
+        assert!(svg.contains(&format!(r##"<tspan fill="{col0_color}"> A </tspan>"##)));
+        assert!(svg.contains(&format!(r##"<tspan fill="{col2_color}"> C </tspan>"##)));
+        assert!(svg.contains(&format!(r##"<tspan fill="{col0_color}"> a </tspan>"##)));
+        assert!(svg.contains(&format!(r##"<tspan fill="{col2_color}"> c </tspan>"##)));
+    }
+
+    #[test]
+    fn markdown_table_row_escaped_backslashes_before_delimiter() {
+        let md = "| C:\\\\| value |\n|---|---|\n| a | b |\n";
+        // Reader mode: should have 2 columns ("C:\" and "value")
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_reader = doc_reader.page_svg(0).unwrap();
+        assert!(svg_reader.contains("C:\\"));
+        assert!(svg_reader.contains("value"));
+
+        // Source mode: delimiter pipe must be recognized
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+        let col0_color = CSV_PALETTE[0];
+        let col1_color = CSV_PALETTE[1];
+        assert!(svg_source.contains(&format!(r##"<tspan fill="{col0_color}"> C:\\</tspan>"##)));
+        assert!(svg_source.contains(&format!(r##"<tspan fill="{col1_color}"> value </tspan>"##)));
+    }
+
+    #[test]
+    fn markdown_table_with_bold_cell_renders_aligned() {
+        let md = "\
+| # | Página | Verbosidad |
+|---|---|---|
+| raíz | **Onboarding: Card Platform International University** | narrativa |
+| 1 | Conocer Affirm y el equipo CPI | narrativa |
+";
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Landscape,
+            1,
+        );
+        let svg = doc_reader.page_svg(0).unwrap();
+
+        // Bold text in Column 1 (Página) must use the column's palette color (CSV_PALETTE[1] = #34d399 / green)
+        assert!(svg.contains(r##"fill="#34d399" font-weight="bold">Onboarding: Card Platform"##));
+        // Must use ASCII pipe divider to prevent font fallback in bold rows
+        assert!(svg.contains(r##"fill="#3f3f46"> | </tspan>"##));
+        assert!(svg.contains("─┼─"));
+
+        // Render to pixmap must succeed without errors
+        let img = doc_reader
+            .render_fit(0)
+            .expect("Rendering page with bold table cells must succeed");
+        assert!(img.width > 0 && img.height > 0);
+
+        // Source mode must also render bold text in column palette color (CSV_PALETTE[1] = #34d399 / green)
+        let doc_source = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Landscape,
+            0,
+        );
+        let svg_source = doc_source.page_svg(0).unwrap();
+        assert!(
+            svg_source.contains(r##"fill="#34d399" font-weight="bold">Onboarding: Card Platform"##)
+        );
+        assert!(svg_source.contains(r##"fill="#71717a">**</tspan>"##));
     }
 }
