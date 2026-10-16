@@ -3551,6 +3551,8 @@ struct App {
     current_text_page: usize,
     /// When `Some(t)`, the current text page is re-rendered at the new window size at time `t`.
     text_rerender_at: Option<Instant>,
+    /// Active render mode per format (e.g. 0 = Reader, 1 = Source for Markdown).
+    render_modes: std::collections::HashMap<glanvu_core::SourceFormat, u8>,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
@@ -3610,6 +3612,7 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("drag", "pan"),
     Keys("0  ·  1", "fit  ·  actual size (1:1)"),
     Keys("T", "turn (rotate) 90°"),
+    Keys("R", "render mode (md/docs)"),
     Keys("Space / F11 / dbl-click", "fullscreen"),
     Keys("S", "slideshow"),
 ];
@@ -3618,7 +3621,7 @@ const HELP_RIGHT: &[HelpRow] = &[
     Section("Organize"),
     Keys("O", "sort order (name / date)"),
     Keys("I", "image info"),
-    Keys("R", "rename"),
+    Keys("F2 / R", "rename"),
     Keys("C  ·  Shift+C", "copy content · copy path"),
     Keys("F5", "refresh from disk"),
     Keys("Del / Backspace", "move to Trash"),
@@ -3809,16 +3812,44 @@ impl App {
         self.redraw();
     }
 
+    fn current_format(&self) -> Option<glanvu_core::SourceFormat> {
+        self.nav
+            .current_path()
+            .and_then(|p| glanvu_core::SourceFormat::from_path(p))
+    }
+
+    fn get_render_mode(&self, fmt: glanvu_core::SourceFormat) -> u8 {
+        *self.render_modes.get(&fmt).unwrap_or(&0)
+    }
+
+    fn is_advanced_render_mode(&self) -> bool {
+        self.current_format()
+            .is_some_and(|fmt| fmt.render_mode_count() > 1 && self.get_render_mode(fmt) == 0)
+    }
+
     /// (Re)load the parsed text document for the current file and render its first page.
     fn refresh_text_doc(&mut self) {
         self.text_doc = if self.current_is_text {
-            self.nav
-                .current_path()
-                .and_then(|p| glanvu_core::TextDocument::load(p).ok())
+            let render_mode = self
+                .current_format()
+                .map(|fmt| self.get_render_mode(fmt))
+                .unwrap_or(0);
+            let layout = if self.is_advanced_render_mode() {
+                let (win_w, win_h) = self.win_size();
+                glanvu_core::PageLayout::from_window_size(win_w, win_h)
+            } else {
+                glanvu_core::PageLayout::Portrait
+            };
+            self.nav.current_path().and_then(|p| {
+                glanvu_core::TextDocument::load_with_options(p, layout, render_mode).ok()
+            })
         } else {
             None
         };
-        if self.text_doc.is_some() {
+        if let Some(doc) = self.text_doc.as_ref() {
+            self.current_text_page = self
+                .current_text_page
+                .min(doc.page_count().saturating_sub(1));
             self.render_current_text_page();
         }
     }
@@ -5641,10 +5672,25 @@ impl ApplicationHandler for App {
                             self.redraw();
                         }
                     }
-                    // R (or F2): rename the current image (inline editor → confirmation).
-                    Key::Character("r") | Key::Character("R") | Key::Named(NamedKey::F2) => {
-                        self.begin_rename()
+                    // R: toggle render mode for formats with multiple modes (e.g. Markdown);
+                    // otherwise begin inline rename. F2 always begins rename.
+                    Key::Character("r") | Key::Character("R") => {
+                        if let Some(fmt) = self.current_format() {
+                            let count = fmt.render_mode_count();
+                            if count > 1 {
+                                let current = self.get_render_mode(fmt);
+                                let next = (current + 1) % count;
+                                self.render_modes.insert(fmt, next);
+                                let mode_name = fmt.render_mode_name(next);
+                                self.show_status(&format!("Render: {mode_name}"));
+                                self.refresh_text_doc();
+                                self.redraw();
+                                return;
+                            }
+                        }
+                        self.begin_rename();
                     }
+                    Key::Named(NamedKey::F2) => self.begin_rename(),
                     // F5: force a full refresh (re-scan + drop all caches).
                     Key::Named(NamedKey::F5) => self.force_refresh(),
                     Key::Named(NamedKey::Space) | Key::Named(NamedKey::F11) => {
@@ -6199,7 +6245,24 @@ impl ApplicationHandler for App {
             if now >= t {
                 self.text_rerender_at = None;
                 if self.current_is_text {
-                    self.render_current_text_page();
+                    let render_mode = self
+                        .current_format()
+                        .map(|fmt| self.get_render_mode(fmt))
+                        .unwrap_or(0);
+                    let target_layout = if self.is_advanced_render_mode() {
+                        let (win_w, win_h) = self.win_size();
+                        glanvu_core::PageLayout::from_window_size(win_w, win_h)
+                    } else {
+                        glanvu_core::PageLayout::Portrait
+                    };
+                    let needs_reload = self.text_doc.as_ref().is_none_or(|doc| {
+                        doc.layout() != target_layout || doc.render_mode() != render_mode
+                    });
+                    if needs_reload {
+                        self.refresh_text_doc();
+                    } else {
+                        self.render_current_text_page();
+                    }
                 }
             }
         }
@@ -6354,6 +6417,7 @@ pub fn run(path: &str) -> ExitCode {
         text_doc: None,
         current_text_page: 0,
         text_rerender_at: None,
+        render_modes: std::collections::HashMap::new(),
     };
 
     match event_loop.run_app(&mut app) {
@@ -6467,6 +6531,7 @@ pub fn run_empty() -> ExitCode {
         text_doc: None,
         current_text_page: 0,
         text_rerender_at: None,
+        render_modes: std::collections::HashMap::new(),
     };
 
     match event_loop.run_app(&mut app) {

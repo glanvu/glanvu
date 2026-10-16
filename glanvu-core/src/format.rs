@@ -138,6 +138,26 @@ impl SourceFormat {
         None
     }
 
+    /// Number of distinct render modes supported by this format (at least 1: mode 0).
+    pub fn render_mode_count(self) -> u8 {
+        match self {
+            SourceFormat::Md => 2,
+            _ => 1,
+        }
+    }
+
+    /// Descriptive name of the given render mode for this format.
+    pub fn render_mode_name(self, mode: u8) -> &'static str {
+        match self {
+            SourceFormat::Md => match mode {
+                0 => "Reader",
+                1 => "Source",
+                _ => "Reader",
+            },
+            _ => "Default",
+        }
+    }
+
     /// Whether this format can be encoded to by the conversion pipeline.
     pub fn is_encode_target(self) -> bool {
         self.to_image().is_some()

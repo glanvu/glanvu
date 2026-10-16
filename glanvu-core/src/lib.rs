@@ -32,7 +32,8 @@ pub use folder::{
 pub use format::{detect_format, SourceFormat};
 pub use pdf::PdfDocument;
 pub use text::{
-    pretty_format_json, pretty_format_xml, TextDocument, TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH,
+    pretty_format_json, pretty_format_xml, PageLayout, TextDocument, TEXT_PAGE_HEIGHT,
+    TEXT_PAGE_WIDTH,
 };
 
 /// The crate version, taken from `Cargo.toml` at build time.
