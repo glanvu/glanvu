@@ -26,8 +26,9 @@ pub use decode::{
 };
 pub use error::{Error, Result};
 pub use folder::{
-    is_csv_path, is_ini_path, is_json_path, is_md_path, is_pdf_path, is_supported_path,
-    is_svg_path, is_text_path, is_toml_path, is_tsv_path, is_xml_path, is_yaml_path, list_images,
+    is_csv_path, is_diff_path, is_ini_path, is_json_path, is_md_path, is_pdf_path,
+    is_supported_path, is_svg_path, is_text_path, is_toml_path, is_tsv_path, is_xml_path,
+    is_yaml_path, list_images,
 };
 pub use format::{detect_format, SourceFormat};
 pub use pdf::PdfDocument;

@@ -50,6 +50,8 @@ pub enum SourceFormat {
     Csv,
     /// A TSV document (.tsv, .tab), rendered as a formatted table or raw text with rainbow column highlighting.
     Tsv,
+    /// A unified diff or patch document (.diff, .patch), rendered with addition/deletion syntax highlighting.
+    Diff,
 }
 
 impl SourceFormat {
@@ -81,6 +83,7 @@ impl SourceFormat {
             SourceFormat::Md => "Markdown",
             SourceFormat::Csv => "CSV",
             SourceFormat::Tsv => "TSV",
+            SourceFormat::Diff => "Diff",
         }
     }
 
@@ -114,6 +117,7 @@ impl SourceFormat {
             "md" | "markdown" => Some(SourceFormat::Md),
             "csv" => Some(SourceFormat::Csv),
             "tsv" | "tab" => Some(SourceFormat::Tsv),
+            "diff" | "patch" => Some(SourceFormat::Diff),
             _ => None,
         }
     }
@@ -207,6 +211,7 @@ impl SourceFormat {
             SourceFormat::Md => None,
             SourceFormat::Csv => None,
             SourceFormat::Tsv => None,
+            SourceFormat::Diff => None,
         }
     }
 
@@ -593,6 +598,43 @@ mod tests {
         assert_eq!(
             SourceFormat::from_path(std::path::Path::new("data.csv.bak")),
             Some(SourceFormat::Csv)
+        );
+    }
+
+    #[test]
+    fn diff_and_patch_extensions_resolve() {
+        assert_eq!(
+            SourceFormat::from_extension("diff"),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("DIFF"),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("patch"),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("PATCH"),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(SourceFormat::Diff.name(), "Diff");
+        assert_eq!(SourceFormat::Diff.to_image(), None);
+        assert_eq!(SourceFormat::Diff.render_mode_count(), 1);
+        assert_eq!(SourceFormat::Diff.render_mode_name(0), "Default");
+
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("changes.diff")),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("0001-fix.patch")),
+            Some(SourceFormat::Diff)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("changes.diff.bak")),
+            Some(SourceFormat::Diff)
         );
     }
 }

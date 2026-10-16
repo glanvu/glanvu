@@ -171,8 +171,12 @@ cargo fmt --all --check
   | Copy to clipboard (`C` image, `Shift+C` path) | done |
   | viewer-core extraction | done |
   | Batch enhancements (crop, rotate, quality, rename) | done |
-  | Brew cask + Linux/Windows installers | planned |
   | Auto-update | done |
+  | Plain text & structured docs (.txt, .json, .xml, .yaml, .toml, .ini, .md, .csv) | done |
+  | Diff & patch viewing (.diff, .patch) | done |
+  | Scripts & lightweight code viewing (.sh, .sql, etc.) | planned |
+  | In-document text search (`F` / `/`) | planned |
+  | Brew cask + Linux/Windows installers | planned |
   | Web app (glanvu.com) | planned (Phase 3) |
 
 ## Writing conventions

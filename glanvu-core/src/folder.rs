@@ -42,6 +42,7 @@ pub fn is_text_path(path: &Path) -> bool {
                 | SourceFormat::Md
                 | SourceFormat::Csv
                 | SourceFormat::Tsv
+                | SourceFormat::Diff
         )
     )
 }
@@ -84,6 +85,11 @@ pub fn is_csv_path(path: &Path) -> bool {
 /// Whether a path's extension marks it as TSV (.tsv, .tab).
 pub fn is_tsv_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Tsv)
+}
+
+/// Whether a path's extension marks it as a Diff or Patch (.diff, .patch).
+pub fn is_diff_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Diff)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -277,8 +283,22 @@ mod tests {
         assert!(is_supported_path(Path::new("/x/vector.svg.bak")));
         assert!(is_svg_path(Path::new("/x/vector.svg.bak")));
 
+        assert!(is_supported_path(Path::new("/x/changes.diff.bak")));
+        assert!(is_diff_path(Path::new("/x/changes.diff.bak")));
+        assert!(is_text_path(Path::new("/x/changes.diff.bak")));
+
         // Unsupported underlying format with .bak remains unsupported
         assert!(!is_supported_path(Path::new("/x/binary.bin.bak")));
         assert!(!is_supported_path(Path::new("/x/unknown.bak")));
+    }
+
+    #[test]
+    fn is_diff_path_is_case_insensitive() {
+        assert!(is_diff_path(Path::new("/x/changes.diff")));
+        assert!(is_diff_path(Path::new("/x/changes.DIFF")));
+        assert!(is_diff_path(Path::new("/x/fix.patch")));
+        assert!(is_diff_path(Path::new("/x/fix.PATCH")));
+        assert!(!is_diff_path(Path::new("/x/data.csv")));
+        assert!(!is_diff_path(Path::new("/x/README.md")));
     }
 }

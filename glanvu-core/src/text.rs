@@ -76,6 +76,23 @@ enum PartialDelim {
     CdataCloseDoubleBracket,
 }
 
+/// Semantic classification of a line in a unified diff or patch document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineKind {
+    /// Git or diff metadata (e.g. `diff --git`, `index`, `commit`, `Author:`, `Date:`, `\ No newline`).
+    Meta,
+    /// File header marker (`--- a/...`, `+++ b/...`).
+    HeaderFile,
+    /// Hunk boundary header (`@@ -1,4 +1,5 @@ ...`).
+    HunkHeader,
+    /// Added line (`+...`).
+    Addition,
+    /// Deleted line (`-...`).
+    Deletion,
+    /// Unchanged context line or non-prefixed text.
+    Context,
+}
+
 /// A visual row on a rendered page.
 #[derive(Debug, Clone)]
 struct VisualRow {
@@ -123,6 +140,8 @@ struct VisualRow {
     table_col_start: usize,
     /// Whether this row is the last chunk of its source line (always true for non-wrapped rows).
     is_last_chunk: bool,
+    /// Semantic classification if this document is a unified diff or patch.
+    diff_kind: Option<DiffLineKind>,
 }
 
 /// A parsed plain text document, paginated and ready to render.
@@ -276,6 +295,9 @@ impl TextDocument {
         let mut code_fence_state: Option<(char, usize)> = None;
         let mut in_frontmatter = false;
         let mut past_frontmatter = false;
+        let mut diff_in_hunk = false;
+        let mut diff_old_remaining = 0usize;
+        let mut diff_new_remaining = 0usize;
 
         let cleaned_lines: Vec<String> = content.lines().map(sanitize_line).collect();
         let is_md_reader = format == SourceFormat::Md && render_mode == 1;
@@ -291,6 +313,13 @@ impl TextDocument {
                 expand_tabs(cleaned, TAB_SIZE)
             };
             if expanded.is_empty() {
+                if format == SourceFormat::Diff && diff_in_hunk {
+                    diff_old_remaining = diff_old_remaining.saturating_sub(1);
+                    diff_new_remaining = diff_new_remaining.saturating_sub(1);
+                    if diff_old_remaining == 0 && diff_new_remaining == 0 {
+                        diff_in_hunk = false;
+                    }
+                }
                 visual_rows.push(VisualRow {
                     line_number: Some(line_idx + 1),
                     text: String::new(),
@@ -314,8 +343,20 @@ impl TextDocument {
                     table_cells: None,
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 });
             } else {
+                let is_diff = format == SourceFormat::Diff;
+                let line_diff_kind = if is_diff {
+                    Some(classify_diff_line(
+                        &expanded,
+                        &mut diff_in_hunk,
+                        &mut diff_old_remaining,
+                        &mut diff_new_remaining,
+                    ))
+                } else {
+                    None
+                };
                 let is_ini_or_toml = format == SourceFormat::Ini || format == SourceFormat::Toml;
                 let is_yaml = format == SourceFormat::Yaml;
                 let is_md = format == SourceFormat::Md;
@@ -549,6 +590,7 @@ impl TextDocument {
                         table_cells: row_table_cells.clone(),
                         table_col_start: chunk_table_col_start,
                         is_last_chunk,
+                        diff_kind: line_diff_kind,
                     });
                 }
 
@@ -605,6 +647,7 @@ impl TextDocument {
                 table_cells: None,
                 table_col_start: 0,
                 is_last_chunk: true,
+                diff_kind: None,
             });
         }
 
@@ -674,6 +717,7 @@ impl TextDocument {
                     table_cells: None,
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 }]],
                 format,
                 layout,
@@ -858,6 +902,7 @@ impl TextDocument {
                     table_cells: Some(header_cells),
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 },
                 VisualRow {
                     line_number: None,
@@ -882,6 +927,7 @@ impl TextDocument {
                     table_cells: None,
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 },
             ]);
         } else {
@@ -910,6 +956,7 @@ impl TextDocument {
                     table_cells: Some(header_cells.clone()),
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 });
                 page_rows.push(VisualRow {
                     line_number: None,
@@ -934,6 +981,7 @@ impl TextDocument {
                     table_cells: None,
                     table_col_start: 0,
                     is_last_chunk: true,
+                    diff_kind: None,
                 });
                 for rec in chunk {
                     let (rec_text, rec_cells) = format_row(rec, false);
@@ -960,6 +1008,7 @@ impl TextDocument {
                         table_cells: Some(rec_cells),
                         table_col_start: 0,
                         is_last_chunk: true,
+                        diff_kind: None,
                     });
                 }
                 pages.push(page_rows);
@@ -1101,6 +1150,11 @@ impl TextDocument {
                             highlight_csv_raw_row(&row.text, delimiter, row.indent_cols)
                         }
                     }
+                    SourceFormat::Diff => highlight_diff_row(
+                        &row.text,
+                        row.indent_cols,
+                        row.diff_kind.unwrap_or(DiffLineKind::Context),
+                    ),
                     _ => {
                         let mut s = String::with_capacity(row.indent_cols + row.text.len());
                         for _ in 0..row.indent_cols {
@@ -5819,6 +5873,141 @@ fn highlight_csv_table_row(text: &str, is_header: bool, table_cells: Option<&[St
     escape_xml(text)
 }
 
+fn parse_hunk_header_counts(line: &str) -> Option<(usize, usize)> {
+    if !line.starts_with("@@") {
+        return None;
+    }
+    let rest = &line[2..];
+    let end_at = rest.find("@@")?;
+    let spec = rest[..end_at].trim();
+    let mut parts = spec.split_whitespace();
+    let old_part = parts.next()?.strip_prefix('-')?;
+    let new_part = parts.next()?.strip_prefix('+')?;
+
+    let old_count = if let Some((_, count_str)) = old_part.split_once(',') {
+        count_str.parse::<usize>().ok()?
+    } else {
+        1
+    };
+    let new_count = if let Some((_, count_str)) = new_part.split_once(',') {
+        count_str.parse::<usize>().ok()?
+    } else {
+        1
+    };
+    Some((old_count, new_count))
+}
+
+fn is_diff_meta(line: &str) -> bool {
+    line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("commit ")
+        || line.starts_with("Author: ")
+        || line.starts_with("Date: ")
+        || line.starts_with("From ")
+        || line.starts_with("Subject: ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("dissimilarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("Binary files ")
+        || line.starts_with("Index: ")
+        || line.starts_with("===")
+}
+
+fn classify_diff_line(
+    line: &str,
+    in_hunk: &mut bool,
+    old_remaining: &mut usize,
+    new_remaining: &mut usize,
+) -> DiffLineKind {
+    if line.starts_with('\\') {
+        DiffLineKind::Meta
+    } else if is_diff_meta(line) {
+        *in_hunk = false;
+        *old_remaining = 0;
+        *new_remaining = 0;
+        DiffLineKind::Meta
+    } else if let Some((old_c, new_c)) = parse_hunk_header_counts(line) {
+        *old_remaining = old_c;
+        *new_remaining = new_c;
+        *in_hunk = old_c > 0 || new_c > 0;
+        DiffLineKind::HunkHeader
+    } else if line.starts_with("@@ ") || (line.starts_with("@@") && line.contains(" @@")) {
+        *in_hunk = true;
+        *old_remaining = usize::MAX;
+        *new_remaining = usize::MAX;
+        DiffLineKind::HunkHeader
+    } else if *in_hunk {
+        if line.starts_with('-') {
+            *old_remaining = old_remaining.saturating_sub(1);
+            if *old_remaining == 0 && *new_remaining == 0 {
+                *in_hunk = false;
+            }
+            DiffLineKind::Deletion
+        } else if line.starts_with('+') {
+            *new_remaining = new_remaining.saturating_sub(1);
+            if *old_remaining == 0 && *new_remaining == 0 {
+                *in_hunk = false;
+            }
+            DiffLineKind::Addition
+        } else {
+            *old_remaining = old_remaining.saturating_sub(1);
+            *new_remaining = new_remaining.saturating_sub(1);
+            if *old_remaining == 0 && *new_remaining == 0 {
+                *in_hunk = false;
+            }
+            DiffLineKind::Context
+        }
+    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+        DiffLineKind::HeaderFile
+    } else if line.starts_with('+') {
+        DiffLineKind::Addition
+    } else if line.starts_with('-') {
+        DiffLineKind::Deletion
+    } else {
+        DiffLineKind::Context
+    }
+}
+
+fn highlight_diff_row(text: &str, indent_cols: usize, kind: DiffLineKind) -> String {
+    let mut out = String::with_capacity(text.len() * 2 + indent_cols + 32);
+    for _ in 0..indent_cols {
+        out.push(' ');
+    }
+    let escaped = escape_xml(text);
+    match kind {
+        DiffLineKind::Addition => {
+            out.push_str(&format!(r##"<tspan fill="#86efac">{}</tspan>"##, escaped));
+        }
+        DiffLineKind::Deletion => {
+            out.push_str(&format!(r##"<tspan fill="#f87171">{}</tspan>"##, escaped));
+        }
+        DiffLineKind::HunkHeader => {
+            out.push_str(&format!(
+                r##"<tspan fill="#c084fc" font-style="italic">{}</tspan>"##,
+                escaped
+            ));
+        }
+        DiffLineKind::HeaderFile => {
+            out.push_str(&format!(
+                r##"<tspan fill="#38bdf8" font-weight="bold">{}</tspan>"##,
+                escaped
+            ));
+        }
+        DiffLineKind::Meta => {
+            out.push_str(&format!(r##"<tspan fill="#71717a">{}</tspan>"##, escaped));
+        }
+        DiffLineKind::Context => {
+            out.push_str(&format!(r##"<tspan fill="#e4e4e7">{}</tspan>"##, escaped));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7629,5 +7818,156 @@ The symbol ┼ is a box-drawing cross character.
             svg_source.contains(r##"fill="#34d399" font-weight="bold">Onboarding: Card Platform"##)
         );
         assert!(svg_source.contains(r##"fill="#71717a">**</tspan>"##));
+    }
+
+    #[test]
+    fn diff_syntax_highlighting_and_metadata() {
+        let diff = r#"commit 47896169cf45b99cb3329ad42c3e4e45d569c8ce
+Author: Alice <alice@example.com>
+Date:   Fri Oct 16 12:00:00 2026 +0200
+diff --git a/src/main.rs b/src/main.rs
+index abc1234..def5678 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,4 +10,5 @@ fn main() {
+     let x = 1;
+-    println!("old: {}", x);
++    println!("new: {}", x);
++    println!("added line");
+ }
+\ No newline at end of file
+"#;
+        let doc = TextDocument::from_string_with_options(
+            diff.to_string(),
+            SourceFormat::Diff,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Metadata in #71717a
+        assert!(svg.contains(
+            r##"fill="#71717a">commit 47896169cf45b99cb3329ad42c3e4e45d569c8ce</tspan>"##
+        ));
+        assert!(svg.contains(r##"fill="#71717a">Author: Alice &lt;alice@example.com&gt;</tspan>"##));
+        assert!(svg.contains(r##"fill="#71717a">diff --git a/src/main.rs b/src/main.rs</tspan>"##));
+        assert!(svg.contains(r##"fill="#71717a">\ No newline at end of file</tspan>"##));
+
+        // Header files in bold #38bdf8
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">--- a/src/main.rs</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">+++ b/src/main.rs</tspan>"##));
+
+        // Hunk header in italic #c084fc
+        assert!(svg.contains(
+            r##"fill="#c084fc" font-style="italic">@@ -10,4 +10,5 @@ fn main() {</tspan>"##
+        ));
+
+        // Additions in #86efac
+        assert!(svg.contains(r##"fill="#86efac">+    println!(&quot;new: {}&quot;, x);</tspan>"##));
+        assert!(svg.contains(r##"fill="#86efac">+    println!(&quot;added line&quot;);</tspan>"##));
+
+        // Deletions in #f87171
+        assert!(svg.contains(r##"fill="#f87171">-    println!(&quot;old: {}&quot;, x);</tspan>"##));
+
+        // Context in #e4e4e7
+        assert!(svg.contains(r##"fill="#e4e4e7">     let x = 1;</tspan>"##));
+    }
+
+    #[test]
+    fn diff_wrapped_line_preserves_color_across_chunks() {
+        let long_add = format!("+    let result = \"{}\";", "A".repeat(120));
+        let long_del = format!("-    let old_result = \"{}\";", "B".repeat(120));
+        let diff = format!("@@ -1,1 +1,1 @@\n{long_add}\n{long_del}\n");
+        let doc = TextDocument::from_string_with_options(
+            diff,
+            SourceFormat::Diff,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Long addition wrapped into multiple chunks; continuation must also be #86efac
+        let add_occurrences = svg.matches(r##"fill="#86efac""##).count();
+        assert!(
+            add_occurrences >= 2,
+            "Addition continuation chunks must retain green color"
+        );
+
+        // Long deletion wrapped into multiple chunks; continuation must also be #f87171
+        let del_occurrences = svg.matches(r##"fill="#f87171""##).count();
+        assert!(
+            del_occurrences >= 2,
+            "Deletion continuation chunks must retain red color"
+        );
+    }
+
+    #[test]
+    fn diff_header_content_inside_hunk_is_deletion_not_file_header() {
+        // A deletion of markdown frontmatter `---` inside a hunk is prefixed by `-` -> `----`
+        // Deleting `-- comment` in SQL/Lua produces `--- comment`.
+        // Adding `++ counter` in C/C++ produces `+++ counter`.
+        // These must be classified as Deletion and Addition, NOT HeaderFile.
+        let diff = r#"--- a/code.sql
++++ b/code.sql
+@@ -1,2 +1,2 @@
+--- old comment
+-SELECT 1;
++++ new counter
++SELECT 2;
+--- a/next.sql
++++ b/next.sql
+@@ -1,1 +1,1 @@
+ context
+"#;
+        let doc = TextDocument::from_string_with_options(
+            diff.to_string(),
+            SourceFormat::Diff,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Inside hunk: `--- old comment` must be Deletion (#f87171)
+        assert!(svg.contains(r##"fill="#f87171">--- old comment</tspan>"##));
+        // Inside hunk: `+++ new counter` must be Addition (#86efac)
+        assert!(svg.contains(r##"fill="#86efac">+++ new counter</tspan>"##));
+
+        // Outside hunks: file headers must be HeaderFile (#38bdf8 bold)
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">--- a/code.sql</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">+++ b/code.sql</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">--- a/next.sql</tspan>"##));
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">+++ b/next.sql</tspan>"##));
+    }
+
+    #[test]
+    fn diff_no_newline_marker_and_indented_at_at_in_hunk() {
+        let diff = r#"--- a/file.txt
++++ b/file.txt
+@@ -1,1 +1,1 @@
+-old line
+\ No newline at end of file
++++ new counter
+\ No newline at end of file
+--- a/file2.txt
++++ b/file2.txt
+@@ -1,1 +1,1 @@
+    @@ -1,1 +1,1 @@
+"#;
+        let doc = TextDocument::from_string_with_options(
+            diff.to_string(),
+            SourceFormat::Diff,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // `\ No newline` inside hunk is meta (#71717a)
+        assert!(svg.contains(r##"fill="#71717a">\ No newline at end of file</tspan>"##));
+        // `+++ new counter` following `\ No newline` remains Addition (#86efac), NOT HeaderFile
+        assert!(svg.contains(r##"fill="#86efac">+++ new counter</tspan>"##));
+        // Next file headers are properly HeaderFile (#38bdf8 bold)
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">--- a/file2.txt</tspan>"##));
+        // Indented @@ in code line is context (#e4e4e7), NOT HunkHeader
+        assert!(svg.contains(r##"fill="#e4e4e7">    @@ -1,1 +1,1 @@</tspan>"##));
     }
 }
