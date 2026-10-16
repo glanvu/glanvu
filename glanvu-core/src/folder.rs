@@ -40,6 +40,8 @@ pub fn is_text_path(path: &Path) -> bool {
                 | SourceFormat::Toml
                 | SourceFormat::Yaml
                 | SourceFormat::Md
+                | SourceFormat::Csv
+                | SourceFormat::Tsv
         )
     )
 }
@@ -72,6 +74,16 @@ pub fn is_yaml_path(path: &Path) -> bool {
 /// Whether a path's extension marks it as Markdown (.md, .markdown).
 pub fn is_md_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Md)
+}
+
+/// Whether a path's extension marks it as CSV (.csv).
+pub fn is_csv_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Csv)
+}
+
+/// Whether a path's extension marks it as TSV (.tsv, .tab).
+pub fn is_tsv_path(path: &Path) -> bool {
+    SourceFormat::from_path(path) == Some(SourceFormat::Tsv)
 }
 
 /// List the supported image files directly inside `dir`, sorted case-insensitively by file name.
@@ -224,6 +236,23 @@ mod tests {
     }
 
     #[test]
+    fn is_csv_path_is_case_insensitive() {
+        assert!(is_csv_path(Path::new("/x/data.csv")));
+        assert!(is_csv_path(Path::new("/x/data.CSV")));
+        assert!(!is_csv_path(Path::new("/x/report.tsv")));
+        assert!(!is_csv_path(Path::new("/x/README.md")));
+    }
+
+    #[test]
+    fn is_tsv_path_is_case_insensitive() {
+        assert!(is_tsv_path(Path::new("/x/report.tsv")));
+        assert!(is_tsv_path(Path::new("/x/report.TSV")));
+        assert!(is_tsv_path(Path::new("/x/data.tab")));
+        assert!(is_tsv_path(Path::new("/x/data.TAB")));
+        assert!(!is_tsv_path(Path::new("/x/data.csv")));
+    }
+
+    #[test]
     fn bak_extensions_resolve_to_underlying_format() {
         assert!(is_supported_path(Path::new("/x/config.toml.bak")));
         assert!(is_toml_path(Path::new("/x/config.toml.bak")));
@@ -232,6 +261,14 @@ mod tests {
         assert!(is_supported_path(Path::new("/x/.env.bak")));
         assert!(is_ini_path(Path::new("/x/.env.bak")));
         assert!(is_text_path(Path::new("/x/.env.bak")));
+
+        assert!(is_supported_path(Path::new("/x/data.csv.bak")));
+        assert!(is_csv_path(Path::new("/x/data.csv.bak")));
+        assert!(is_text_path(Path::new("/x/data.csv.bak")));
+
+        assert!(is_supported_path(Path::new("/x/report.tsv.bak")));
+        assert!(is_tsv_path(Path::new("/x/report.tsv.bak")));
+        assert!(is_text_path(Path::new("/x/report.tsv.bak")));
 
         assert!(is_supported_path(Path::new("/x/photo.png.bak")));
         assert!(is_supported_path(Path::new("/x/doc.pdf.bak")));

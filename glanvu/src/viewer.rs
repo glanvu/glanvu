@@ -3824,7 +3824,7 @@ impl App {
 
     fn is_advanced_render_mode(&self) -> bool {
         self.current_format()
-            .is_some_and(|fmt| fmt.render_mode_count() > 1 && self.get_render_mode(fmt) == 0)
+            .is_some_and(|fmt| fmt.render_mode_count() > 1 && self.get_render_mode(fmt) == 1)
     }
 
     /// (Re)load the parsed text document for the current file and render its first page.

@@ -46,6 +46,10 @@ pub enum SourceFormat {
     Yaml,
     /// A Markdown document (.md, .markdown), rendered with monospace typography, syntax highlighting, and formatting.
     Md,
+    /// A CSV document (.csv), rendered as a formatted table or raw text with rainbow column highlighting.
+    Csv,
+    /// A TSV document (.tsv, .tab), rendered as a formatted table or raw text with rainbow column highlighting.
+    Tsv,
 }
 
 impl SourceFormat {
@@ -75,6 +79,8 @@ impl SourceFormat {
             SourceFormat::Toml => "TOML",
             SourceFormat::Yaml => "YAML",
             SourceFormat::Md => "Markdown",
+            SourceFormat::Csv => "CSV",
+            SourceFormat::Tsv => "TSV",
         }
     }
 
@@ -106,6 +112,8 @@ impl SourceFormat {
             "toml" => Some(SourceFormat::Toml),
             "yaml" | "yml" => Some(SourceFormat::Yaml),
             "md" | "markdown" => Some(SourceFormat::Md),
+            "csv" => Some(SourceFormat::Csv),
+            "tsv" | "tab" => Some(SourceFormat::Tsv),
             _ => None,
         }
     }
@@ -141,7 +149,7 @@ impl SourceFormat {
     /// Number of distinct render modes supported by this format (at least 1: mode 0).
     pub fn render_mode_count(self) -> u8 {
         match self {
-            SourceFormat::Md => 2,
+            SourceFormat::Md | SourceFormat::Csv | SourceFormat::Tsv => 2,
             _ => 1,
         }
     }
@@ -150,9 +158,14 @@ impl SourceFormat {
     pub fn render_mode_name(self, mode: u8) -> &'static str {
         match self {
             SourceFormat::Md => match mode {
-                0 => "Reader",
-                1 => "Source",
-                _ => "Reader",
+                0 => "Source",
+                1 => "Reader",
+                _ => "Source",
+            },
+            SourceFormat::Csv | SourceFormat::Tsv => match mode {
+                0 => "Raw",
+                1 => "Table",
+                _ => "Raw",
             },
             _ => "Default",
         }
@@ -192,6 +205,8 @@ impl SourceFormat {
             SourceFormat::Toml => None,
             SourceFormat::Yaml => None,
             SourceFormat::Md => None,
+            SourceFormat::Csv => None,
+            SourceFormat::Tsv => None,
         }
     }
 
@@ -545,6 +560,39 @@ mod tests {
         assert_eq!(
             SourceFormat::from_path(std::path::Path::new("README.md.bak")),
             Some(SourceFormat::Md)
+        );
+    }
+
+    #[test]
+    fn csv_and_tsv_extensions_resolve() {
+        assert_eq!(SourceFormat::from_extension("csv"), Some(SourceFormat::Csv));
+        assert_eq!(SourceFormat::from_extension("CSV"), Some(SourceFormat::Csv));
+        assert_eq!(SourceFormat::from_extension("tsv"), Some(SourceFormat::Tsv));
+        assert_eq!(SourceFormat::from_extension("tab"), Some(SourceFormat::Tsv));
+        assert_eq!(SourceFormat::from_extension("TAB"), Some(SourceFormat::Tsv));
+        assert_eq!(SourceFormat::Csv.name(), "CSV");
+        assert_eq!(SourceFormat::Tsv.name(), "TSV");
+        assert_eq!(SourceFormat::Csv.to_image(), None);
+        assert_eq!(SourceFormat::Tsv.to_image(), None);
+        assert_eq!(SourceFormat::Csv.render_mode_count(), 2);
+        assert_eq!(SourceFormat::Csv.render_mode_name(0), "Raw");
+        assert_eq!(SourceFormat::Csv.render_mode_name(1), "Table");
+        assert_eq!(SourceFormat::Tsv.render_mode_count(), 2);
+        assert_eq!(SourceFormat::Tsv.render_mode_name(0), "Raw");
+        assert_eq!(SourceFormat::Tsv.render_mode_name(1), "Table");
+
+        // Path resolution including .bak
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("data.csv")),
+            Some(SourceFormat::Csv)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("report.tsv")),
+            Some(SourceFormat::Tsv)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("data.csv.bak")),
+            Some(SourceFormat::Csv)
         );
     }
 }

@@ -246,6 +246,17 @@ impl TextDocument {
         layout: PageLayout,
         render_mode: u8,
     ) -> Self {
+        let is_csv_table =
+            (format == SourceFormat::Csv || format == SourceFormat::Tsv) && render_mode == 1;
+        if is_csv_table {
+            let delimiter = if format == SourceFormat::Tsv {
+                '\t'
+            } else {
+                detect_csv_delimiter(&content)
+            };
+            return Self::build_csv_table_document(content, format, layout, delimiter);
+        }
+
         let mut visual_rows = Vec::new();
         let mut in_string = false;
         let mut string_quote: Option<char> = None;
@@ -261,7 +272,11 @@ impl TextDocument {
         let raw_lines: Vec<&str> = content.lines().collect();
         for (line_idx, &raw_line) in raw_lines.iter().enumerate() {
             let cleaned = sanitize_line(raw_line);
-            let expanded = expand_tabs(&cleaned, TAB_SIZE);
+            let expanded = if format == SourceFormat::Tsv {
+                cleaned
+            } else {
+                expand_tabs(&cleaned, TAB_SIZE)
+            };
             if expanded.is_empty() {
                 visual_rows.push(VisualRow {
                     line_number: Some(line_idx + 1),
@@ -362,7 +377,7 @@ impl TextDocument {
                     && line_idx + 1 < raw_lines.len()
                     && is_table_separator(raw_lines[line_idx + 1].trim());
 
-                let is_md_reader = is_md && render_mode == 0;
+                let is_md_reader = is_md && render_mode == 1;
                 let line_to_wrap =
                     if is_md_reader && !is_frontmatter_line && !line_starts_in_code_block {
                         strip_markdown_urls_for_reader(&expanded)
@@ -555,6 +570,275 @@ impl TextDocument {
         }
     }
 
+    fn build_csv_table_document(
+        content: String,
+        format: SourceFormat,
+        layout: PageLayout,
+        delimiter: char,
+    ) -> Self {
+        let records = parse_csv_rows(&content, delimiter);
+        let num_cols = records.iter().map(|r| r.len()).max().unwrap_or(0);
+
+        if records.is_empty() || num_cols == 0 {
+            return Self {
+                content,
+                pages: vec![vec![VisualRow {
+                    line_number: Some(1),
+                    text: "(empty table)".to_string(),
+                    indent_cols: 0,
+                    string_quote: None,
+                    starts_in_string: false,
+                    starts_escaped: false,
+                    starts_in_comment: false,
+                    starts_in_tag: false,
+                    starts_in_cdata: false,
+                    starts_in_section: false,
+                    is_value_continuation: false,
+                    partial_delim: PartialDelim::None,
+                    starts_in_code_block: false,
+                    heading_level: None,
+                    is_blockquote_continuation: false,
+                    is_frontmatter: false,
+                    is_table_row: true,
+                    is_table_header: false,
+                }]],
+                format,
+                layout,
+                render_mode: 1,
+            };
+        }
+
+        // Determine column alignment: numeric columns right-aligned, text left-aligned
+        let data_rows = if records.len() > 1 {
+            &records[1..]
+        } else {
+            &records[..]
+        };
+        let mut align_right = vec![false; num_cols];
+        for (c, align) in align_right.iter_mut().enumerate() {
+            let mut non_empty_count = 0usize;
+            let mut numeric_count = 0usize;
+            for r in data_rows {
+                if let Some(cell) = r.get(c) {
+                    let trimmed = cell.trim();
+                    if !trimmed.is_empty() {
+                        non_empty_count += 1;
+                        if is_numeric_field(trimmed) {
+                            numeric_count += 1;
+                        }
+                    }
+                }
+            }
+            if non_empty_count > 0 && numeric_count * 10 >= non_empty_count * 7 {
+                *align = true;
+            }
+        }
+
+        // Available table character width
+        let max_width: usize = match layout {
+            PageLayout::Portrait => 114,
+            PageLayout::Landscape => 154,
+        };
+        let divider_chars = num_cols.saturating_sub(1) * 3; // " │ " is 3 chars
+        let available_space = max_width.saturating_sub(divider_chars);
+
+        // Compute natural width per column
+        let mut col_widths = vec![3usize; num_cols];
+        for r in &records {
+            for (c, cell) in r.iter().enumerate() {
+                let cell_len = cell.chars().count();
+                col_widths[c] = col_widths[c].max(cell_len);
+            }
+        }
+
+        // Proportionally scale / shrink wide columns if total exceeds available space
+        let mut total_w: usize = col_widths.iter().sum();
+        if total_w > available_space && available_space > 0 {
+            while total_w > available_space {
+                let max_w = *col_widths.iter().max().unwrap_or(&0);
+                if max_w <= 6 {
+                    break;
+                }
+                for w in &mut col_widths {
+                    if *w == max_w && total_w > available_space {
+                        *w -= 1;
+                        total_w -= 1;
+                    }
+                }
+            }
+        }
+
+        // Helper to format a single record
+        let format_row = |row: &[String]| -> String {
+            let mut formatted_cells = Vec::with_capacity(num_cols);
+            for c in 0..num_cols {
+                let width = col_widths[c];
+                let raw_val = row.get(c).map(|s| s.as_str()).unwrap_or("");
+                let sanitized: String = raw_val
+                    .replace('│', "|")
+                    .replace('┼', "+")
+                    .replace('─', "-");
+                let cell_chars: Vec<char> = sanitized.chars().collect();
+                let truncated = if cell_chars.len() > width {
+                    if width > 1 {
+                        let keep = width - 1;
+                        let mut s: String = cell_chars[..keep].iter().collect();
+                        s.push('…');
+                        s
+                    } else {
+                        "…".to_string()
+                    }
+                } else {
+                    sanitized
+                };
+                let aligned = if align_right[c] {
+                    format!("{truncated:>width$}")
+                } else {
+                    format!("{truncated:<width$}")
+                };
+                formatted_cells.push(aligned);
+            }
+            formatted_cells.join(" │ ")
+        };
+
+        let header_text = format_row(&records[0]);
+
+        // Separator row: "──────┼────────────────┼────────"
+        let sep_parts: Vec<String> = col_widths.iter().map(|&w| "─".repeat(w)).collect();
+        let sep_text = sep_parts.join("─┼─");
+
+        let lines_per_page = layout.lines_per_page();
+        let data_rows_per_page = lines_per_page.saturating_sub(2).max(1);
+
+        let data_slice = if records.len() > 1 {
+            &records[1..]
+        } else {
+            &[]
+        };
+
+        let mut pages = Vec::new();
+
+        if data_slice.is_empty() {
+            pages.push(vec![
+                VisualRow {
+                    line_number: Some(1),
+                    text: header_text,
+                    indent_cols: 0,
+                    string_quote: None,
+                    starts_in_string: false,
+                    starts_escaped: false,
+                    starts_in_comment: false,
+                    starts_in_tag: false,
+                    starts_in_cdata: false,
+                    starts_in_section: false,
+                    is_value_continuation: false,
+                    partial_delim: PartialDelim::None,
+                    starts_in_code_block: false,
+                    heading_level: None,
+                    is_blockquote_continuation: false,
+                    is_frontmatter: false,
+                    is_table_row: true,
+                    is_table_header: true,
+                },
+                VisualRow {
+                    line_number: None,
+                    text: sep_text,
+                    indent_cols: 0,
+                    string_quote: None,
+                    starts_in_string: false,
+                    starts_escaped: false,
+                    starts_in_comment: false,
+                    starts_in_tag: false,
+                    starts_in_cdata: false,
+                    starts_in_section: false,
+                    is_value_continuation: false,
+                    partial_delim: PartialDelim::None,
+                    starts_in_code_block: false,
+                    heading_level: None,
+                    is_blockquote_continuation: false,
+                    is_frontmatter: false,
+                    is_table_row: true,
+                    is_table_header: false,
+                },
+            ]);
+        } else {
+            for chunk in data_slice.chunks(data_rows_per_page) {
+                let mut page_rows = Vec::with_capacity(chunk.len() + 2);
+                page_rows.push(VisualRow {
+                    line_number: Some(1),
+                    text: header_text.clone(),
+                    indent_cols: 0,
+                    string_quote: None,
+                    starts_in_string: false,
+                    starts_escaped: false,
+                    starts_in_comment: false,
+                    starts_in_tag: false,
+                    starts_in_cdata: false,
+                    starts_in_section: false,
+                    is_value_continuation: false,
+                    partial_delim: PartialDelim::None,
+                    starts_in_code_block: false,
+                    heading_level: None,
+                    is_blockquote_continuation: false,
+                    is_frontmatter: false,
+                    is_table_row: true,
+                    is_table_header: true,
+                });
+                page_rows.push(VisualRow {
+                    line_number: None,
+                    text: sep_text.clone(),
+                    indent_cols: 0,
+                    string_quote: None,
+                    starts_in_string: false,
+                    starts_escaped: false,
+                    starts_in_comment: false,
+                    starts_in_tag: false,
+                    starts_in_cdata: false,
+                    starts_in_section: false,
+                    is_value_continuation: false,
+                    partial_delim: PartialDelim::None,
+                    starts_in_code_block: false,
+                    heading_level: None,
+                    is_blockquote_continuation: false,
+                    is_frontmatter: false,
+                    is_table_row: true,
+                    is_table_header: false,
+                });
+                for rec in chunk {
+                    page_rows.push(VisualRow {
+                        line_number: None,
+                        text: format_row(rec),
+                        indent_cols: 0,
+                        string_quote: None,
+                        starts_in_string: false,
+                        starts_escaped: false,
+                        starts_in_comment: false,
+                        starts_in_tag: false,
+                        starts_in_cdata: false,
+                        starts_in_section: false,
+                        is_value_continuation: false,
+                        partial_delim: PartialDelim::None,
+                        starts_in_code_block: false,
+                        heading_level: None,
+                        is_blockquote_continuation: false,
+                        is_frontmatter: false,
+                        is_table_row: true,
+                        is_table_header: false,
+                    });
+                }
+                pages.push(page_rows);
+            }
+        }
+
+        Self {
+            content,
+            pages,
+            format,
+            layout,
+            render_mode: 1,
+        }
+    }
+
     /// Raw text content of the document.
     pub fn content(&self) -> &str {
         &self.content
@@ -579,14 +863,17 @@ impl TextDocument {
             .ok_or_else(|| Error::Decode(format!("page {page_index} out of range")))?;
 
         let (page_w, page_h) = self.layout.dimensions();
-        let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 0;
+        let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 1;
+        let is_csv_table = (self.format == SourceFormat::Csv || self.format == SourceFormat::Tsv)
+            && self.render_mode == 1;
+        let is_advanced = is_md_reader || is_csv_table;
         let mut svg = String::with_capacity(8192);
         svg.push_str(&format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{page_w}" height="{page_h}" viewBox="0 0 {page_w} {page_h}">
 <rect width="100%" height="100%" fill="#121214"/>
 "##
         ));
-        if !is_md_reader {
+        if !is_advanced {
             svg.push_str(&format!(
                 r##"<line x1="92" y1="25" x2="92" y2="{}" stroke="#27272a" stroke-width="1"/>
 "##,
@@ -596,7 +883,7 @@ impl TextDocument {
 
         let top_y = 35;
         let line_height = 26;
-        let text_x = if is_md_reader { 48 } else { 110 };
+        let text_x = if is_advanced { 48 } else { 110 };
         let default_font = if is_md_reader {
             "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
         } else {
@@ -605,7 +892,7 @@ impl TextDocument {
 
         for (row_idx, row) in rows.iter().enumerate() {
             let y = top_y + (row_idx as i32 + 1) * line_height;
-            if !is_md_reader {
+            if !is_advanced {
                 if let Some(num) = row.line_number {
                     svg.push_str(&format!(
                         r##"<text x="80" y="{y}" text-anchor="end" fill="#52525b" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="16">{num}</text>
@@ -657,6 +944,18 @@ impl TextDocument {
                         self.render_mode,
                         self.layout,
                     ),
+                    SourceFormat::Csv | SourceFormat::Tsv => {
+                        let delimiter = if self.format == SourceFormat::Tsv {
+                            '\t'
+                        } else {
+                            detect_csv_delimiter(&self.content)
+                        };
+                        if self.render_mode == 1 {
+                            highlight_csv_table_row(&row.text, row.is_table_header)
+                        } else {
+                            highlight_csv_raw_row(&row.text, delimiter, row.indent_cols)
+                        }
+                    }
                     _ => {
                         let mut s = String::with_capacity(row.indent_cols + row.text.len());
                         for _ in 0..row.indent_cols {
@@ -666,15 +965,22 @@ impl TextDocument {
                         s
                     }
                 };
-                let font_size = if is_md_reader && row.is_table_row {
+                let font_size = if is_csv_table || (is_md_reader && row.is_table_row) {
                     "15"
                 } else if is_md_reader {
                     "18"
                 } else {
                     "19"
                 };
+                let row_font = if is_csv_table
+                    || (is_md_reader && (row.starts_in_code_block || row.is_table_row))
+                {
+                    "ui-monospace, Menlo, Monaco, Consolas, monospace"
+                } else {
+                    default_font
+                };
                 svg.push_str(&format!(
-                    r##"<text x="{text_x}" y="{y}" fill="#e4e4e7" font-family="{default_font}" font-size="{font_size}" xml:space="preserve">{inner}</text>
+                    r##"<text x="{text_x}" y="{y}" fill="#e4e4e7" font-family="{row_font}" font-size="{font_size}" xml:space="preserve">{inner}</text>
 "##
                 ));
             }
@@ -2719,15 +3025,6 @@ fn highlight_md_row(
     layout: PageLayout,
 ) -> String {
     if render_mode == 1 {
-        highlight_md_source_row(
-            text,
-            indent_cols,
-            starts_in_code_block,
-            heading_level,
-            is_blockquote_continuation,
-            is_table_row,
-        )
-    } else {
         highlight_md_reader_row(
             text,
             indent_cols,
@@ -2738,6 +3035,15 @@ fn highlight_md_row(
             is_table_row,
             is_table_header,
             layout,
+        )
+    } else {
+        highlight_md_source_row(
+            text,
+            indent_cols,
+            starts_in_code_block,
+            heading_level,
+            is_blockquote_continuation,
+            is_table_row,
         )
     }
 }
@@ -4132,6 +4438,208 @@ fn get_tag_name(tag: &str) -> Option<&str> {
     }
 }
 
+const CSV_PALETTE: &[&str] = &[
+    "#38bdf8", // Sky blue
+    "#34d399", // Emerald
+    "#fbbf24", // Amber
+    "#f472b6", // Pink
+    "#a78bfa", // Purple
+    "#fb923c", // Orange
+    "#2dd4bf", // Teal
+    "#818cf8", // Indigo
+    "#f87171", // Coral red
+    "#4ade80", // Light green
+];
+
+/// Detect whether content uses comma, semicolon, or tab as delimiter.
+pub fn detect_csv_delimiter(content: &str) -> char {
+    let mut comma_count = 0usize;
+    let mut semi_count = 0usize;
+    let mut tab_count = 0usize;
+    for line in content.lines().take(20) {
+        comma_count += line.matches(',').count();
+        semi_count += line.matches(';').count();
+        tab_count += line.matches('\t').count();
+    }
+    if tab_count > comma_count && tab_count > semi_count {
+        '\t'
+    } else if semi_count > comma_count {
+        ';'
+    } else {
+        ','
+    }
+}
+
+fn parse_csv_rows(content: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut current_row: Vec<String> = Vec::new();
+    let mut current_field = String::new();
+    let mut in_quotes = false;
+    let mut field_has_content = false;
+    let mut chars = content.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if !field_has_content && !in_quotes => {
+                in_quotes = true;
+                field_has_content = true;
+            }
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    current_field.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+            c if c == delimiter && !in_quotes => {
+                current_row.push(current_field);
+                current_field = String::new();
+                field_has_content = false;
+            }
+            '\n' if !in_quotes => {
+                if current_field.ends_with('\r') {
+                    current_field.pop();
+                }
+                current_row.push(current_field);
+                current_field = String::new();
+                field_has_content = false;
+                rows.push(current_row);
+                current_row = Vec::new();
+            }
+            '\r' => {
+                if in_quotes {
+                    current_field.push('\r');
+                }
+            }
+            c => {
+                current_field.push(c);
+                field_has_content = true;
+            }
+        }
+    }
+    if !current_field.is_empty() || !current_row.is_empty() {
+        if current_field.ends_with('\r') {
+            current_field.pop();
+        }
+        current_row.push(current_field);
+        rows.push(current_row);
+    }
+    while rows.len() > 1 && rows.last().is_some_and(|r| r.len() == 1 && r[0].is_empty()) {
+        rows.pop();
+    }
+    rows
+}
+
+fn is_numeric_field(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let stripped = trimmed
+        .trim_start_matches(|c| {
+            c == '$' || c == '€' || c == '£' || c == '¥' || c == '+' || c == '-'
+        })
+        .trim_end_matches('%')
+        .trim();
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped.parse::<f64>().is_ok() {
+        return true;
+    }
+    let replaced_comma = stripped.replace(',', ".");
+    if replaced_comma.parse::<f64>().is_ok() {
+        return true;
+    }
+    let no_comma = stripped.replace(',', "");
+    no_comma.parse::<f64>().is_ok()
+}
+
+fn highlight_csv_raw_row(text: &str, delimiter: char, indent_cols: usize) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for _ in 0..indent_cols {
+        out.push(' ');
+    }
+    let mut col_idx = 0usize;
+    let mut in_quotes = false;
+    let mut field_has_content = false;
+    let mut current_token = String::new();
+
+    let flush_token = |out: &mut String, token: &mut String, col: usize| {
+        if !token.is_empty() {
+            let color = CSV_PALETTE[col % CSV_PALETTE.len()];
+            out.push_str(&format!(
+                r##"<tspan fill="{color}">{}</tspan>"##,
+                escape_xml(token)
+            ));
+            token.clear();
+        }
+    };
+
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if !field_has_content && !in_quotes => {
+                flush_token(&mut out, &mut current_token, col_idx);
+                in_quotes = true;
+                field_has_content = true;
+                out.push_str(r##"<tspan fill="#71717a">&quot;</tspan>"##);
+            }
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    current_token.push('"');
+                    chars.next();
+                } else {
+                    flush_token(&mut out, &mut current_token, col_idx);
+                    in_quotes = false;
+                    out.push_str(r##"<tspan fill="#71717a">&quot;</tspan>"##);
+                }
+            }
+            c if c == delimiter && !in_quotes => {
+                flush_token(&mut out, &mut current_token, col_idx);
+                let delim_str = if c == '\t' { "    " } else { &c.to_string() };
+                out.push_str(&format!(
+                    r##"<tspan fill="#52525b" font-weight="bold">{}</tspan>"##,
+                    escape_xml(delim_str)
+                ));
+                col_idx += 1;
+                field_has_content = false;
+            }
+            c => {
+                current_token.push(c);
+                field_has_content = true;
+            }
+        }
+    }
+    flush_token(&mut out, &mut current_token, col_idx);
+    out
+}
+
+fn highlight_csv_table_row(text: &str, is_header: bool) -> String {
+    if text.contains('┼') || text.starts_with('─') {
+        return format!(r##"<tspan fill="#3f3f46">{}</tspan>"##, escape_xml(text));
+    }
+
+    let mut out = String::with_capacity(text.len() * 3);
+    let parts: Vec<&str> = text.split(" │ ").collect();
+    for (col_idx, part) in parts.iter().enumerate() {
+        if col_idx > 0 {
+            out.push_str(r##"<tspan fill="#3f3f46"> │ </tspan>"##);
+        }
+        let color = CSV_PALETTE[col_idx % CSV_PALETTE.len()];
+        let escaped = escape_xml(part);
+        if is_header {
+            out.push_str(&format!(
+                r##"<tspan fill="{color}" font-weight="bold">{escaped}</tspan>"##
+            ));
+        } else {
+            out.push_str(&format!(r##"<tspan fill="{color}">{escaped}</tspan>"##));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4847,7 +5355,13 @@ fn main() {
 
     indented code or list
 "##;
-        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        // Mode 1: Reader mode
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
         let svg = doc.page_svg(0).unwrap();
 
         // Headings H1..H6
@@ -4911,6 +5425,13 @@ fn main() {
 
         // Rainbow indent guides
         assert!(svg.contains(r##"fill-opacity="0.45">│ </tspan>"##));
+
+        // Mode 0: Default Source mode
+        let doc_src = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        assert_eq!(doc_src.render_mode(), 0);
+        let svg_src = doc_src.page_svg(0).unwrap();
+        assert!(svg_src.contains(r##"fill="#71717a" font-weight="bold">#</tspan>"##));
+        assert!(svg_src.contains(r##">1</text>"##));
     }
 
     #[test]
@@ -4923,7 +5444,12 @@ tags: [test, doc]
 # Title
 Body text.
 "#;
-        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
         let svg = doc.page_svg(0).unwrap();
         assert!(svg.contains(r##"fill="#52525b">─── metadata ───</tspan>"##));
         assert!(svg.contains(r##"fill="#71717a" font-style="italic">title: Test Note</tspan>"##));
@@ -4981,7 +5507,12 @@ After code block, this is # Real Heading
 Here ``` is not a closing fence
 ~~~~
 "##;
-        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
         let svg = doc.page_svg(0).unwrap();
 
         // ~~~ inside ``` block rendered as code green
@@ -5004,7 +5535,12 @@ Here ``` is not a closing fence
 |-------|-------|
 | Val 1 | ✅ draft with [Link](https://example.com) and ✏️ |
 "#;
-        let doc = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
         let svg = doc.page_svg(0).unwrap();
         assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">Col 1</tspan>"##));
         assert!(svg.contains(r##"fill="#3f3f46">────────────────────────────────────────────────────────────────────────────</tspan>"##));
@@ -5022,31 +5558,27 @@ Here ``` is not a closing fence
 |---|---|
 | 1 | [Link](https://example.com) |
 "#;
-        // Mode 1: Source mode in Landscape
+        // Mode 0: Source mode in Landscape
         let doc_source = TextDocument::from_string_with_options(
             md.to_string(),
             SourceFormat::Md,
             PageLayout::Landscape,
-            1,
+            0,
         );
         assert_eq!(doc_source.layout(), PageLayout::Landscape);
-        assert_eq!(doc_source.render_mode(), 1);
+        assert_eq!(doc_source.render_mode(), 0);
         let (w, h) = doc_source.page_size(0).unwrap();
         assert_eq!(w, 1600.0);
         assert_eq!(h, 1000.0);
 
         let svg = doc_source.page_svg(0).unwrap();
-        // Width and height in SVG match landscape
         assert!(svg.contains(r##"width="1600" height="1000""##));
         // Source mode retains raw syntax: '#' in heading, '>' in quote, '[ ]' in task
         assert!(svg.contains(r##"fill="#71717a" font-weight="bold">#</tspan>"##));
         assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">&gt;</tspan>"##));
         assert!(svg.contains(r##"fill="#71717a" font-weight="bold">[ ] </tspan>"##));
-        // Raw table syntax with pipe in #71717a
         assert!(svg.contains(r##"fill="#71717a">|</tspan>"##));
-        // Full raw link url visible
         assert!(svg.contains("https://example.com"));
-        // Line numbers displayed in source mode
         assert!(svg.contains(r##">1</text>"##));
     }
 
@@ -5056,8 +5588,13 @@ Here ``` is not a closing fence
 Here is [Wikipedia (Rust)](https://en.wikipedia.org/wiki/Rust_(programming_language)) and \[not a link\].
 Also image: ![An [inner] image](https://site.org/pic_(2).png).
 "#;
-        // Reader mode: hidden URLs, parsed nested parens/brackets
-        let doc_reader = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        // Mode 1: Reader mode: hidden URLs, parsed nested parens/brackets
+        let doc_reader = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1,
+        );
         let svg_reader = doc_reader.page_svg(0).unwrap();
         assert!(svg_reader.contains("Wikipedia (Rust)"));
         assert!(!svg_reader.contains("programming_language"));
@@ -5065,13 +5602,9 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
         assert!(!svg_reader.contains("pic_(2).png"));
         assert!(svg_reader.contains(r##"\[not a link\]"##));
 
-        // Source mode: raw URLs visible
-        let doc_source = TextDocument::from_string_with_options(
-            md.to_string(),
-            SourceFormat::Md,
-            PageLayout::Portrait,
-            1,
-        );
+        // Mode 0: Source mode: raw URLs visible
+        let doc_source = TextDocument::from_string_with_format(md.to_string(), SourceFormat::Md);
+        assert_eq!(doc_source.render_mode(), 0);
         let svg_source = doc_source.page_svg(0).unwrap();
         assert!(svg_source.contains("https://en.wikipedia.org/wiki/Rust_(programming_language)"));
         assert!(svg_source.contains("https://site.org/pic_(2).png"));
@@ -5081,21 +5614,191 @@ Also image: ![An [inner] image](https://site.org/pic_(2).png).
     fn md_long_table_row_not_split() {
         let long_cell = "A".repeat(180);
         let md = format!("| Short | Long |\n|---|---|\n| Cell 1 | {long_cell} |\n");
-        let doc = TextDocument::from_string_with_format(md, SourceFormat::Md);
-        // Table should have 3 lines total in Reader mode (header, separator, data), none wrapped to extra visual rows
-        assert_eq!(doc.page_count(), 1);
-        let svg = doc.page_svg(0).unwrap();
-        assert!(svg.contains("Cell 1"));
-        assert!(svg.contains(&long_cell));
-
-        // In Source (raw) mode, table rows wrap to avoid extending past the canvas margin
-        let doc_source = TextDocument::from_string_with_options(
-            format!("| Short | Long |\n|---|---|\n| Cell 1 | {long_cell} |\n"),
+        let doc_reader = TextDocument::from_string_with_options(
+            md.clone(),
             SourceFormat::Md,
             PageLayout::Portrait,
             1,
         );
+        assert_eq!(doc_reader.page_count(), 1);
+        let svg = doc_reader.page_svg(0).unwrap();
+        assert!(svg.contains("Cell 1"));
+        assert!(svg.contains(&long_cell));
+
+        // In Source (raw) mode, table rows wrap to avoid extending past the canvas margin
+        let doc_source = TextDocument::from_string_with_format(md, SourceFormat::Md);
         let svg_source = doc_source.page_svg(0).unwrap();
         assert!(svg_source.contains("Cell 1"));
+    }
+
+    #[test]
+    fn csv_raw_mode_and_rainbow_palette() {
+        let csv = "id,name,age,city\n1,Alice,30,London\n2,Bob,25,Paris\n";
+        // Mode 0: Default Raw mode
+        let doc_raw = TextDocument::from_string_with_format(csv.to_string(), SourceFormat::Csv);
+        assert_eq!(doc_raw.render_mode(), 0);
+        assert_eq!(doc_raw.layout(), PageLayout::Portrait);
+        let svg = doc_raw.page_svg(0).unwrap();
+
+        // Line numbers and vertical rule present in raw mode
+        assert!(svg.contains(r##"<line x1="92""##));
+        assert!(svg.contains(r##">1</text>"##));
+        assert!(svg.contains(r##">2</text>"##));
+
+        // Rainbow columns: Col 0 (#38bdf8), Col 1 (#34d399), Col 2 (#fbbf24), Col 3 (#f472b6)
+        assert!(svg.contains(r##"fill="#38bdf8">id</tspan>"##));
+        assert!(svg.contains(r##"fill="#34d399">name</tspan>"##));
+        assert!(svg.contains(r##"fill="#fbbf24">age</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">city</tspan>"##));
+
+        // Delimiters styled in muted zinc-600
+        assert!(svg.contains(r##"fill="#52525b" font-weight="bold">,</tspan>"##));
+
+        // Data rows have column colors
+        assert!(svg.contains(r##"fill="#38bdf8">1</tspan>"##));
+        assert!(svg.contains(r##"fill="#34d399">Alice</tspan>"##));
+        assert!(svg.contains(r##"fill="#fbbf24">30</tspan>"##));
+    }
+
+    #[test]
+    fn csv_table_mode_and_landscape() {
+        let csv =
+            "ID,Product,Price,Quantity\n101,Mechanical Keyboard,$129.99,15\n102,Mouse,$49.50,42\n";
+        // Mode 1: Table mode in Landscape
+        let doc_table = TextDocument::from_string_with_options(
+            csv.to_string(),
+            SourceFormat::Csv,
+            PageLayout::Landscape,
+            1,
+        );
+        assert_eq!(doc_table.render_mode(), 1);
+        assert_eq!(doc_table.layout(), PageLayout::Landscape);
+        let svg = doc_table.page_svg(0).unwrap();
+
+        // No raw line numbers gutter in Table mode
+        assert!(!svg.contains(r##"<line x1="92""##));
+
+        // Table headers bold in column colors
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">"##));
+        assert!(svg.contains("Mechanical Keyboard"));
+
+        // Column dividers and separator line
+        assert!(svg.contains(" │ "));
+        assert!(svg.contains("─┼─"));
+
+        // Numeric alignment: price and quantity columns right-aligned with spaces
+        assert!(svg.contains("$129.99"));
+        assert!(svg.contains("42"));
+    }
+
+    #[test]
+    fn csv_semicolon_delimiter_detection() {
+        let csv = "Nombre;Edad;Saldo\nJuan;30;1250,50\nMaria;25;800,00\n";
+        assert_eq!(detect_csv_delimiter(csv), ';');
+
+        let doc_raw = TextDocument::from_string_with_format(csv.to_string(), SourceFormat::Csv);
+        let svg_raw = doc_raw.page_svg(0).unwrap();
+        // Semicolon delimiter styled in #52525b
+        assert!(svg_raw.contains(r##"fill="#52525b" font-weight="bold">;</tspan>"##));
+        assert!(svg_raw.contains("Juan"));
+        assert!(svg_raw.contains("Maria"));
+
+        let doc_table = TextDocument::from_string_with_options(
+            csv.to_string(),
+            SourceFormat::Csv,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg_table = doc_table.page_svg(0).unwrap();
+        assert!(svg_table.contains("Nombre"));
+        assert!(svg_table.contains("Juan"));
+        assert!(svg_table.contains("─┼─"));
+    }
+
+    #[test]
+    fn csv_quotes_and_escapes() {
+        let csv = "id,name,notes\n1,\"Doe, John\",\"Senior dev, leads team\"\n2,\"Smith, \"\"Bob\"\"\",Staff\n3,Screen 15\" OLED,\n";
+        let doc_table = TextDocument::from_string_with_options(
+            csv.to_string(),
+            SourceFormat::Csv,
+            PageLayout::Portrait,
+            1,
+        );
+        let svg = doc_table.page_svg(0).unwrap();
+        // Comma inside quote did not split field
+        assert!(svg.contains("Doe, John"));
+        assert!(svg.contains("Senior dev, leads team"));
+        // Escaped quote "" -> " (rendered as &quot; in SVG)
+        assert!(svg.contains("Smith, &quot;Bob&quot;"));
+        // Literal quote inside unquoted field preserved
+        assert!(svg.contains("Screen 15&quot; OLED"));
+
+        // Verify parse_csv_rows directly for trailing empty fields
+        let rows = parse_csv_rows(csv, ',');
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[3], vec!["3", "Screen 15\" OLED", ""]);
+    }
+
+    #[test]
+    fn tsv_raw_and_table_modes() {
+        let tsv = "ID\tItem\tScore\n1\tAlpha\t98.5\n2\tBeta\t87.0\n";
+        // Raw mode
+        let doc_raw = TextDocument::from_string_with_format(tsv.to_string(), SourceFormat::Tsv);
+        assert_eq!(doc_raw.render_mode(), 0);
+        let svg_raw = doc_raw.page_svg(0).unwrap();
+        assert!(svg_raw.contains(r##"<line x1="92""##));
+        assert!(svg_raw.contains("Alpha"));
+        assert!(svg_raw.contains("Beta"));
+
+        // Table mode
+        let doc_table = TextDocument::from_string_with_options(
+            tsv.to_string(),
+            SourceFormat::Tsv,
+            PageLayout::Portrait,
+            1,
+        );
+        assert_eq!(doc_table.render_mode(), 1);
+        let svg_table = doc_table.page_svg(0).unwrap();
+        assert!(svg_table.contains(" │ "));
+        assert!(svg_table.contains("─┼─"));
+        assert!(svg_table.contains("Alpha"));
+    }
+
+    #[test]
+    fn text_document_loads_csv_and_tsv_and_bak() {
+        let dir = std::env::temp_dir().join("glanvu-text-csv-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // .csv file
+        let csv_path = dir.join("data.csv");
+        let csv_content = "A,B\n1,2\n";
+        std::fs::write(&csv_path, csv_content).unwrap();
+        let doc_csv = TextDocument::load(&csv_path).unwrap();
+        assert_eq!(doc_csv.content(), csv_content);
+        assert_eq!(doc_csv.format, SourceFormat::Csv);
+        let img_csv = doc_csv.render_fit(0).unwrap();
+        assert_eq!(img_csv.width, TEXT_PAGE_WIDTH);
+
+        // .tsv file
+        let tsv_path = dir.join("data.tsv");
+        let tsv_content = "X\tY\n10\t20\n";
+        std::fs::write(&tsv_path, tsv_content).unwrap();
+        let doc_tsv = TextDocument::load(&tsv_path).unwrap();
+        assert_eq!(doc_tsv.content(), tsv_content);
+        assert_eq!(doc_tsv.format, SourceFormat::Tsv);
+        let img_tsv = doc_tsv.render_fit(0).unwrap();
+        assert_eq!(img_tsv.width, TEXT_PAGE_WIDTH);
+
+        // .bak file
+        let bak_path = dir.join("data.csv.bak");
+        std::fs::write(&bak_path, csv_content).unwrap();
+        let doc_bak = TextDocument::load(&bak_path).unwrap();
+        assert_eq!(doc_bak.content(), csv_content);
+        assert_eq!(doc_bak.format, SourceFormat::Csv);
+        let img_bak = doc_bak.render_fit(0).unwrap();
+        assert_eq!(img_bak.width, TEXT_PAGE_WIDTH);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
