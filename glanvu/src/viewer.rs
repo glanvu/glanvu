@@ -233,6 +233,88 @@ fn spawn_tile_worker() -> (Arc<TileQueue>, Receiver<TileResult>) {
     (queue, res_rx)
 }
 
+// ── Text document reload worker ──────────────────────────────────────────────────────────────
+
+struct TextReloadRequest {
+    gen: u64,
+    path: PathBuf,
+    layout: glanvu_core::PageLayout,
+    render_mode: u8,
+    target_page: usize,
+    win_w: u32,
+    win_h: u32,
+}
+
+struct TextReloadResponse {
+    gen: u64,
+    path: PathBuf,
+    target_page: usize,
+    result: glanvu_core::Result<(glanvu_core::TextDocument, DecodedImage)>,
+}
+
+struct TextReloadMailbox {
+    slot: std::sync::Mutex<Option<TextReloadRequest>>,
+    cv: std::sync::Condvar,
+}
+
+impl TextReloadMailbox {
+    fn new() -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn post(&self, req: TextReloadRequest) {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(req);
+        }
+        self.cv.notify_one();
+    }
+
+    fn take_blocking(&self) -> Option<TextReloadRequest> {
+        let mut slot = self.slot.lock().ok()?;
+        while slot.is_none() {
+            slot = self.cv.wait(slot).ok()?;
+        }
+        slot.take()
+    }
+}
+
+fn spawn_text_reload_worker() -> (Arc<TextReloadMailbox>, Receiver<TextReloadResponse>) {
+    let mailbox = Arc::new(TextReloadMailbox::new());
+    let worker_mailbox = Arc::clone(&mailbox);
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<TextReloadResponse>();
+    std::thread::spawn(move || {
+        while let Some(req) = worker_mailbox.take_blocking() {
+            let result = (|| {
+                let doc = glanvu_core::TextDocument::load_with_options(
+                    &req.path,
+                    req.layout,
+                    req.render_mode,
+                )?;
+                let page = req.target_page.min(doc.page_count().saturating_sub(1));
+                let (pw, ph) = doc.page_size(page)?;
+                let (out_w, out_h) = glanvu_core::fit_within(pw, ph, req.win_w, req.win_h);
+                let img = doc.render_page(page, out_w, out_h)?;
+                Ok((doc, img))
+            })();
+            if res_tx
+                .send(TextReloadResponse {
+                    gen: req.gen,
+                    path: req.path,
+                    target_page: req.target_page,
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (mailbox, res_rx)
+}
+
 /// Whether to print timing diagnostics (set `GLANVU_PERF=1`). Off by default so runs stay quiet.
 fn perf_logging() -> bool {
     std::env::var_os("GLANVU_PERF").is_some()
@@ -3553,6 +3635,12 @@ struct App {
     text_rerender_at: Option<Instant>,
     /// Active render mode per format (e.g. 0 = Reader, 1 = Source for Markdown).
     render_modes: std::collections::HashMap<glanvu_core::SourceFormat, u8>,
+    text_reload_mailbox: Arc<TextReloadMailbox>,
+    text_reload_rx: Receiver<TextReloadResponse>,
+    text_reload_gen: u64,
+    text_reload_inflight: bool,
+    /// Dedicated status message while a text document reload is in-flight.
+    render_status_text: Option<String>,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
@@ -4786,6 +4874,12 @@ impl App {
         self.current_pdf_page = 0;
         self.current_is_text = glanvu_core::is_text_path(&res.path);
         self.current_text_page = 0;
+        self.text_reload_inflight = false;
+        self.text_reload_gen = self.text_reload_gen.wrapping_add(1);
+        self.render_status_text = None;
+        if self.status_text.starts_with("Rendering:") {
+            self.status_until = None;
+        }
         if let (Some(gpu), Some(img)) = (self.gpu.as_mut(), self.nav.current_image()) {
             gpu.set_image(img);
         }
@@ -4888,10 +4982,13 @@ impl App {
 
         if self.mode == ViewMode::Grid {
             let now = Instant::now();
-            let status = match self.status_until {
-                Some(t) if now < t => Some(self.status_text.clone()),
-                _ => None,
-            };
+            let status = self
+                .render_status_text
+                .clone()
+                .or_else(|| match self.status_until {
+                    Some(t) if now < t => Some(self.status_text.clone()),
+                    _ => None,
+                });
             let scale = self
                 .window
                 .as_ref()
@@ -4984,10 +5081,13 @@ impl App {
         } else {
             None
         };
-        let status = match self.status_until {
-            Some(t) if now < t => Some(self.status_text.as_str()),
-            _ => None,
-        };
+        let status = self
+            .render_status_text
+            .as_deref()
+            .or_else(|| match self.status_until {
+                Some(t) if now < t => Some(self.status_text.as_str()),
+                _ => None,
+            });
         // Info panel body (I key) — computed here (App owns nav) and passed into the renderer.
         let info = if self.info_visible {
             self.build_info_string()
@@ -5679,16 +5779,39 @@ impl ApplicationHandler for App {
                     }
                     // M: toggle render mode for formats with multiple modes (e.g. Markdown, CSV/TSV).
                     Key::Character("m") | Key::Character("M") => {
-                        if let Some(fmt) = self.current_format() {
-                            let count = fmt.render_mode_count();
-                            if count > 1 {
-                                let current = self.get_render_mode(fmt);
-                                let next = (current + 1) % count;
-                                self.render_modes.insert(fmt, next);
-                                let mode_name = fmt.render_mode_name(next);
-                                self.show_status(&format!("Render: {mode_name}"));
-                                self.refresh_text_doc();
-                                self.redraw();
+                        if self.current_is_text {
+                            if let Some(fmt) = self.current_format() {
+                                let count = fmt.render_mode_count();
+                                if count > 1 {
+                                    let current = self.get_render_mode(fmt);
+                                    let next = (current + 1) % count;
+                                    self.render_modes.insert(fmt, next);
+                                    let mode_name = fmt.render_mode_name(next);
+                                    self.render_status_text =
+                                        Some(format!("Rendering: {mode_name}"));
+                                    self.text_reload_inflight = true;
+                                    self.text_reload_gen = self.text_reload_gen.wrapping_add(1);
+
+                                    if let Some(path) = self.nav.current_path().cloned() {
+                                        let layout = if self.is_advanced_render_mode() {
+                                            let (win_w, win_h) = self.win_size();
+                                            glanvu_core::PageLayout::from_window_size(win_w, win_h)
+                                        } else {
+                                            glanvu_core::PageLayout::Portrait
+                                        };
+                                        let (win_w, win_h) = self.win_size();
+                                        self.text_reload_mailbox.post(TextReloadRequest {
+                                            gen: self.text_reload_gen,
+                                            path,
+                                            layout,
+                                            render_mode: next,
+                                            target_page: self.current_text_page,
+                                            win_w: win_w.max(1.0) as u32,
+                                            win_h: win_h.max(1.0) as u32,
+                                        });
+                                    }
+                                    self.redraw();
+                                }
                             }
                         }
                     }
@@ -6178,6 +6301,50 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Apply any completed background text document reload.
+        while let Ok(msg) = self.text_reload_rx.try_recv() {
+            if msg.gen != self.text_reload_gen {
+                continue;
+            }
+            self.text_reload_inflight = false;
+            if !self.current_is_text || self.nav.current_path() != Some(&msg.path) {
+                continue;
+            }
+            match msg.result {
+                Ok((doc, img)) => {
+                    let page = self
+                        .current_text_page
+                        .min(doc.page_count().saturating_sub(1));
+                    self.current_text_page = page;
+                    self.text_doc = Some(doc);
+                    if page == msg.target_page {
+                        self.img_size = (img.width, img.height);
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.set_image(&img);
+                        }
+                        self.state = ViewState::fit();
+                        self.flash_overlay();
+                    } else {
+                        self.render_current_text_page();
+                    }
+                    if let Some(path) = self.nav.current_path().cloned() {
+                        self.update_title(self.nav.index, self.nav.paths.len(), &path);
+                    }
+                    // Keep the cartel visible for 1 extra second after the new render is painted.
+                    if let Some(text) = self.render_status_text.take() {
+                        self.show_status(&text);
+                    }
+                    self.redraw();
+                }
+                Err(e) => {
+                    self.render_status_text = None;
+                    eprintln!("glanvu: failed to render text doc: {e}");
+                    self.show_status("Render failed");
+                    self.redraw();
+                }
+            }
+        }
+
         // Apply the completed SVG viewport render (ignore replies from superseded requests).
         while let Ok((gen, col, row, result)) = self.tile_rx.try_recv() {
             if gen != self.svg_vp_gen {
@@ -6264,6 +6431,9 @@ impl ApplicationHandler for App {
                         doc.layout() != target_layout || doc.render_mode() != render_mode
                     });
                     if needs_reload {
+                        self.text_reload_gen = self.text_reload_gen.wrapping_add(1);
+                        self.text_reload_inflight = false;
+                        self.render_status_text = None;
                         self.refresh_text_doc();
                     } else {
                         self.render_current_text_page();
@@ -6282,6 +6452,7 @@ impl ApplicationHandler for App {
         let vp_debounce_deadline = self.plan_svg_viewport(vp_win);
 
         let svg_poll_deadline = self.svg_rerender_inflight.then(|| now + SVG_RERENDER_POLL);
+        let text_reload_poll_deadline = self.text_reload_inflight.then(|| now + SVG_RERENDER_POLL);
         // Keep polling while the SVG viewport render is still in flight in the background.
         let tile_poll_deadline = self
             .svg_vp_pending
@@ -6296,6 +6467,7 @@ impl ApplicationHandler for App {
             self.pdf_rerender_at,
             self.text_rerender_at,
             svg_poll_deadline,
+            text_reload_poll_deadline,
             tile_poll_deadline,
             vp_debounce_deadline,
         ]
@@ -6343,6 +6515,7 @@ pub fn run(path: &str) -> ExitCode {
     let nav = FolderNav::new(paths, index, first_path, first_image);
     let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
     let (tile_queue, tile_rx) = spawn_tile_worker();
+    let (text_reload_mailbox, text_reload_rx) = spawn_text_reload_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -6423,6 +6596,11 @@ pub fn run(path: &str) -> ExitCode {
         current_text_page: 0,
         text_rerender_at: None,
         render_modes: std::collections::HashMap::new(),
+        text_reload_mailbox,
+        text_reload_rx,
+        text_reload_gen: 0,
+        text_reload_inflight: false,
+        render_status_text: None,
     };
 
     match event_loop.run_app(&mut app) {
@@ -6457,6 +6635,7 @@ pub fn run_empty() -> ExitCode {
     );
     let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
     let (tile_queue, tile_rx) = spawn_tile_worker();
+    let (text_reload_mailbox, text_reload_rx) = spawn_text_reload_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -6537,6 +6716,11 @@ pub fn run_empty() -> ExitCode {
         current_text_page: 0,
         text_rerender_at: None,
         render_modes: std::collections::HashMap::new(),
+        text_reload_mailbox,
+        text_reload_rx,
+        text_reload_gen: 0,
+        text_reload_inflight: false,
+        render_status_text: None,
     };
 
     match event_loop.run_app(&mut app) {
