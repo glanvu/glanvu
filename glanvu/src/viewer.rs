@@ -411,17 +411,27 @@ impl TextInput {
     }
 }
 
-/// In-progress quick-open search ("find by name", `F` or `/`).
+/// Target scope of a search operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindTarget {
+    /// Search files in the current folder playlist by filename.
+    Files,
+    /// Search text inside the active document across pages.
+    Document,
+}
+
+/// In-progress quick-open search ("find by name" or "find in document").
 ///
-/// Two presentations share this state. In **single** view it drives a floating modal list of the
-/// top matches. In **grid** view it drives a *live filter*: the grid shows only the matching
-/// thumbnails (re-packed), with a search bar across the top and the cursor on the highlighted
-/// match. The state is the same; only `limit` (list is capped, filter shows all) and `scroll_y`
-/// (filter only) differ.
+/// Presentations share this state:
+/// - In **single** view for **files**, a floating modal list of the top matches.
+/// - In **single** view for **document text**, a top search bar with match counter and live page highlights.
+/// - In **grid** view, a live thumbnail filter across the directory.
 struct FindState {
     /// The query text editor (same inline editor as rename).
     input: TextInput,
-    /// Ranked playlist indices matching the query (best-first), capped to `limit`.
+    /// Active search target (files vs document text).
+    target: FindTarget,
+    /// Ranked playlist indices matching the query (used for FindTarget::Files).
     matches: Vec<usize>,
     /// Highlighted match: index into `matches`.
     sel: usize,
@@ -429,19 +439,50 @@ struct FindState {
     limit: usize,
     /// Vertical scroll offset for the grid filter (physical px). Unused in single view.
     scroll_y: f32,
+    /// Matches found in the text document (used for FindTarget::Document).
+    doc_matches: Vec<glanvu_core::DocMatch>,
+    /// Active match index in `doc_matches`.
+    doc_sel: usize,
 }
 
 /// Maximum number of find matches shown in the single-view modal list at once.
 const FIND_LIMIT: usize = 8;
 
 impl FindState {
-    /// Re-rank `matches` against the current query over `paths`, keeping the highlighted match in
-    /// bounds. Consumes and returns `self` so callers can swap it back in one move.
-    fn recompute_for(mut self, paths: &[PathBuf]) -> Self {
-        let names: Vec<&str> = paths.iter().map(|p| file_name_str(p)).collect();
-        self.matches = glanvu_viewer_core::find::search(&self.input.text(), &names, self.limit);
-        if self.sel >= self.matches.len() {
-            self.sel = self.matches.len().saturating_sub(1);
+    /// Re-rank `matches` or `doc_matches` against the current query.
+    fn recompute_for(
+        mut self,
+        paths: &[PathBuf],
+        text_doc: Option<&glanvu_core::TextDocument>,
+        current_page: usize,
+    ) -> Self {
+        match self.target {
+            FindTarget::Files => {
+                let names: Vec<&str> = paths.iter().map(|p| file_name_str(p)).collect();
+                self.matches =
+                    glanvu_viewer_core::find::search(&self.input.text(), &names, self.limit);
+                if self.sel >= self.matches.len() {
+                    self.sel = self.matches.len().saturating_sub(1);
+                }
+            }
+            FindTarget::Document => {
+                if let Some(doc) = text_doc {
+                    self.doc_matches = doc.search(&self.input.text());
+                    if !self.doc_matches.is_empty() {
+                        let best = self
+                            .doc_matches
+                            .iter()
+                            .position(|m| m.page >= current_page)
+                            .unwrap_or(0);
+                        self.doc_sel = best;
+                    } else {
+                        self.doc_sel = 0;
+                    }
+                } else {
+                    self.doc_matches.clear();
+                    self.doc_sel = 0;
+                }
+            }
         }
         self
     }
@@ -449,6 +490,29 @@ impl FindState {
     /// The playlist index of the highlighted match, if any.
     fn current(&self) -> Option<usize> {
         self.matches.get(self.sel).copied()
+    }
+
+    /// Active document match, if any.
+    fn active_doc_match(&self) -> Option<&glanvu_core::DocMatch> {
+        self.doc_matches.get(self.doc_sel)
+    }
+
+    /// Advance to next document text match with wraparound.
+    fn next_doc_match(&mut self) {
+        if !self.doc_matches.is_empty() {
+            self.doc_sel = (self.doc_sel + 1) % self.doc_matches.len();
+        }
+    }
+
+    /// Retreat to previous document text match with wraparound.
+    fn prev_doc_match(&mut self) {
+        if !self.doc_matches.is_empty() {
+            if self.doc_sel == 0 {
+                self.doc_sel = self.doc_matches.len() - 1;
+            } else {
+                self.doc_sel -= 1;
+            }
+        }
     }
 }
 
@@ -1156,6 +1220,9 @@ struct Gpu {
     explorer_computed_panel_w: f32,
     explorer_bg_bind: wgpu::BindGroup,
     explorer_header_bind: wgpu::BindGroup,
+    // Active document search match indicator (border frame + translucent fill).
+    active_match_uniform_bufs: [wgpu::Buffer; 5],
+    active_match_uniform_binds: [wgpu::BindGroup; 5],
 }
 
 impl Gpu {
@@ -1525,6 +1592,21 @@ impl Gpu {
         // Version label buffer (text + size filled in by `layout_version` on first empty-state draw).
         let version_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
+        // Active document search match indicator uniform buffers (center fill + 4 borders).
+        let (active_match_uniform_bufs, active_match_uniform_binds) = {
+            let b0 = make_uniform_buffer(&device);
+            let b1 = make_uniform_buffer(&device);
+            let b2 = make_uniform_buffer(&device);
+            let b3 = make_uniform_buffer(&device);
+            let b4 = make_uniform_buffer(&device);
+            let g0 = make_uniform_bind(&device, &uniform_layout, &b0);
+            let g1 = make_uniform_bind(&device, &uniform_layout, &b1);
+            let g2 = make_uniform_bind(&device, &uniform_layout, &b2);
+            let g3 = make_uniform_bind(&device, &uniform_layout, &b3);
+            let g4 = make_uniform_bind(&device, &uniform_layout, &b4);
+            ([b0, b1, b2, b3, b4], [g0, g1, g2, g3, g4])
+        };
+
         Gpu {
             surface,
             device,
@@ -1622,6 +1704,8 @@ impl Gpu {
             explorer_computed_panel_w: PANEL_W,
             explorer_bg_bind,
             explorer_header_bind,
+            active_match_uniform_bufs,
+            active_match_uniform_binds,
         }
     }
 
@@ -1756,7 +1840,8 @@ impl Gpu {
         let bw = (text_w + 2.0 * pad)
             .min(win_w - 2.0 * margin)
             .max(2.0 * pad);
-        let bh = self.page_overlay_line_h + 2.0 * pad;
+        let rows = text.lines().count().max(1) as f32;
+        let bh = rows * self.page_overlay_line_h + 2.0 * pad;
         let bx = (win_w - margin - bw).max(0.0); // right-aligned
         let by = margin; // top-aligned
         (bx, by, bw, bh, bx + pad, by + pad)
@@ -2254,7 +2339,9 @@ impl Gpu {
         info: Option<&str>,
         scale: f32,
         logo: bool,
+        find_bar: Option<&str>,
         svg_tiles: &[SvgTileDraw],
+        active_match_rect: Option<(f32, f32, f32, f32)>,
     ) -> bool {
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -2484,6 +2571,22 @@ impl Gpu {
             show_info_box = true;
         }
 
+        // Top search bar (find in document).
+        let mut show_find_bar = false;
+        let mut findbar_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(text) = find_bar {
+            findbar_coords = self.layout_find_bar(text, scale, win_w);
+            let (bx, by, bw, bh, _, _) = findbar_coords;
+            self.queue.write_buffer(
+                &self.findbar_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            show_find_bar = true;
+        }
+
         // Explorer panel (left side).
         let mut show_explorer = false;
         let explorer_sel_y;
@@ -2589,6 +2692,76 @@ impl Gpu {
             show_explorer = true;
         }
 
+        // Active document search match indicator.
+        let show_active_match = active_match_rect.is_some();
+        if let Some((bx, by, bw, bh)) = active_match_rect {
+            let pad = 2.0 * scale;
+            let bx = bx - pad;
+            let by = by - pad;
+            let bw = bw + 2.0 * pad;
+            let bh = bh + 2.0 * pad;
+            let t = (2.5 * scale).round().max(2.0);
+
+            // 0: Center fill
+            self.queue.write_buffer(
+                &self.active_match_uniform_bufs[0],
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(
+                        (bw - 2.0 * t).max(0.0),
+                        (bh - 2.0 * t).max(0.0),
+                        bx + t,
+                        by + t,
+                        win_w,
+                        win_h,
+                    ),
+                }),
+            );
+
+            // 1: Top border
+            self.queue.write_buffer(
+                &self.active_match_uniform_bufs[1],
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, t, bx, by, win_w, win_h),
+                }),
+            );
+
+            // 2: Bottom border
+            self.queue.write_buffer(
+                &self.active_match_uniform_bufs[2],
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, t, bx, by + bh - t, win_w, win_h),
+                }),
+            );
+
+            // 3: Left border
+            self.queue.write_buffer(
+                &self.active_match_uniform_bufs[3],
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(t, (bh - 2.0 * t).max(0.0), bx, by + t, win_w, win_h),
+                }),
+            );
+
+            // 4: Right border
+            self.queue.write_buffer(
+                &self.active_match_uniform_bufs[4],
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(
+                        t,
+                        (bh - 2.0 * t).max(0.0),
+                        bx + bw - t,
+                        by + t,
+                        win_w,
+                        win_h,
+                    ),
+                }),
+            );
+        }
+
         // ---- ONE combined text prepare() call ----
         let need_text = show_overlay_box
             || show_date_box
@@ -2602,7 +2775,8 @@ impl Gpu {
             || show_donate
             || show_help_donate
             || show_about_box
-            || show_info_box;
+            || show_info_box
+            || show_find_bar;
         let text_ok = if need_text {
             self.viewport.update(
                 &self.queue,
@@ -2938,6 +3112,24 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
+            if show_find_bar {
+                let f_buf = &self.findbar_text_buf as *const TextBuffer;
+                let (bx, by, bw, bh, tx, ty) = findbar_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*f_buf },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + bw) as i32,
+                        bottom: (by + bh) as i32,
+                    },
+                    default_color: Color::rgb(228, 228, 231),
+                    custom_glyphs: &[],
+                });
+            }
             self.text_renderer
                 .prepare(
                     &self.device,
@@ -3011,7 +3203,22 @@ impl Gpu {
                 }
             }
 
-            // 1b. Watermark logo (empty state only, hidden when modal/overlay is up).
+            // 1b. Active document search match indicator (bright frame + subtle fill).
+            if show_active_match {
+                // Translucent fill
+                pass.set_bind_group(0, &self.active_match_uniform_binds[0], &[]);
+                pass.set_bind_group(1, &self.marquee_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+
+                // 4 border edges (bright sky blue)
+                for i in 1..5 {
+                    pass.set_bind_group(0, &self.active_match_uniform_binds[i], &[]);
+                    pass.set_bind_group(1, &self.sel_bind, &[]);
+                    pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+                }
+            }
+
+            // 1c. Watermark logo (empty state only, hidden when modal/overlay is up).
             if logo && !modal_active {
                 pass.set_bind_group(0, &self.watermark_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.watermark_bind, &[]);
@@ -3085,6 +3292,13 @@ impl Gpu {
             // 6c. Info overlay box (I key) — top-left, same translucent dark bg as help/about.
             if show_info_box {
                 pass.set_bind_group(0, &self.info_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+
+            // 6d. Find bar (top strip).
+            if show_find_bar {
+                pass.set_bind_group(0, &self.findbar_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
@@ -3641,6 +3855,16 @@ struct App {
     text_reload_inflight: bool,
     /// Dedicated status message while a text document reload is in-flight.
     render_status_text: Option<String>,
+    /// Last chosen search target in single view (defaults to Document when viewing a text file).
+    last_find_target: FindTarget,
+    /// Last query used for in-document text search (persisted for `n` / `N` navigation).
+    last_doc_search_query: Option<String>,
+    /// Last selected match index for in-document text search.
+    last_doc_search_sel: usize,
+    /// Cached matches for active in-document text search.
+    last_doc_search_matches: Vec<glanvu_core::DocMatch>,
+    /// Whether standalone in-document search highlights are currently active.
+    doc_search_highlighted: bool,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
@@ -3692,7 +3916,8 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("← / →", "previous · next image"),
     Keys("↑ / ↓", "turn page (PDF · text)"),
     Keys("Home / End", "first · last image"),
-    Keys("F  ·  /", "find by name"),
+    Keys("F  ·  /  ·  Cmd+F", "find (in document · file)"),
+    Keys("arrows / n / N", "next · previous match"),
     Keys("Enter", "directory explorer"),
     Keys("Tab / G", "thumbnail grid"),
     Section("View"),
@@ -3934,11 +4159,24 @@ impl App {
         } else {
             None
         };
+        self.last_doc_search_matches = self
+            .text_doc
+            .as_ref()
+            .and_then(|d| self.last_doc_search_query.as_ref().map(|q| d.search(q)))
+            .unwrap_or_default();
         if let Some(doc) = self.text_doc.as_ref() {
             self.current_text_page = self
                 .current_text_page
                 .min(doc.page_count().saturating_sub(1));
-            self.render_current_text_page();
+            if self
+                .find
+                .as_ref()
+                .is_some_and(|f| f.target == FindTarget::Document)
+            {
+                self.find_recompute();
+            } else {
+                self.render_current_text_page();
+            }
         }
     }
 
@@ -3958,6 +4196,15 @@ impl App {
     /// Render `self.current_text_page` of the current text document at the window's resolution
     /// and upload it as the displayed texture, resetting zoom/pan to fit.
     fn render_current_text_page(&mut self) {
+        self.render_current_text_page_inner(false);
+    }
+
+    /// Render `self.current_text_page` of the current text document, preserving existing zoom/pan.
+    fn render_current_text_page_preserving_view(&mut self) {
+        self.render_current_text_page_inner(true);
+    }
+
+    fn render_current_text_page_inner(&mut self, preserve_view: bool) {
         let Some(doc) = self.text_doc.as_ref() else {
             return;
         };
@@ -3966,15 +4213,49 @@ impl App {
         let render_result = page_size.and_then(|(pw, ph)| {
             let (out_w, out_h) =
                 glanvu_core::fit_within(pw, ph, win_w.max(1.0) as u32, win_h.max(1.0) as u32);
-            doc.render_page(self.current_text_page, out_w, out_h)
+            if let Some(st) = self
+                .find
+                .as_ref()
+                .filter(|f| f.target == FindTarget::Document)
+            {
+                doc.render_page_with_search(
+                    self.current_text_page,
+                    out_w,
+                    out_h,
+                    &st.doc_matches,
+                    Some(st.doc_sel),
+                )
+            } else if self.doc_search_highlighted {
+                if let Some(query) = self.last_doc_search_query.as_ref() {
+                    let matches = doc.search(query);
+                    if !matches.is_empty() {
+                        doc.render_page_with_search(
+                            self.current_text_page,
+                            out_w,
+                            out_h,
+                            &matches,
+                            None,
+                        )
+                    } else {
+                        doc.render_page(self.current_text_page, out_w, out_h)
+                    }
+                } else {
+                    doc.render_page(self.current_text_page, out_w, out_h)
+                }
+            } else {
+                doc.render_page(self.current_text_page, out_w, out_h)
+            }
         });
         match render_result {
             Ok(img) => {
+                let size_changed = self.img_size != (img.width, img.height);
                 self.img_size = (img.width, img.height);
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.set_image(&img);
                 }
-                self.state = ViewState::fit();
+                if !preserve_view || size_changed {
+                    self.state = ViewState::fit();
+                }
                 self.flash_overlay();
             }
             Err(e) => {
@@ -4288,30 +4569,57 @@ impl App {
 
     // --- Quick-open search (find by name) ---
 
-    /// Open find, seeded with an empty query. In single view this is a floating match list (capped
-    /// at `FIND_LIMIT`); in grid view it is a live filter showing every match (`usize::MAX`).
-    fn begin_find(&mut self) {
+    // --- Quick-open search (find by name / find in document) ---
+
+    /// Open find, seeded with an empty query.
+    fn begin_find(&mut self, preferred_target: Option<FindTarget>) {
         let limit = if self.mode == ViewMode::Grid {
             usize::MAX
         } else {
             FIND_LIMIT
         };
+        let target =
+            if self.mode == ViewMode::Grid || !self.current_is_text || self.text_doc.is_none() {
+                FindTarget::Files
+            } else {
+                preferred_target.unwrap_or(self.last_find_target)
+            };
+        self.last_find_target = target;
+        self.doc_search_highlighted = false;
+        if target == FindTarget::Document {
+            if let Some(fmt) = self.current_format() {
+                if self.get_render_mode(fmt) != 0 {
+                    self.render_modes.insert(fmt, 0);
+                    self.refresh_text_doc();
+                }
+            }
+        }
         let st = FindState {
             input: TextInput::new(""),
+            target,
             matches: Vec::new(),
             sel: 0,
             limit,
             scroll_y: 0.0,
+            doc_matches: Vec::new(),
+            doc_sel: 0,
         };
-        self.find = Some(st.recompute_for(&self.nav.paths));
+        self.find = Some(st.recompute_for(
+            &self.nav.paths,
+            self.text_doc.as_ref(),
+            self.current_text_page,
+        ));
         self.redraw();
     }
 
-    /// Re-rank matches for the current query and clamp the highlighted match. In the grid filter
-    /// the highlight resets to the best match, so keep it scrolled into view.
+    /// Re-rank matches for the current query and clamp the highlighted match.
     fn find_recompute(&mut self) {
         if let Some(st) = self.find.take() {
-            self.find = Some(st.recompute_for(&self.nav.paths));
+            self.find = Some(st.recompute_for(
+                &self.nav.paths,
+                self.text_doc.as_ref(),
+                self.current_text_page,
+            ));
         }
         if self.mode == ViewMode::Grid {
             self.find_scroll_to_cursor();
@@ -4393,7 +4701,31 @@ impl App {
     /// list (highlighted row marked with `▶`), and key hints. Reuses the shared modal box.
     fn find_text(&self) -> Option<String> {
         let st = self.find.as_ref()?;
-        let mut out = format!("Find image\n\n  {}\n\n", st.input.display_with_caret());
+        if self.mode == ViewMode::Grid {
+            return None;
+        }
+        if st.target == FindTarget::Document {
+            let title = "Find in document  [● In doc  ○ Files] (Tab)";
+            let q = st.input.display_with_caret();
+            let mut out = format!("{title}\n\n  {q}\n\n");
+            if st.input.chars.is_empty() {
+                out.push_str("(type query to search in document)\n");
+            } else if st.doc_matches.is_empty() {
+                out.push_str("(no matches found)\n");
+            } else {
+                let n = st.doc_matches.len();
+                let word = if n == 1 { "match" } else { "matches" };
+                out.push_str(&format!("{n} {word} found\n"));
+            }
+            out.push_str("\nEnter = highlight matches   Tab = find files   Esc = cancel");
+            return Some(out);
+        }
+        let title = if self.current_is_text {
+            "Find file  [○ In doc  ● Files] (Tab)"
+        } else {
+            "Find image"
+        };
+        let mut out = format!("{title}\n\n  {}\n\n", st.input.display_with_caret());
         if st.matches.is_empty() {
             out.push_str("(no matches)");
         } else {
@@ -4410,7 +4742,11 @@ impl App {
                 out.push('\n');
             }
         }
-        out.push_str("\n↑↓ select   Enter = open   Esc = cancel");
+        if self.current_is_text {
+            out.push_str("\n↑↓ select   Enter = open   Tab = in-doc search   Esc = cancel");
+        } else {
+            out.push_str("\n↑↓ select   Enter = open   Esc = cancel");
+        }
         Some(out)
     }
 
@@ -4423,6 +4759,100 @@ impl App {
             "Find:  {}     {n} {word}     ↵ open   Esc clear",
             st.input.display_with_caret()
         ))
+    }
+
+    /// Jump to next or previous match using the last search query without opening the find prompt.
+    fn doc_search_jump(&mut self, next: bool) {
+        if let Some(fmt) = self.current_format() {
+            if self.get_render_mode(fmt) != 0 {
+                self.render_modes.insert(fmt, 0);
+                self.refresh_text_doc();
+            }
+        }
+        let Some(doc) = self.text_doc.as_ref() else {
+            return;
+        };
+        let Some(query) = self.last_doc_search_query.clone() else {
+            self.begin_find(Some(FindTarget::Document));
+            return;
+        };
+        if self.last_doc_search_matches.is_empty() {
+            self.last_doc_search_matches = doc.search(&query);
+        }
+        if self.last_doc_search_matches.is_empty() {
+            self.show_status(&format!("No matches for \"{query}\""));
+            self.redraw();
+            return;
+        }
+        let matches_len = self.last_doc_search_matches.len();
+        if self.last_doc_search_sel >= matches_len {
+            let current_page = self.current_text_page;
+            self.last_doc_search_sel = self
+                .last_doc_search_matches
+                .iter()
+                .position(|m| m.page >= current_page)
+                .unwrap_or(0);
+        }
+        if next {
+            self.last_doc_search_sel = (self.last_doc_search_sel + 1) % matches_len;
+        } else if self.last_doc_search_sel == 0 {
+            self.last_doc_search_sel = matches_len - 1;
+        } else {
+            self.last_doc_search_sel -= 1;
+        }
+        let m = self.last_doc_search_matches[self.last_doc_search_sel].clone();
+        let was_highlighted = self.doc_search_highlighted;
+        let page_changed = m.page != self.current_text_page;
+        self.doc_search_highlighted = true;
+        if page_changed || !was_highlighted {
+            self.current_text_page = m.page;
+            self.render_current_text_page();
+        }
+        self.redraw();
+    }
+
+    /// Calculate the on-screen physical pixel bounding box of the active search match.
+    fn calc_active_match_rect(&self, win: (f32, f32)) -> Option<(f32, f32, f32, f32)> {
+        let doc = self.text_doc.as_ref()?;
+        let m = self.last_doc_search_matches.get(self.last_doc_search_sel)?;
+        if m.page != self.current_text_page {
+            return None;
+        }
+        let (token_x, token_y, token_w, token_h) = doc.match_rect(m)?;
+        let (pw, ph) = doc.layout().dimensions();
+        let scale = image_scale(self.img_size, win, &self.state);
+        let sx = self.img_size.0 as f32 / pw as f32;
+        let sy = self.img_size.1 as f32 / ph as f32;
+
+        let iw = self.img_size.0 as f32;
+        let ih = self.img_size.1 as f32;
+
+        // Token center in texture pixel coordinates (top-left is (0,0), Y goes down)
+        let token_center_x = (token_x + token_w / 2.0) * sx;
+        let token_center_y = (token_y + token_h / 2.0) * sy;
+
+        // Map to model coordinates (center is (0,0), Y goes UP)
+        let x_m = (token_center_x - iw / 2.0) * scale;
+        let y_m = (ih / 2.0 - token_center_y) * scale;
+
+        // Apply identical rotation matrix as mvp
+        let rot =
+            Mat4::from_rotation_z(self.state.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
+        let rot_pt = rot.transform_point3(Vec3::new(x_m, y_m, 0.0));
+
+        let screen_center_x = win.0 / 2.0 + self.state.pan.0 + rot_pt.x;
+        let screen_center_y = win.1 / 2.0 - self.state.pan.1 - rot_pt.y;
+
+        let (bw, bh) = if self.state.quarter_turns % 2 == 1 {
+            (token_h * sy * scale, token_w * sx * scale)
+        } else {
+            (token_w * sx * scale, token_h * sy * scale)
+        };
+
+        let bx = screen_center_x - bw / 2.0;
+        let by = screen_center_y - bh / 2.0;
+
+        Some((bx, by, bw, bh))
     }
 
     /// Perform the on-disk rename (trashing the target first if it already exists), then update
@@ -4805,6 +5235,7 @@ impl App {
 
     fn enter_grid(&mut self) {
         self.stop_slideshow();
+        self.doc_search_highlighted = false;
         self.last_single_click = None;
         self.mode = ViewMode::Grid;
         // Start with the current image as the sole selection (fresh each time the grid opens).
@@ -4867,6 +5298,8 @@ impl App {
     }
 
     fn apply_nav_result(&mut self, res: glanvu_viewer_core::nav::ShowResult) {
+        self.find = None;
+        self.doc_search_highlighted = false;
         self.last_single_click = None;
         self.img_size = res.img_size;
         self.current_is_svg = glanvu_core::is_svg_path(&res.path);
@@ -4975,7 +5408,9 @@ impl App {
                 None, // no image in empty mode → no info panel
                 scale,
                 true,
-                &[], // no SVG tiles in the empty state
+                None, // no find bar in empty mode
+                &[],  // no SVG tiles in the empty state
+                None, // no active match in empty mode
             );
             return;
         }
@@ -5065,8 +5500,30 @@ impl App {
         } else {
             None
         };
-        // Page overlay (top-right, "N/M") — same timer as the path/date overlays, PDF and text documents.
-        let page_overlay_text = if overlay_active {
+        // Page overlay (top-right, "N/M") — in search mode, pinned as "'Query' 3/40".
+        let page_overlay_text = if self.doc_search_highlighted {
+            if let Some(query) = self.last_doc_search_query.as_ref() {
+                let matches_len = self.last_doc_search_matches.len();
+                if matches_len > 0 {
+                    let curr = (self.last_doc_search_sel + 1).min(matches_len);
+                    let m = &self.last_doc_search_matches
+                        [self.last_doc_search_sel.min(matches_len - 1)];
+                    let col_str = format!("c. {}", m.line_col + 1);
+                    let pos_str = if let Some(num) = m.line_number {
+                        format!("(p. {}, l. {}, {col_str})", m.page + 1, num)
+                    } else {
+                        format!("(p. {}, {col_str})", m.page + 1)
+                    };
+                    Some(format!(
+                        "'{query}' {curr}/{matches_len}\n{pos_str}\nEsc to exit"
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if overlay_active {
             if self.current_is_pdf {
                 self.pdf_doc
                     .as_ref()
@@ -5101,6 +5558,11 @@ impl App {
             .as_ref()
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
+        let active_match_rect = if self.doc_search_highlighted {
+            self.calc_active_match_rect(win_phys)
+        } else {
+            None
+        };
         let Some(gpu) = self.gpu.as_mut() else { return };
         let win = (gpu.config.width as f32, gpu.config.height as f32);
         let explorer_ref = self.explorer.as_ref();
@@ -5120,7 +5582,9 @@ impl App {
             info.as_deref(),
             scale,
             false,
+            None,
             &svg_tile_draws,
+            active_match_rect,
         );
         if presented {
             if !self.first_frame {
@@ -5393,19 +5857,91 @@ impl ApplicationHandler for App {
                 // highlighted match; Esc closes (in grid, selecting the match in the full grid).
                 if self.find.is_some() {
                     let in_grid = self.mode == ViewMode::Grid;
+                    let is_doc = self
+                        .find
+                        .as_ref()
+                        .is_some_and(|f| f.target == FindTarget::Document);
                     match event.logical_key.as_ref() {
                         Key::Named(NamedKey::Escape) => {
                             if in_grid {
                                 self.find_close_grid();
                             } else {
                                 self.find = None;
+                                self.doc_search_highlighted = false;
+                                if self.current_is_text {
+                                    self.render_current_text_page_preserving_view();
+                                }
                                 self.redraw();
                             }
                         }
-                        Key::Named(NamedKey::Enter) => self.find_open_selected(),
+                        Key::Named(NamedKey::Tab) => {
+                            if self.current_is_text && self.text_doc.is_some() && !in_grid {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.target = match st.target {
+                                        FindTarget::Files => FindTarget::Document,
+                                        FindTarget::Document => FindTarget::Files,
+                                    };
+                                    self.last_find_target = st.target;
+                                }
+                                if self
+                                    .find
+                                    .as_ref()
+                                    .is_some_and(|f| f.target == FindTarget::Document)
+                                {
+                                    if let Some(fmt) = self.current_format() {
+                                        if self.get_render_mode(fmt) != 0 {
+                                            self.render_modes.insert(fmt, 0);
+                                            self.refresh_text_doc();
+                                        }
+                                    }
+                                }
+                                self.find_recompute();
+                                if self
+                                    .find
+                                    .as_ref()
+                                    .is_some_and(|f| f.target == FindTarget::Files)
+                                {
+                                    self.render_current_text_page_preserving_view();
+                                }
+                                self.redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            if is_doc {
+                                if let Some(st) = self.find.take() {
+                                    let query = st.input.text();
+                                    if query.is_empty() || st.doc_matches.is_empty() {
+                                        self.last_doc_search_matches.clear();
+                                        self.doc_search_highlighted = false;
+                                        self.show_status("No matches found");
+                                        self.render_current_text_page_preserving_view();
+                                        self.redraw();
+                                        return;
+                                    }
+                                    self.last_doc_search_query = Some(query);
+                                    self.last_doc_search_matches = st.doc_matches.clone();
+                                    self.last_doc_search_sel = st.doc_sel;
+                                    self.doc_search_highlighted = true;
+                                    let Some(m) = st.active_doc_match() else {
+                                        return;
+                                    };
+                                    let page_changed = m.page != self.current_text_page;
+                                    self.current_text_page = m.page;
+                                    self.render_current_text_page_inner(!page_changed);
+                                    self.redraw();
+                                }
+                            } else {
+                                self.find_open_selected();
+                            }
+                        }
                         Key::Named(NamedKey::ArrowDown) => {
                             if in_grid {
                                 self.find_grid_move(0, 1);
+                            } else if is_doc {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.next_doc_match();
+                                }
+                                self.redraw();
                             } else {
                                 if let Some(st) = self.find.as_mut() {
                                     if !st.matches.is_empty() {
@@ -5418,6 +5954,11 @@ impl ApplicationHandler for App {
                         Key::Named(NamedKey::ArrowUp) => {
                             if in_grid {
                                 self.find_grid_move(0, -1);
+                            } else if is_doc {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.prev_doc_match();
+                                }
+                                self.redraw();
                             } else {
                                 if let Some(st) = self.find.as_mut() {
                                     if !st.matches.is_empty() {
@@ -5443,6 +5984,26 @@ impl ApplicationHandler for App {
                             } else {
                                 if let Some(st) = self.find.as_mut() {
                                     st.input.right();
+                                }
+                                self.redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::Home) => {
+                            if in_grid {
+                                // grid home
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.input.home();
+                                }
+                                self.redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::End) => {
+                            if in_grid {
+                                // grid end
+                            } else {
+                                if let Some(st) = self.find.as_mut() {
+                                    st.input.end();
                                 }
                                 self.redraw();
                             }
@@ -5585,7 +6146,7 @@ impl ApplicationHandler for App {
                         Key::Character("q") | Key::Character("Q") => event_loop.exit(),
                         // Find by name: `F` or `/`.
                         Key::Character("f") | Key::Character("F") | Key::Character("/") => {
-                            self.begin_find()
+                            self.begin_find(Some(FindTarget::Files))
                         }
                         // Toggle sort order (name / date), keeping the selection.
                         Key::Character("o") | Key::Character("O") => self.grid_cycle_sort(),
@@ -5737,13 +6298,40 @@ impl ApplicationHandler for App {
                 }
 
                 match event.logical_key.as_ref() {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Escape) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_highlighted = false;
+                            self.render_current_text_page_preserving_view();
+                            self.redraw();
+                            return;
+                        }
+                        event_loop.exit();
+                    }
                     Key::Character("q") | Key::Character("Q") => event_loop.exit(),
-                    // Find by name: `F` or `/` (fullscreen is on Space / F11 only).
+                    // Find: `F` or `/` or `Cmd/Ctrl+F`.
                     Key::Character("f") | Key::Character("F") | Key::Character("/") => {
-                        self.begin_find()
+                        let cmd_ctrl = self.modifiers.control_key() || self.modifiers.super_key();
+                        if cmd_ctrl && self.current_is_text {
+                            self.begin_find(Some(FindTarget::Document));
+                        } else {
+                            self.begin_find(None);
+                        }
+                    }
+                    Key::Character("n") => {
+                        if self.current_is_text {
+                            self.doc_search_jump(true);
+                        }
+                    }
+                    Key::Character("N") => {
+                        if self.current_is_text {
+                            self.doc_search_jump(false);
+                        }
                     }
                     Key::Character("h") | Key::Character("H") | Key::Character("?") => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_highlighted = false;
+                            self.render_current_text_page_preserving_view();
+                        }
                         self.help_visible = true;
                         self.about_visible = false;
                         self.info_visible = false;
@@ -5779,6 +6367,9 @@ impl ApplicationHandler for App {
                     }
                     // M: toggle render mode for formats with multiple modes (e.g. Markdown, CSV/TSV).
                     Key::Character("m") | Key::Character("M") => {
+                        if self.doc_search_highlighted || self.find.is_some() {
+                            return;
+                        }
                         if self.current_is_text {
                             if let Some(fmt) = self.current_format() {
                                 let count = fmt.render_mode_count();
@@ -5822,6 +6413,12 @@ impl ApplicationHandler for App {
                     // F5: force a full refresh (re-scan + drop all caches).
                     Key::Named(NamedKey::F5) => self.force_refresh(),
                     Key::Named(NamedKey::Space) | Key::Named(NamedKey::F11) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_highlighted = false;
+                            self.render_current_text_page_preserving_view();
+                            self.redraw();
+                            return;
+                        }
                         self.toggle_fullscreen();
                         self.flash_overlay();
                         self.redraw();
@@ -5858,28 +6455,44 @@ impl ApplicationHandler for App {
                         self.redraw();
                     }
                     // Enter opens / closes the directory explorer.
+                    // Enter opens / closes the directory explorer (or clears search highlights if active).
                     Key::Named(NamedKey::Enter) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_highlighted = false;
+                            self.render_current_text_page_preserving_view();
+                            self.redraw();
+                            return;
+                        }
                         self.open_explorer();
                         self.redraw();
                     }
-                    // Left/Right always change files — unaffected by PDF page state (D13's
-                    // navigation model). Manual navigation stops the slideshow (user took
-                    // control).
+                    // Left/Right change files; when in search results mode, jump to prev/next match.
                     Key::Named(NamedKey::ArrowRight) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_jump(true);
+                            return;
+                        }
                         self.stop_slideshow();
                         if let Some(res) = self.nav.next() {
                             self.apply_nav_result(res);
                         }
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_jump(false);
+                            return;
+                        }
                         self.stop_slideshow();
                         if let Some(res) = self.nav.prev() {
                             self.apply_nav_result(res);
                         }
                     }
-                    // Down/Up: page-turn a multi-page PDF or text document (clamped, no wraparound);
-                    // for every other file, fall through to today's next/prev-file behavior (D13).
+                    // Down/Up: page-turn a multi-page PDF or text document; in search results mode, jump matches.
                     Key::Named(NamedKey::ArrowDown) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_jump(true);
+                            return;
+                        }
                         if self.current_is_pdf {
                             self.turn_pdf_page(1);
                         } else if self.current_is_text {
@@ -5892,6 +6505,10 @@ impl ApplicationHandler for App {
                         }
                     }
                     Key::Named(NamedKey::ArrowUp) => {
+                        if self.doc_search_highlighted {
+                            self.doc_search_jump(false);
+                            return;
+                        }
                         if self.current_is_pdf {
                             self.turn_pdf_page(-1);
                         } else if self.current_is_text {
@@ -6317,7 +6934,21 @@ impl ApplicationHandler for App {
                         .min(doc.page_count().saturating_sub(1));
                     self.current_text_page = page;
                     self.text_doc = Some(doc);
-                    if page == msg.target_page {
+                    if let Some(query) = self.last_doc_search_query.as_ref() {
+                        if let Some(d) = self.text_doc.as_ref() {
+                            self.last_doc_search_matches = d.search(query);
+                        }
+                    } else {
+                        self.last_doc_search_matches.clear();
+                    }
+                    if self
+                        .find
+                        .as_ref()
+                        .is_some_and(|f| f.target == FindTarget::Document)
+                    {
+                        self.find_recompute();
+                        self.render_current_text_page();
+                    } else if page == msg.target_page && !self.doc_search_highlighted {
                         self.img_size = (img.width, img.height);
                         if let Some(gpu) = self.gpu.as_mut() {
                             gpu.set_image(&img);
@@ -6601,6 +7232,11 @@ pub fn run(path: &str) -> ExitCode {
         text_reload_gen: 0,
         text_reload_inflight: false,
         render_status_text: None,
+        last_find_target: FindTarget::Document,
+        last_doc_search_query: None,
+        last_doc_search_sel: 0,
+        last_doc_search_matches: Vec::new(),
+        doc_search_highlighted: false,
     };
 
     match event_loop.run_app(&mut app) {
@@ -6721,6 +7357,11 @@ pub fn run_empty() -> ExitCode {
         text_reload_gen: 0,
         text_reload_inflight: false,
         render_status_text: None,
+        last_find_target: FindTarget::Document,
+        last_doc_search_query: None,
+        last_doc_search_sel: 0,
+        last_doc_search_matches: Vec::new(),
+        doc_search_highlighted: false,
     };
 
     match event_loop.run_app(&mut app) {
@@ -6736,7 +7377,8 @@ pub fn run_empty() -> ExitCode {
 mod tests {
     use super::{
         clamped_page_turn, human_size, ideal_window_size, image_scale, is_double_click, pad_region,
-        region_covers, tile_mvp, visible_image_rect, FindState, TextInput, ViewMode, ViewState,
+        region_covers, tile_mvp, visible_image_rect, FindState, FindTarget, TextInput, ViewMode,
+        ViewState,
     };
     use std::path::PathBuf;
     use std::time::Instant;
@@ -6941,10 +7583,13 @@ mod tests {
         let mut confirm_rename = Some((PathBuf::from("a.png"), PathBuf::from("b.png")));
         let mut find = Some(FindState {
             input: TextInput::new("test"),
+            target: FindTarget::Files,
             matches: vec![0],
             sel: 0,
             limit: 8,
             scroll_y: 0.0,
+            doc_matches: Vec::new(),
+            doc_sel: 0,
         });
         let mut last_single_click = Some((Instant::now(), (10.0, 10.0)));
         let mut mode = ViewMode::Grid;

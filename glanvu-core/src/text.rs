@@ -170,6 +170,25 @@ struct VisualRow {
     diff_kind: Option<DiffLineKind>,
 }
 
+/// A search match inside a paginated text document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocMatch {
+    /// 0-based page index.
+    pub page: usize,
+    /// 0-based visual row index within the page.
+    pub row: usize,
+    /// 1-based original source line number, if available.
+    pub line_number: Option<usize>,
+    /// Column offset in characters within the visual row (including indent).
+    pub col: usize,
+    /// 0-based character column offset within the logical source line.
+    pub line_col: usize,
+    /// Length of the match in characters.
+    pub len: usize,
+    /// Text of the matching visual row.
+    pub row_text: String,
+}
+
 /// A parsed plain text document, paginated and ready to render.
 #[derive(Debug, Clone)]
 pub struct TextDocument {
@@ -181,6 +200,116 @@ pub struct TextDocument {
 }
 
 impl TextDocument {
+    /// Find all occurrences of `query` across all pages of the document.
+    ///
+    /// Matches are case-insensitive, Unicode-aware, and preserve correct visual coordinates
+    /// even when words wrap across visual rows.
+    pub fn search(&self, query: &str) -> Vec<DocMatch> {
+        if query.is_empty() || query.trim().is_empty() {
+            return Vec::new();
+        }
+        let lower_q: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
+        if lower_q.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = Vec::new();
+        let mut current_line_chunks: Vec<(usize, usize, &VisualRow)> = Vec::new();
+
+        for (page_idx, page) in self.pages.iter().enumerate() {
+            for (row_idx, row) in page.iter().enumerate() {
+                current_line_chunks.push((page_idx, row_idx, row));
+                if row.is_last_chunk {
+                    Self::search_logical_line(&current_line_chunks, &lower_q, &mut matches);
+                    current_line_chunks.clear();
+                }
+            }
+        }
+        if !current_line_chunks.is_empty() {
+            Self::search_logical_line(&current_line_chunks, &lower_q, &mut matches);
+        }
+
+        matches
+    }
+
+    fn search_logical_line(
+        chunks: &[(usize, usize, &VisualRow)],
+        lower_q: &[char],
+        matches: &mut Vec<DocMatch>,
+    ) {
+        let q_len = lower_q.len();
+        let mut lower_chars = Vec::new();
+        let mut char_map = Vec::new();
+
+        let line_number = chunks.first().and_then(|(_, _, r)| r.line_number);
+
+        let mut running_line_col = 0;
+        for (page_idx, row_idx, row) in chunks {
+            for (char_idx, c) in row.text.chars().enumerate() {
+                let col = row.indent_cols + char_idx;
+                let line_col = running_line_col + char_idx;
+                for lc in c.to_lowercase() {
+                    lower_chars.push(lc);
+                    char_map.push((*page_idx, *row_idx, col, line_col, line_number));
+                }
+            }
+            running_line_col += row.text.chars().count();
+        }
+
+        if lower_chars.len() < q_len {
+            return;
+        }
+
+        let mut i = 0;
+        while i + q_len <= lower_chars.len() {
+            if lower_chars[i..i + q_len] == *lower_q {
+                let (start_page, start_row, start_col, start_line_col, lnum) = char_map[i];
+                let (end_page, end_row, end_col, _, _) = char_map[i + q_len - 1];
+
+                if start_page == end_page && start_row == end_row {
+                    let len = end_col.saturating_sub(start_col) + 1;
+                    let row_text = chunks
+                        .iter()
+                        .find(|(p, r, _)| *p == start_page && *r == start_row)
+                        .map(|(_, _, r)| r.text.clone())
+                        .unwrap_or_default();
+                    matches.push(DocMatch {
+                        page: start_page,
+                        row: start_row,
+                        line_number: lnum,
+                        col: start_col,
+                        line_col: start_line_col,
+                        len,
+                        row_text,
+                    });
+                } else {
+                    let row_text = chunks
+                        .iter()
+                        .find(|(p, r, _)| *p == start_page && *r == start_row)
+                        .map(|(_, _, r)| r.text.clone())
+                        .unwrap_or_default();
+                    let chunk_total_cols = chunks
+                        .iter()
+                        .find(|(p, r, _)| *p == start_page && *r == start_row)
+                        .map(|(_, _, r)| r.indent_cols + r.text.chars().count())
+                        .unwrap_or(start_col + 1);
+                    let len = chunk_total_cols.saturating_sub(start_col).max(1);
+                    matches.push(DocMatch {
+                        page: start_page,
+                        row: start_row,
+                        line_number: lnum,
+                        col: start_col,
+                        line_col: start_line_col,
+                        len,
+                        row_text,
+                    });
+                }
+                i += q_len;
+            } else {
+                i += 1;
+            }
+        }
+    }
     /// Active page layout orientation.
     pub fn layout(&self) -> PageLayout {
         self.layout
@@ -1138,6 +1267,16 @@ impl TextDocument {
 
     /// Generate the SVG representation of a given page (0-based).
     pub fn page_svg(&self, page_index: usize) -> Result<String> {
+        self.page_svg_with_search(page_index, &[], None)
+    }
+
+    /// Generate the SVG representation of a given page (0-based) with search highlights.
+    pub fn page_svg_with_search(
+        &self,
+        page_index: usize,
+        matches: &[DocMatch],
+        active_match_idx: Option<usize>,
+    ) -> Result<String> {
         let rows = self
             .pages
             .get(page_index)
@@ -1171,8 +1310,64 @@ impl TextDocument {
             "ui-monospace, Menlo, Monaco, Consolas, monospace"
         };
 
+        let page_matches: Vec<(usize, &DocMatch)> = matches
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.page == page_index)
+            .collect();
+
         for (row_idx, row) in rows.iter().enumerate() {
             let y = top_y + (row_idx as i32 + 1) * line_height;
+
+            let this_row_matches: Vec<(usize, &DocMatch)> = page_matches
+                .iter()
+                .copied()
+                .filter(|(_, m)| m.row == row_idx)
+                .collect();
+
+            if !this_row_matches.is_empty() {
+                let has_active = this_row_matches
+                    .iter()
+                    .any(|(idx, _)| active_match_idx == Some(*idx));
+                let row_fill = if has_active { "#38bdf8" } else { "#fbbf24" };
+                let row_opacity = if has_active { "0.22" } else { "0.14" };
+                let row_rect_x = if is_advanced { 42 } else { 104 };
+                let row_rect_w = page_w.saturating_sub(row_rect_x + 30);
+                let row_y = y - 18;
+                svg.push_str(&format!(
+                    r##"<rect x="{row_rect_x}" y="{row_y}" width="{row_rect_w}" height="24" rx="4" fill="{row_fill}" fill-opacity="{row_opacity}"/>
+"##
+                ));
+
+                if !is_md_reader || row.is_table_row {
+                    let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
+                        15
+                    } else {
+                        19
+                    };
+                    let char_w: f32 = if font_size_val == 15 { 9.0 } else { 11.43 };
+                    for (global_idx, m) in &this_row_matches {
+                        let is_active = active_match_idx == Some(*global_idx);
+                        let token_x = text_x as f32 + (m.col as f32) * char_w - 1.0;
+                        let token_w = (m.len as f32) * char_w + 2.0;
+                        let token_y = y - 18;
+                        let (fill, opacity, stroke) = if is_active {
+                            (
+                                "#38bdf8",
+                                "0.65",
+                                r##" stroke="#e0f2fe" stroke-width="1.5""##,
+                            )
+                        } else {
+                            ("#fbbf24", "0.35", "")
+                        };
+                        svg.push_str(&format!(
+                            r##"<rect x="{token_x:.1}" y="{token_y}" width="{token_w:.1}" height="22" rx="3" fill="{fill}" fill-opacity="{opacity}"{stroke}/>
+"##
+                        ));
+                    }
+                }
+            }
+
             if !is_advanced {
                 if let Some(num) = row.line_number {
                     svg.push_str(&format!(
@@ -1306,14 +1501,67 @@ impl TextDocument {
 
     /// Render a page (0-based) at explicit output dimensions `(out_w, out_h)`.
     pub fn render_page(&self, page_index: usize, out_w: u32, out_h: u32) -> Result<DecodedImage> {
-        let svg = self.page_svg(page_index)?;
+        self.render_page_with_search(page_index, out_w, out_h, &[], None)
+    }
+
+    /// Render a page (0-based) at explicit output dimensions `(out_w, out_h)` with search highlights.
+    pub fn render_page_with_search(
+        &self,
+        page_index: usize,
+        out_w: u32,
+        out_h: u32,
+        matches: &[DocMatch],
+        active_match_idx: Option<usize>,
+    ) -> Result<DecodedImage> {
+        let svg = self.page_svg_with_search(page_index, matches, active_match_idx)?;
         decode_svg_bytes(svg.as_bytes(), Some((out_w, out_h)))
     }
 
     /// Render a page (0-based) at its native resolution according to layout.
     pub fn render_fit(&self, page_index: usize) -> Result<DecodedImage> {
+        self.render_fit_with_search(page_index, &[], None)
+    }
+
+    /// Render a page (0-based) at its native resolution with search highlights.
+    pub fn render_fit_with_search(
+        &self,
+        page_index: usize,
+        matches: &[DocMatch],
+        active_match_idx: Option<usize>,
+    ) -> Result<DecodedImage> {
         let (pw, ph) = self.layout.dimensions();
-        self.render_page(page_index, pw, ph)
+        self.render_page_with_search(page_index, pw, ph, matches, active_match_idx)
+    }
+
+    /// Return the bounding rectangle `(x, y, w, h)` in SVG page coordinates for a search match.
+    pub fn match_rect(&self, m: &DocMatch) -> Option<(f32, f32, f32, f32)> {
+        let page = self.pages.get(m.page)?;
+        let row = page.get(m.row)?;
+        let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 1;
+        let is_csv_table = (self.format == SourceFormat::Csv || self.format == SourceFormat::Tsv)
+            && self.render_mode == 1;
+        let is_advanced = is_md_reader || is_csv_table;
+
+        if is_md_reader && !row.is_table_row {
+            return None;
+        }
+
+        let top_y = 35.0;
+        let line_height = 26.0;
+        let text_x = if is_advanced { 48.0 } else { 110.0 };
+        let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
+            15
+        } else {
+            19
+        };
+        let char_w: f32 = if font_size_val == 15 { 9.0 } else { 11.43 };
+
+        let token_x = text_x + (m.col as f32) * char_w - 1.0;
+        let token_y = top_y + (m.row as f32 + 1.0) * line_height - 18.0;
+        let token_w = (m.len as f32) * char_w + 2.0;
+        let token_h = 22.0;
+
+        Some((token_x, token_y, token_w, token_h))
     }
 }
 
@@ -6784,6 +7032,22 @@ fn update_code_state(chunk: &str, syntax: &CodeSyntaxConfig, state: &mut CodePar
         } else {
             *state.partial_delim = PartialDelim::None;
         }
+    } else if syntax.triple_quotes
+        && *state.in_string
+        && !*state.escaped
+        && *state.string_quote == Some('"')
+        && chunk.ends_with('"')
+        && !chunk.ends_with("\"\"")
+    {
+        *state.partial_delim = PartialDelim::OpenDoubleQuote1;
+    } else if syntax.triple_quotes
+        && *state.in_string
+        && !*state.escaped
+        && *state.string_quote == Some('\'')
+        && chunk.ends_with('\'')
+        && !chunk.ends_with("''")
+    {
+        *state.partial_delim = PartialDelim::OpenSingleQuote1;
     } else if !*state.in_comment && !*state.in_string {
         if syntax.triple_quotes && chunk.ends_with("\"\"") && !chunk.ends_with("\"\"\"") {
             *state.partial_delim = PartialDelim::OpenDoubleQuote2;
@@ -9762,5 +10026,189 @@ status = "OK"
         let svg = doc.page_svg(0).unwrap();
         // const x = 1 must be inside comment, not highlighted as code keyword
         assert!(!svg.contains(r##"fill="#7dd3fc" font-weight="bold">const</tspan>"##));
+    }
+
+    #[test]
+    fn document_search_basic_and_case_insensitive() {
+        let content =
+            "fn main() {\n    let foo = 1;\n    let FOO_BAR = 2;\n    println!(\"foo\");\n}\n";
+        let doc = TextDocument::from_string(content.to_string());
+
+        assert!(doc.search("").is_empty());
+        assert!(doc.search("   ").is_empty());
+
+        let matches = doc.search("foo");
+        assert_eq!(matches.len(), 3);
+
+        // First match on line 2 (row 1): "let foo = 1;" with 4 leading spaces
+        assert_eq!(matches[0].page, 0);
+        assert_eq!(matches[0].row, 1);
+        assert_eq!(matches[0].line_number, Some(2));
+        assert_eq!(matches[0].col, 8); // 4 spaces + "let " (4) = 8
+        assert_eq!(matches[0].len, 3);
+
+        // Second match on line 3 (row 2): "let FOO_BAR = 2;"
+        assert_eq!(matches[1].page, 0);
+        assert_eq!(matches[1].row, 2);
+        assert_eq!(matches[1].line_number, Some(3));
+        assert_eq!(matches[1].col, 8);
+        assert_eq!(matches[1].len, 3);
+
+        // Third match on line 4 (row 3): "println!(\"foo\");"
+        assert_eq!(matches[2].page, 0);
+        assert_eq!(matches[2].row, 3);
+        assert_eq!(matches[2].line_number, Some(4));
+    }
+
+    #[test]
+    fn document_search_multiple_per_line_and_highlights() {
+        let content = "echo foo and foo\n";
+        let doc = TextDocument::from_string_with_options(
+            content.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+
+        let matches = doc.search("foo");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].col, 5); // "echo " (5)
+        assert_eq!(matches[1].col, 13); // "echo foo and " (13)
+
+        // SVG without search highlights
+        let svg_plain = doc.page_svg(0).unwrap();
+        assert!(!svg_plain.contains("#fbbf24"));
+        assert!(!svg_plain.contains("#38bdf8"));
+
+        // SVG with search highlights: first match active
+        let svg_search = doc.page_svg_with_search(0, &matches, Some(0)).unwrap();
+        // Row background and token highlights exist
+        assert!(svg_search.contains(r##"fill="#38bdf8""##)); // active sky-blue
+        assert!(svg_search.contains(r##"fill="#fbbf24""##)); // inactive amber
+        assert!(svg_search.contains(r##"stroke="#e0f2fe""##)); // active highlight stroke
+    }
+
+    #[test]
+    fn document_search_unicode_expansion_coordinates() {
+        // Turkish dotted capital I "İ" lowercases to "i\u{307}" (2 chars).
+        let content = "İfoo\n";
+        let doc = TextDocument::from_string(content.to_string());
+
+        let matches = doc.search("foo");
+        assert_eq!(matches.len(), 1);
+        // Original character column for 'f' is 1, not 2
+        assert_eq!(matches[0].col, 1);
+        assert_eq!(matches[0].len, 3);
+
+        let matches_i = doc.search("İ");
+        assert_eq!(matches_i.len(), 1);
+        assert_eq!(matches_i[0].col, 0);
+        assert_eq!(matches_i[0].len, 1);
+    }
+
+    #[test]
+    fn document_search_across_wrapped_visual_rows() {
+        // Create a line where a word is split across visual rows due to wrapping
+        let mut line = "a".repeat(90);
+        line.push_str("needle\n");
+        let doc = TextDocument::from_string_with_options(
+            line,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+        );
+
+        let matches = doc.search("needle");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].page, 0);
+        assert_eq!(matches[0].row, 0);
+        assert_eq!(matches[0].col, 90);
+    }
+
+    #[test]
+    fn document_search_in_markdown_table_source_mode_char_width() {
+        let md = "| col 1 | col 2 |\n|---|---|\n| hello | Notion |\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            0,
+        );
+        let matches = doc.search("Notion");
+        assert_eq!(matches.len(), 1);
+        let svg = doc.page_svg_with_search(0, &matches, Some(0)).unwrap();
+        assert!(
+            svg.contains(r##"x="223.3""##),
+            "SVG should use char_w 11.43 (x=223.3) for table rows in source mode: {svg}"
+        );
+    }
+
+    #[test]
+    fn document_search_across_wrapped_indented_visual_rows() {
+        let mut line = "    ".to_string();
+        line.push_str(&"a".repeat(86));
+        line.push_str("needle\n");
+        let doc = TextDocument::from_string_with_options(
+            line,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+        );
+
+        let matches = doc.search("needle");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].page, 0);
+    }
+
+    #[test]
+    fn document_search_in_markdown_table_reader_mode_char_width() {
+        let md = "| col 1 | col 2 |\n|---|---|\n| hello | Notion |\n";
+        let doc = TextDocument::from_string_with_options(
+            md.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+        );
+        let matches = doc.search("Notion");
+        assert_eq!(matches.len(), 1);
+        let rect = doc.match_rect(&matches[0]);
+        assert!(rect.is_some());
+        let (rx, _ry, rw, _rh) = rect.unwrap();
+        // In reader mode table, char_w should be 9.0 (font_size 15)
+        let expected_w = 6.0 * 9.0 + 2.0;
+        assert_eq!(rw, expected_w);
+        assert!(rx > 48.0);
+    }
+
+    #[test]
+    fn python_split_opening_single_triple_quote_across_chunks() {
+        // Line where first quote is at wrap edge (WRAP_COLS = 92)
+        let mut py = "x = ".to_string();
+        py.push_str(&" ".repeat(87));
+        py.push_str("\"\"\"docstring\nmore\"\"\"\ny = 1\n");
+        let doc =
+            TextDocument::from_string_with_options(py, SourceFormat::Py, PageLayout::Portrait, 0);
+        let svg = doc.page_svg(0).unwrap();
+        // y = 1 should be code, not colored as string
+        assert!(svg.contains(">1<") || svg.contains(">y<"));
+    }
+
+    #[test]
+    fn document_search_wrapped_line_col_accumulates_previous_chunks() {
+        // Line that wraps across multiple chunks (WRAP_COLS = 92)
+        let mut line = "a".repeat(100);
+        line.push_str("needle\n");
+        let doc = TextDocument::from_string_with_options(
+            line,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+        );
+        let matches = doc.search("needle");
+        assert_eq!(matches.len(), 1);
+        // Visual col on the second row is 8 (100 - 92 = 8)
+        assert_eq!(matches[0].col, 8);
+        // Logical line_col in the source line is 100
+        assert_eq!(matches[0].line_col, 100);
     }
 }

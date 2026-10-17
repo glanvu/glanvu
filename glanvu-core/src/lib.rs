@@ -33,7 +33,7 @@ pub use folder::{
 pub use format::{detect_format, SourceFormat};
 pub use pdf::PdfDocument;
 pub use text::{
-    pretty_format_json, pretty_format_xml, PageLayout, TextDocument, TEXT_PAGE_HEIGHT,
+    pretty_format_json, pretty_format_xml, DocMatch, PageLayout, TextDocument, TEXT_PAGE_HEIGHT,
     TEXT_PAGE_WIDTH,
 };
 

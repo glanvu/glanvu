@@ -175,7 +175,7 @@ cargo fmt --all --check
   | Plain text & structured docs (.txt, .json, .xml, .yaml, .toml, .ini, .md, .csv) | done |
   | Diff & patch viewing (.diff, .patch) | done |
   | Scripts & lightweight code viewing (.sh, .sql, .py, .js/.ts) | done |
-  | In-document text search (`F` / `/`) | planned |
+  | In-document text search (`F` / `/`) | done |
   | Brew cask + Linux/Windows installers | planned |
   | Web app (glanvu.com) | planned (Phase 3) |
 
