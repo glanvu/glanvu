@@ -74,6 +74,28 @@ enum PartialDelim {
     CdataCloseBracket,
     /// Inside CDATA, chunk ended with `]]`
     CdataCloseDoubleBracket,
+    /// Inside code, chunk ended with `/` (potential `/*` block comment start)
+    Slash,
+    /// Inside block comment, chunk ended with `*` (potential `*/` block comment close)
+    Star,
+    /// Inside `"""` triple quote, chunk ended with `"`
+    TripleDoubleQuote1,
+    /// Inside `"""` triple quote, chunk ended with `""`
+    TripleDoubleQuote2,
+    /// Inside `'''` triple quote, chunk ended with `'`
+    TripleSingleQuote1,
+    /// Inside `'''` triple quote, chunk ended with `''`
+    TripleSingleQuote2,
+    /// Inside code, chunk ended with `-` (potential `--` SQL line comment start)
+    Dash,
+    /// Inside code, chunk ended with `"` (potential `"""` Python triple quote start)
+    OpenDoubleQuote1,
+    /// Inside code, chunk ended with `""` (potential `"""` Python triple quote start)
+    OpenDoubleQuote2,
+    /// Inside code, chunk ended with `'` (potential `'''` Python triple quote start)
+    OpenSingleQuote1,
+    /// Inside code, chunk ended with `''` (potential `'''` Python triple quote start)
+    OpenSingleQuote2,
 }
 
 /// Semantic classification of a line in a unified diff or patch document.
@@ -106,10 +128,14 @@ struct VisualRow {
     string_quote: Option<char>,
     /// Whether this row starts inside an unclosed string literal from a previous wrapped row.
     starts_in_string: bool,
+    /// Whether this row starts inside an unclosed Python triple-quoted string (`"""` or `'''`).
+    starts_in_triple_quote: bool,
     /// Whether this row starts with the first character escaped by a trailing backslash.
     starts_escaped: bool,
-    /// Whether this row starts inside an unclosed XML comment `<!-- ... -->` or INI/TOML comment.
+    /// Whether this row starts inside an unclosed comment (`//`, `#`, `--`, `/* ... */`, `<!-- ... -->`).
     starts_in_comment: bool,
+    /// Whether this row starts inside an unclosed block comment `/* ... */`.
+    starts_in_block_comment: bool,
     /// Whether this row starts inside an unclosed XML opening tag `<tag ...`.
     starts_in_tag: bool,
     /// Whether this row starts inside an unclosed XML CDATA `<![CDATA[ ... ]]>`.
@@ -298,6 +324,8 @@ impl TextDocument {
         let mut diff_in_hunk = false;
         let mut diff_old_remaining = 0usize;
         let mut diff_new_remaining = 0usize;
+        let mut in_block_comment = false;
+        let mut in_triple_quote = false;
 
         let cleaned_lines: Vec<String> = content.lines().map(sanitize_line).collect();
         let is_md_reader = format == SourceFormat::Md && render_mode == 1;
@@ -307,6 +335,30 @@ impl TextDocument {
             std::collections::HashMap::new()
         };
         for (line_idx, cleaned) in cleaned_lines.iter().enumerate() {
+            let mut is_code_line_comment = false;
+            let is_code_format = matches!(
+                format,
+                SourceFormat::Sh | SourceFormat::Sql | SourceFormat::Py | SourceFormat::Js
+            );
+            if is_code_format {
+                if !in_block_comment {
+                    in_comment = false;
+                }
+                let multiline_string = match format {
+                    SourceFormat::Sh => in_string,
+                    SourceFormat::Sql => in_string && string_quote == Some('\''),
+                    SourceFormat::Js => in_string && (string_quote == Some('`') || escaped),
+                    SourceFormat::Py => in_string && (in_triple_quote || escaped),
+                    _ => false,
+                };
+                if !multiline_string {
+                    in_string = false;
+                    string_quote = None;
+                    in_triple_quote = false;
+                }
+                escaped = false;
+                partial_delim = PartialDelim::None;
+            }
             let expanded = if format == SourceFormat::Tsv {
                 cleaned.clone()
             } else {
@@ -326,8 +378,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: in_string,
+                    starts_in_triple_quote: in_triple_quote,
                     starts_escaped: escaped,
                     starts_in_comment: in_comment,
+                    starts_in_block_comment: in_block_comment,
                     starts_in_tag: in_tag,
                     starts_in_cdata: in_cdata,
                     starts_in_section: false,
@@ -498,8 +552,10 @@ impl TextDocument {
                     }
                     let row_string_quote = string_quote;
                     let row_starts_in_string = in_string || string_quote.is_some();
+                    let row_starts_in_triple_quote = in_triple_quote;
                     let row_starts_escaped = escaped;
                     let row_starts_in_comment = in_comment;
+                    let row_starts_in_block_comment = in_block_comment;
                     let row_starts_in_tag = in_tag;
                     let row_starts_in_cdata = in_cdata;
                     let row_starts_in_section = in_ini_section;
@@ -556,6 +612,29 @@ impl TextDocument {
                                 in_string = string_quote.is_some();
                             }
                         }
+                        SourceFormat::Sh
+                        | SourceFormat::Sql
+                        | SourceFormat::Py
+                        | SourceFormat::Js => {
+                            let syntax = match format {
+                                SourceFormat::Sh => &SH_SYNTAX,
+                                SourceFormat::Sql => &SQL_SYNTAX,
+                                SourceFormat::Py => &PY_SYNTAX,
+                                SourceFormat::Js => &JS_SYNTAX,
+                                _ => unreachable!(),
+                            };
+                            let mut code_state = CodeParseState {
+                                in_string: &mut in_string,
+                                string_quote: &mut string_quote,
+                                escaped: &mut escaped,
+                                in_comment: &mut in_comment,
+                                in_block_comment: &mut in_block_comment,
+                                in_triple_quote: &mut in_triple_quote,
+                                is_line_comment: &mut is_code_line_comment,
+                                partial_delim: &mut partial_delim,
+                            };
+                            update_code_state(&chunk, syntax, &mut code_state);
+                        }
                         _ => {}
                     }
 
@@ -573,8 +652,10 @@ impl TextDocument {
                         },
                         string_quote: row_string_quote,
                         starts_in_string: row_starts_in_string,
+                        starts_in_triple_quote: row_starts_in_triple_quote,
                         starts_escaped: row_starts_escaped,
                         starts_in_comment: row_starts_in_comment,
+                        starts_in_block_comment: row_starts_in_block_comment,
                         starts_in_tag: row_starts_in_tag,
                         starts_in_cdata: row_starts_in_cdata,
                         starts_in_section: row_starts_in_section,
@@ -605,6 +686,7 @@ impl TextDocument {
             if format != SourceFormat::Xml
                 && format != SourceFormat::Yaml
                 && format != SourceFormat::Md
+                && !is_code_format
             {
                 string_quote = None;
                 in_string = false;
@@ -630,8 +712,10 @@ impl TextDocument {
                 indent_cols: 0,
                 string_quote: None,
                 starts_in_string: false,
+                starts_in_triple_quote: false,
                 starts_escaped: false,
                 starts_in_comment: false,
+                starts_in_block_comment: false,
                 starts_in_tag: false,
                 starts_in_cdata: false,
                 starts_in_section: false,
@@ -700,8 +784,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: false,
+                    starts_in_triple_quote: false,
                     starts_escaped: false,
                     starts_in_comment: false,
+                    starts_in_block_comment: false,
                     starts_in_tag: false,
                     starts_in_cdata: false,
                     starts_in_section: false,
@@ -885,8 +971,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: false,
+                    starts_in_triple_quote: false,
                     starts_escaped: false,
                     starts_in_comment: false,
+                    starts_in_block_comment: false,
                     starts_in_tag: false,
                     starts_in_cdata: false,
                     starts_in_section: false,
@@ -910,8 +998,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: false,
+                    starts_in_triple_quote: false,
                     starts_escaped: false,
                     starts_in_comment: false,
+                    starts_in_block_comment: false,
                     starts_in_tag: false,
                     starts_in_cdata: false,
                     starts_in_section: false,
@@ -939,8 +1029,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: false,
+                    starts_in_triple_quote: false,
                     starts_escaped: false,
                     starts_in_comment: false,
+                    starts_in_block_comment: false,
                     starts_in_tag: false,
                     starts_in_cdata: false,
                     starts_in_section: false,
@@ -964,8 +1056,10 @@ impl TextDocument {
                     indent_cols: 0,
                     string_quote: None,
                     starts_in_string: false,
+                    starts_in_triple_quote: false,
                     starts_escaped: false,
                     starts_in_comment: false,
+                    starts_in_block_comment: false,
                     starts_in_tag: false,
                     starts_in_cdata: false,
                     starts_in_section: false,
@@ -991,8 +1085,10 @@ impl TextDocument {
                         indent_cols: 0,
                         string_quote: None,
                         starts_in_string: false,
+                        starts_in_triple_quote: false,
                         starts_escaped: false,
                         starts_in_comment: false,
+                        starts_in_block_comment: false,
                         starts_in_tag: false,
                         starts_in_cdata: false,
                         starts_in_section: false,
@@ -1155,6 +1251,25 @@ impl TextDocument {
                         row.indent_cols,
                         row.diff_kind.unwrap_or(DiffLineKind::Context),
                     ),
+                    SourceFormat::Sh | SourceFormat::Sql | SourceFormat::Py | SourceFormat::Js => {
+                        if self.render_mode == 1 {
+                            let mut s = String::with_capacity(row.indent_cols + row.text.len());
+                            for _ in 0..row.indent_cols {
+                                s.push(' ');
+                            }
+                            s.push_str(&escape_xml(&row.text));
+                            s
+                        } else {
+                            let syntax = match self.format {
+                                SourceFormat::Sh => &SH_SYNTAX,
+                                SourceFormat::Sql => &SQL_SYNTAX,
+                                SourceFormat::Py => &PY_SYNTAX,
+                                SourceFormat::Js => &JS_SYNTAX,
+                                _ => unreachable!(),
+                            };
+                            highlight_code_row(row, syntax)
+                        }
+                    }
                     _ => {
                         let mut s = String::with_capacity(row.indent_cols + row.text.len());
                         for _ in 0..row.indent_cols {
@@ -1569,7 +1684,7 @@ fn update_xml_state(
                 *partial_delim = PartialDelim::CdataOpen(len + k as u8);
             }
         }
-        PartialDelim::None => {}
+        _ => {}
     }
 
     while idx < chars.len() {
@@ -1988,7 +2103,7 @@ fn highlight_xml_row(
                 in_cdata = true;
             }
         }
-        PartialDelim::None => {}
+        _ => {}
     }
 
     while idx < chars.len() {
@@ -6008,6 +6123,1307 @@ fn highlight_diff_row(text: &str, indent_cols: usize, kind: DiffLineKind) -> Str
     out
 }
 
+// ── Code & Script Syntax Highlighting ────────────────────────────────────────────────────────
+
+const COLOR_COMMENT: &str = "#71717a"; // zinc-500
+const COLOR_STRING: &str = "#86efac"; // green-300
+const COLOR_KEYWORD: &str = "#7dd3fc"; // sky-300
+const COLOR_TYPE: &str = "#c084fc"; // purple-400
+const COLOR_NUMBER: &str = "#fdba74"; // orange-300
+const COLOR_CONST: &str = "#f472b6"; // pink-400
+const COLOR_VAR: &str = "#fcd34d"; // amber-300
+const COLOR_FUNCTION: &str = "#93c5fd"; // blue-300
+const COLOR_PUNCT: &str = "#cbd5e1"; // slate-300
+const COLOR_SHEBANG: &str = "#38bdf8"; // sky-400
+
+struct CodeSyntaxConfig {
+    line_comment: &'static str,
+    block_comment: Option<(&'static str, &'static str)>,
+    string_quotes: &'static [char],
+    triple_quotes: bool,
+    has_variables: bool,
+    case_insensitive: bool,
+    literal_single_quotes: bool,
+    line_comment_requires_boundary: bool,
+    keywords: &'static [&'static str],
+    types: &'static [&'static str],
+    constants: &'static [&'static str],
+}
+
+static SH_SYNTAX: CodeSyntaxConfig = CodeSyntaxConfig {
+    line_comment: "#",
+    block_comment: None,
+    string_quotes: &['"', '\''],
+    triple_quotes: false,
+    has_variables: true,
+    case_insensitive: false,
+    literal_single_quotes: true,
+    line_comment_requires_boundary: true,
+    keywords: &[
+        "if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until", "do", "done",
+        "in", "select", "function", "return", "exit", "export", "local", "readonly", "source",
+        "alias", "echo", "cd", "pwd", "test", "exec", "set", "unset", "shift", "trap", "eval",
+        "read", "printf", "command", "type", "builtin", "sudo", "chmod", "chown", "mkdir", "rm",
+        "cp", "mv",
+    ],
+    types: &[],
+    constants: &["true", "false"],
+};
+
+static SQL_SYNTAX: CodeSyntaxConfig = CodeSyntaxConfig {
+    line_comment: "--",
+    block_comment: Some(("/*", "*/")),
+    string_quotes: &['\'', '"'],
+    triple_quotes: false,
+    has_variables: false,
+    case_insensitive: true,
+    literal_single_quotes: true,
+    line_comment_requires_boundary: false,
+    keywords: &[
+        "select",
+        "from",
+        "where",
+        "insert",
+        "into",
+        "values",
+        "update",
+        "set",
+        "delete",
+        "join",
+        "inner",
+        "left",
+        "right",
+        "full",
+        "outer",
+        "cross",
+        "natural",
+        "on",
+        "group",
+        "by",
+        "having",
+        "order",
+        "asc",
+        "desc",
+        "limit",
+        "offset",
+        "union",
+        "all",
+        "distinct",
+        "create",
+        "alter",
+        "drop",
+        "table",
+        "view",
+        "index",
+        "schema",
+        "database",
+        "trigger",
+        "procedure",
+        "function",
+        "primary",
+        "key",
+        "foreign",
+        "references",
+        "constraint",
+        "default",
+        "check",
+        "unique",
+        "null",
+        "not",
+        "and",
+        "or",
+        "in",
+        "exists",
+        "between",
+        "like",
+        "ilike",
+        "is",
+        "as",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "cast",
+        "begin",
+        "commit",
+        "rollback",
+        "transaction",
+        "truncate",
+        "replace",
+        "with",
+        "recursive",
+        "over",
+        "partition",
+        "window",
+        "rows",
+        "range",
+        "declare",
+        "returns",
+        "grant",
+        "revoke",
+    ],
+    types: &[
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "varchar",
+        "char",
+        "text",
+        "boolean",
+        "bool",
+        "date",
+        "time",
+        "timestamp",
+        "timestamptz",
+        "datetime",
+        "float",
+        "double",
+        "real",
+        "decimal",
+        "numeric",
+        "blob",
+        "bytea",
+        "json",
+        "jsonb",
+        "uuid",
+        "serial",
+        "bigserial",
+    ],
+    constants: &["true", "false", "null"],
+};
+
+static PY_SYNTAX: CodeSyntaxConfig = CodeSyntaxConfig {
+    line_comment: "#",
+    block_comment: None,
+    string_quotes: &['"', '\''],
+    triple_quotes: true,
+    has_variables: false,
+    case_insensitive: false,
+    literal_single_quotes: false,
+    line_comment_requires_boundary: false,
+    keywords: &[
+        "def", "class", "return", "yield", "if", "elif", "else", "for", "while", "break",
+        "continue", "import", "from", "as", "try", "except", "finally", "raise", "with", "pass",
+        "assert", "async", "await", "lambda", "global", "nonlocal", "del", "in", "is", "not",
+        "and", "or", "match", "case",
+    ],
+    types: &[
+        "int",
+        "float",
+        "str",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "bytes",
+        "object",
+        "type",
+        "Exception",
+        "BaseException",
+        "Any",
+        "Optional",
+        "Union",
+    ],
+    constants: &["True", "False", "None", "self", "cls"],
+};
+
+static JS_SYNTAX: CodeSyntaxConfig = CodeSyntaxConfig {
+    line_comment: "//",
+    block_comment: Some(("/*", "*/")),
+    string_quotes: &['"', '\'', '`'],
+    triple_quotes: false,
+    has_variables: false,
+    case_insensitive: false,
+    literal_single_quotes: false,
+    line_comment_requires_boundary: false,
+    keywords: &[
+        "function",
+        "return",
+        "const",
+        "let",
+        "var",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "break",
+        "continue",
+        "switch",
+        "case",
+        "default",
+        "try",
+        "catch",
+        "finally",
+        "throw",
+        "new",
+        "this",
+        "class",
+        "extends",
+        "super",
+        "import",
+        "export",
+        "from",
+        "as",
+        "async",
+        "await",
+        "yield",
+        "typeof",
+        "instanceof",
+        "in",
+        "of",
+        "delete",
+        "debugger",
+        "interface",
+        "type",
+        "enum",
+        "implements",
+        "declare",
+        "readonly",
+        "public",
+        "private",
+        "protected",
+        "abstract",
+        "keyof",
+        "static",
+        "get",
+        "set",
+        "override",
+    ],
+    types: &[
+        "string", "number", "boolean", "symbol", "bigint", "object", "any", "unknown", "never",
+        "void", "Array", "Object", "Promise", "Map", "Set", "Record", "Error",
+    ],
+    constants: &["true", "false", "null", "undefined", "NaN", "Infinity"],
+};
+
+fn push_code_span(out: &mut String, text: &str, color: &str, bold: bool, italic: bool) {
+    if text.is_empty() {
+        return;
+    }
+    out.push_str(r##"<tspan fill=""##);
+    out.push_str(color);
+    out.push('"');
+    if bold {
+        out.push_str(r##" font-weight="bold""##);
+    }
+    if italic {
+        out.push_str(r##" font-style="italic""##);
+    }
+    out.push('>');
+    out.push_str(&escape_xml(text));
+    out.push_str("</tspan>");
+}
+
+fn highlight_interpolated_string(out: &mut String, text: &str) {
+    let chars: Vec<char> = text.chars().collect();
+    let char_len = chars.len();
+    let char_indices: Vec<(usize, char)> = text.char_indices().collect();
+
+    let mut start_str = 0;
+    let mut i = 0;
+    while i < char_len {
+        let ch = chars[i];
+        if ch == '$' && i + 1 < char_len {
+            let byte_pos = char_indices[i].0;
+            if byte_pos > start_str {
+                push_code_span(out, &text[start_str..byte_pos], COLOR_STRING, false, false);
+            }
+            let var_start = byte_pos;
+            i += 1;
+            if i < char_len && chars[i] == '{' {
+                i += 1;
+                while i < char_len && chars[i] != '}' {
+                    i += 1;
+                }
+                if i < char_len && chars[i] == '}' {
+                    i += 1;
+                }
+            } else if i < char_len
+                && matches!(chars[i], '#' | '?' | '$' | '!' | '@' | '*' | '0'..='9')
+            {
+                i += 1;
+            } else {
+                while i < char_len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+            }
+            let var_end = if i < char_len {
+                char_indices[i].0
+            } else {
+                text.len()
+            };
+            push_code_span(out, &text[var_start..var_end], COLOR_VAR, false, false);
+            start_str = var_end;
+            continue;
+        }
+        i += 1;
+    }
+    if start_str < text.len() {
+        push_code_span(out, &text[start_str..], COLOR_STRING, false, false);
+    }
+}
+
+fn highlight_template_string(out: &mut String, text: &str) {
+    let chars: Vec<char> = text.chars().collect();
+    let char_len = chars.len();
+    let char_indices: Vec<(usize, char)> = text.char_indices().collect();
+
+    let mut start_str = 0;
+    let mut i = 0;
+    while i < char_len {
+        let byte_pos = char_indices[i].0;
+        if text[byte_pos..].starts_with("${") {
+            if byte_pos > start_str {
+                push_code_span(out, &text[start_str..byte_pos], COLOR_STRING, false, false);
+            }
+            let expr_start = byte_pos;
+            i += 2;
+            let mut depth = 1;
+            while i < char_len && depth > 0 {
+                if chars[i] == '{' {
+                    depth += 1;
+                } else if chars[i] == '}' {
+                    depth -= 1;
+                }
+                i += 1;
+            }
+            let expr_end = if i < char_len {
+                char_indices[i].0
+            } else {
+                text.len()
+            };
+            push_code_span(out, &text[expr_start..expr_end], COLOR_VAR, false, false);
+            start_str = expr_end;
+            continue;
+        }
+        i += 1;
+    }
+    if start_str < text.len() {
+        push_code_span(out, &text[start_str..], COLOR_STRING, false, false);
+    }
+}
+
+struct CodeParseState<'a> {
+    in_string: &'a mut bool,
+    string_quote: &'a mut Option<char>,
+    escaped: &'a mut bool,
+    in_comment: &'a mut bool,
+    in_block_comment: &'a mut bool,
+    in_triple_quote: &'a mut bool,
+    is_line_comment: &'a mut bool,
+    partial_delim: &'a mut PartialDelim,
+}
+
+fn update_code_state(chunk: &str, syntax: &CodeSyntaxConfig, state: &mut CodeParseState<'_>) {
+    if *state.is_line_comment {
+        *state.in_comment = true;
+        return;
+    }
+    let chars: Vec<char> = chunk.chars().collect();
+    let char_len = chars.len();
+    let char_indices: Vec<(usize, char)> = chunk.char_indices().collect();
+    let mut i = 0;
+
+    // Handle partial delimiter carried from previous chunk
+    if *state.in_block_comment && *state.partial_delim == PartialDelim::Star {
+        *state.partial_delim = PartialDelim::None;
+        if chunk.starts_with('/') {
+            *state.in_block_comment = false;
+            *state.in_comment = false;
+            i = 1;
+        }
+    } else if *state.in_triple_quote && *state.partial_delim == PartialDelim::TripleDoubleQuote2 {
+        *state.partial_delim = PartialDelim::None;
+        if chunk.starts_with('"') {
+            *state.in_triple_quote = false;
+            *state.in_string = false;
+            *state.string_quote = None;
+            i = 1;
+        }
+    } else if *state.in_triple_quote && *state.partial_delim == PartialDelim::TripleDoubleQuote1 {
+        *state.partial_delim = PartialDelim::None;
+        if chunk.starts_with("\"\"") {
+            *state.in_triple_quote = false;
+            *state.in_string = false;
+            *state.string_quote = None;
+            i = 2;
+        }
+    } else if *state.in_triple_quote && *state.partial_delim == PartialDelim::TripleSingleQuote2 {
+        *state.partial_delim = PartialDelim::None;
+        if chunk.starts_with('\'') {
+            *state.in_triple_quote = false;
+            *state.in_string = false;
+            *state.string_quote = None;
+            i = 1;
+        }
+    } else if *state.in_triple_quote && *state.partial_delim == PartialDelim::TripleSingleQuote1 {
+        *state.partial_delim = PartialDelim::None;
+        if chunk.starts_with("''") {
+            *state.in_triple_quote = false;
+            *state.in_string = false;
+            *state.string_quote = None;
+            i = 2;
+        }
+    } else if !*state.in_comment && !*state.in_string {
+        match *state.partial_delim {
+            PartialDelim::Slash => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with('/') && syntax.line_comment == "//" {
+                    *state.is_line_comment = true;
+                    *state.in_comment = true;
+                    return;
+                } else if chunk.starts_with('*') && syntax.block_comment.is_some() {
+                    *state.in_block_comment = true;
+                    *state.in_comment = true;
+                    i = 1;
+                }
+            }
+            PartialDelim::Dash => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with('-') && syntax.line_comment == "--" {
+                    *state.is_line_comment = true;
+                    *state.in_comment = true;
+                    return;
+                }
+            }
+            PartialDelim::OpenDoubleQuote2 => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with('"') {
+                    *state.in_triple_quote = true;
+                    *state.in_string = true;
+                    *state.string_quote = Some('"');
+                    *state.escaped = false;
+                    i = 1;
+                }
+            }
+            PartialDelim::OpenDoubleQuote1 => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with("\"\"") {
+                    *state.in_triple_quote = true;
+                    *state.in_string = true;
+                    *state.string_quote = Some('"');
+                    *state.escaped = false;
+                    i = 2;
+                }
+            }
+            PartialDelim::OpenSingleQuote2 => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with('\'') {
+                    *state.in_triple_quote = true;
+                    *state.in_string = true;
+                    *state.string_quote = Some('\'');
+                    *state.escaped = false;
+                    i = 1;
+                }
+            }
+            PartialDelim::OpenSingleQuote1 => {
+                *state.partial_delim = PartialDelim::None;
+                if chunk.starts_with("''") {
+                    *state.in_triple_quote = true;
+                    *state.in_string = true;
+                    *state.string_quote = Some('\'');
+                    *state.escaped = false;
+                    i = 2;
+                }
+            }
+            _ => {
+                *state.partial_delim = PartialDelim::None;
+            }
+        }
+    } else {
+        *state.partial_delim = PartialDelim::None;
+    }
+
+    while i < char_len {
+        let byte_pos = char_indices[i].0;
+
+        if *state.in_block_comment {
+            if let Some((_, close)) = syntax.block_comment {
+                if chunk[byte_pos..].starts_with(close) {
+                    *state.in_block_comment = false;
+                    *state.in_comment = false;
+                    let end_byte = byte_pos + close.len();
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end_byte)
+                        .unwrap_or(char_len);
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        if *state.in_triple_quote {
+            let quote = state.string_quote.unwrap_or('"');
+            let delim = if quote == '"' { "\"\"\"" } else { "'''" };
+            let ch = chars[i];
+            if *state.escaped {
+                *state.escaped = false;
+                i += 1;
+                continue;
+            }
+            if ch == '\\' {
+                *state.escaped = true;
+                i += 1;
+                continue;
+            }
+            if chunk[byte_pos..].starts_with(delim) {
+                *state.in_triple_quote = false;
+                *state.in_string = false;
+                *state.string_quote = None;
+                *state.escaped = false;
+                let end_byte = byte_pos + 3;
+                i = char_indices
+                    .iter()
+                    .position(|&(b, _)| b >= end_byte)
+                    .unwrap_or(char_len);
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if *state.in_string {
+            let quote = state.string_quote.unwrap_or('"');
+            let ch = chars[i];
+            i += 1;
+            if *state.escaped {
+                *state.escaped = false;
+            } else if ch == '\\' && !(quote == '\'' && syntax.literal_single_quotes) {
+                *state.escaped = true;
+            } else if ch == quote {
+                if quote == '\'' && syntax.case_insensitive && i < char_len && chars[i] == '\'' {
+                    i += 1; // SQL escaped single quote
+                } else {
+                    *state.in_string = false;
+                    *state.string_quote = None;
+                }
+            }
+            continue;
+        }
+
+        // Line comment check
+        let is_comment_boundary = !syntax.line_comment_requires_boundary
+            || i == 0
+            || chars[i - 1].is_whitespace()
+            || matches!(chars[i - 1], ';' | '&' | '|' | '(' | '`');
+        if is_comment_boundary && chunk[byte_pos..].starts_with(syntax.line_comment) {
+            *state.is_line_comment = true;
+            *state.in_comment = true;
+            return;
+        }
+
+        // Block comment check
+        if let Some((open, _)) = syntax.block_comment {
+            if chunk[byte_pos..].starts_with(open) {
+                *state.in_block_comment = true;
+                *state.in_comment = true;
+                let end_byte = byte_pos + open.len();
+                i = char_indices
+                    .iter()
+                    .position(|&(b, _)| b >= end_byte)
+                    .unwrap_or(char_len);
+                continue;
+            }
+        }
+
+        // Triple quote check
+        let ch = chars[i];
+        if syntax.triple_quotes
+            && (ch == '"' || ch == '\'')
+            && i + 2 < char_len
+            && chars[i + 1] == ch
+            && chars[i + 2] == ch
+        {
+            *state.in_triple_quote = true;
+            *state.in_string = true;
+            *state.string_quote = Some(ch);
+            *state.escaped = false;
+            i += 3;
+            continue;
+        }
+
+        // String quote check
+        if syntax.string_quotes.contains(&ch) {
+            *state.in_string = true;
+            *state.string_quote = Some(ch);
+            *state.escaped = false;
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if *state.in_block_comment && chunk.ends_with('*') && !chunk.ends_with("/*") {
+        *state.partial_delim = PartialDelim::Star;
+    } else if *state.in_triple_quote && !*state.escaped {
+        let quote = state.string_quote.unwrap_or('"');
+        if quote == '"' {
+            if chunk.ends_with("\"\"") && !chunk.ends_with("\"\"\"") {
+                *state.partial_delim = PartialDelim::TripleDoubleQuote2;
+            } else if chunk.ends_with('"') && !chunk.ends_with("\"\"") {
+                *state.partial_delim = PartialDelim::TripleDoubleQuote1;
+            } else {
+                *state.partial_delim = PartialDelim::None;
+            }
+        } else if quote == '\'' {
+            if chunk.ends_with("''") && !chunk.ends_with("'''") {
+                *state.partial_delim = PartialDelim::TripleSingleQuote2;
+            } else if chunk.ends_with('\'') && !chunk.ends_with("''") {
+                *state.partial_delim = PartialDelim::TripleSingleQuote1;
+            } else {
+                *state.partial_delim = PartialDelim::None;
+            }
+        } else {
+            *state.partial_delim = PartialDelim::None;
+        }
+    } else if !*state.in_comment && !*state.in_string {
+        if syntax.triple_quotes && chunk.ends_with("\"\"") && !chunk.ends_with("\"\"\"") {
+            *state.partial_delim = PartialDelim::OpenDoubleQuote2;
+        } else if syntax.triple_quotes && chunk.ends_with('"') && !chunk.ends_with("\"\"") {
+            *state.partial_delim = PartialDelim::OpenDoubleQuote1;
+        } else if syntax.triple_quotes && chunk.ends_with("''") && !chunk.ends_with("'''") {
+            *state.partial_delim = PartialDelim::OpenSingleQuote2;
+        } else if syntax.triple_quotes && chunk.ends_with('\'') && !chunk.ends_with("''") {
+            *state.partial_delim = PartialDelim::OpenSingleQuote1;
+        } else if chunk.ends_with('/') {
+            *state.partial_delim = PartialDelim::Slash;
+        } else if chunk.ends_with('-') && syntax.line_comment == "--" {
+            *state.partial_delim = PartialDelim::Dash;
+        } else {
+            *state.partial_delim = PartialDelim::None;
+        }
+    } else {
+        *state.partial_delim = PartialDelim::None;
+    }
+}
+
+// Visual row syntax highlighting across wrapped chunks receives individual row states.
+fn highlight_code_row(row: &VisualRow, syntax: &CodeSyntaxConfig) -> String {
+    let text = &row.text;
+    let indent_cols = row.indent_cols;
+    let starts_in_string = row.starts_in_string;
+    let string_quote = row.string_quote;
+    let starts_in_triple_quote = row.starts_in_triple_quote;
+    let starts_in_comment = row.starts_in_comment;
+    let starts_in_block_comment = row.starts_in_block_comment;
+    let starts_escaped = row.starts_escaped;
+    let partial_delim = row.partial_delim;
+
+    let mut out = String::with_capacity(text.len() * 2 + indent_cols * 15);
+
+    let leading_spaces = text.chars().take_while(|&c| c == ' ').count();
+    let total_indent = if indent_cols > 0 {
+        indent_cols
+    } else {
+        leading_spaces
+    };
+    let num_levels = total_indent / 2;
+    let remainder_spaces = total_indent % 2;
+
+    for i in 0..num_levels {
+        let color = RAINBOW_PALETTE[i % RAINBOW_PALETTE.len()];
+        out.push_str(&format!(
+            r##"<tspan fill="{color}" fill-opacity="0.45">│ </tspan>"##
+        ));
+    }
+    for _ in 0..remainder_spaces {
+        out.push(' ');
+    }
+
+    let rest = if indent_cols > 0 {
+        text
+    } else {
+        &text[leading_spaces..]
+    };
+    if rest.is_empty() {
+        return out;
+    }
+
+    let mut i = 0;
+    let chars: Vec<char> = rest.chars().collect();
+    let char_len = chars.len();
+    let char_indices: Vec<(usize, char)> = rest.char_indices().collect();
+
+    // 1. If continuation of a comment:
+    if starts_in_comment {
+        if starts_in_block_comment {
+            if partial_delim == PartialDelim::Star && text.starts_with('/') {
+                push_code_span(&mut out, "/", COLOR_COMMENT, false, false);
+                i = 1;
+            } else if let Some((_, close)) = syntax.block_comment {
+                if let Some(pos) = rest.find(close) {
+                    let end = pos + close.len();
+                    push_code_span(&mut out, &rest[..end], COLOR_COMMENT, false, false);
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end)
+                        .unwrap_or(char_len);
+                } else {
+                    push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+                    return out;
+                }
+            } else {
+                push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+                return out;
+            }
+        } else {
+            // Wrapped line comment continues to end of line
+            push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+            return out;
+        }
+    }
+
+    // 2. If continuation of an unclosed string:
+    if starts_in_string && i == 0 {
+        if starts_in_triple_quote {
+            let quote = string_quote.unwrap_or('"');
+            let delim = if quote == '"' { "\"\"\"" } else { "'''" };
+
+            // Check if closed by split delimiter carried from previous chunk against unstripped text
+            let split_closed = match partial_delim {
+                PartialDelim::TripleDoubleQuote2 if quote == '"' && text.starts_with('"') => {
+                    push_code_span(&mut out, "\"", COLOR_STRING, false, false);
+                    i = 1;
+                    true
+                }
+                PartialDelim::TripleDoubleQuote1 if quote == '"' && text.starts_with("\"\"") => {
+                    push_code_span(&mut out, "\"\"", COLOR_STRING, false, false);
+                    i = 2;
+                    true
+                }
+                PartialDelim::TripleSingleQuote2 if quote == '\'' && text.starts_with('\'') => {
+                    push_code_span(&mut out, "'", COLOR_STRING, false, false);
+                    i = 1;
+                    true
+                }
+                PartialDelim::TripleSingleQuote1 if quote == '\'' && text.starts_with("''") => {
+                    push_code_span(&mut out, "''", COLOR_STRING, false, false);
+                    i = 2;
+                    true
+                }
+                _ => false,
+            };
+
+            if !split_closed {
+                let mut esc = starts_escaped;
+                let mut found_pos = None;
+                for (byte_pos, ch) in rest.char_indices() {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if ch == '\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if ch == quote && rest[byte_pos..].starts_with(delim) {
+                        found_pos = Some(byte_pos);
+                        break;
+                    }
+                }
+                if let Some(pos) = found_pos {
+                    let end = pos + 3;
+                    push_code_span(&mut out, &rest[..end], COLOR_STRING, false, false);
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end)
+                        .unwrap_or(char_len);
+                } else {
+                    push_code_span(&mut out, rest, COLOR_STRING, false, false);
+                    return out;
+                }
+            }
+        } else {
+            let quote = string_quote.unwrap_or('"');
+            let mut s = String::new();
+            let mut escaped = starts_escaped;
+            let mut closed = false;
+            while i < char_len {
+                let ch = chars[i];
+                s.push(ch);
+                i += 1;
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' && !(quote == '\'' && syntax.literal_single_quotes) {
+                    escaped = true;
+                } else if ch == quote {
+                    closed = true;
+                    break;
+                }
+            }
+            if quote == '`' {
+                highlight_template_string(&mut out, &s);
+            } else if quote == '"' && syntax.has_variables {
+                highlight_interpolated_string(&mut out, &s);
+            } else {
+                push_code_span(&mut out, &s, COLOR_STRING, false, false);
+            }
+            if !closed {
+                return out;
+            }
+        }
+    }
+
+    // 3. If split opening delimiters:
+    if i == 0 {
+        match partial_delim {
+            PartialDelim::Slash if text.starts_with('/') && syntax.line_comment == "//" => {
+                push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+                return out;
+            }
+            PartialDelim::Slash if text.starts_with('*') && syntax.block_comment.is_some() => {
+                if let Some((_, close)) = syntax.block_comment {
+                    if let Some(pos) = rest[1..].find(close) {
+                        let end = 1 + pos + close.len();
+                        push_code_span(&mut out, &rest[..end], COLOR_COMMENT, false, false);
+                        i = char_indices
+                            .iter()
+                            .position(|&(b, _)| b >= end)
+                            .unwrap_or(char_len);
+                    } else {
+                        push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+                        return out;
+                    }
+                }
+            }
+            PartialDelim::Dash if text.starts_with('-') && syntax.line_comment == "--" => {
+                push_code_span(&mut out, rest, COLOR_COMMENT, false, false);
+                return out;
+            }
+            PartialDelim::OpenDoubleQuote2 if text.starts_with('"') => {
+                let delim = "\"\"\"";
+                let mut esc = false;
+                let mut found_pos = None;
+                for (rel_byte, c) in rest[1..].char_indices() {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if c == '\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if c == '"' && rest[1 + rel_byte..].starts_with(delim) {
+                        found_pos = Some(1 + rel_byte);
+                        break;
+                    }
+                }
+                if let Some(pos) = found_pos {
+                    let end = pos + 3;
+                    push_code_span(&mut out, &rest[..end], COLOR_STRING, false, false);
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end)
+                        .unwrap_or(char_len);
+                } else {
+                    push_code_span(&mut out, rest, COLOR_STRING, false, false);
+                    return out;
+                }
+            }
+            PartialDelim::OpenDoubleQuote1 if text.starts_with("\"\"") => {
+                let delim = "\"\"\"";
+                let mut esc = false;
+                let mut found_pos = None;
+                for (rel_byte, c) in rest[2..].char_indices() {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if c == '\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if c == '"' && rest[2 + rel_byte..].starts_with(delim) {
+                        found_pos = Some(2 + rel_byte);
+                        break;
+                    }
+                }
+                if let Some(pos) = found_pos {
+                    let end = pos + 3;
+                    push_code_span(&mut out, &rest[..end], COLOR_STRING, false, false);
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end)
+                        .unwrap_or(char_len);
+                } else {
+                    push_code_span(&mut out, rest, COLOR_STRING, false, false);
+                    return out;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 4. Scan code tokens:
+    while i < char_len {
+        let byte_pos = char_indices[i].0;
+        let ch = chars[i];
+
+        // Whitespace
+        if ch.is_whitespace() {
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Shebang special case: "#!" at start of line
+        if i == 0 && rest[byte_pos..].starts_with("#!") {
+            push_code_span(&mut out, &rest[byte_pos..], COLOR_SHEBANG, true, false);
+            break;
+        }
+
+        // Line comment
+        let is_comment_boundary = !syntax.line_comment_requires_boundary
+            || i == 0
+            || chars[i - 1].is_whitespace()
+            || matches!(chars[i - 1], ';' | '&' | '|' | '(' | '`');
+        if is_comment_boundary && rest[byte_pos..].starts_with(syntax.line_comment) {
+            push_code_span(&mut out, &rest[byte_pos..], COLOR_COMMENT, false, false);
+            break;
+        }
+
+        // Block comment
+        if let Some((open, close)) = syntax.block_comment {
+            if rest[byte_pos..].starts_with(open) {
+                if let Some(rel_close) = rest[byte_pos + open.len()..].find(close) {
+                    let end_byte = byte_pos + open.len() + rel_close + close.len();
+                    push_code_span(
+                        &mut out,
+                        &rest[byte_pos..end_byte],
+                        COLOR_COMMENT,
+                        false,
+                        false,
+                    );
+                    i = char_indices
+                        .iter()
+                        .position(|&(b, _)| b >= end_byte)
+                        .unwrap_or(char_len);
+                    continue;
+                } else {
+                    push_code_span(&mut out, &rest[byte_pos..], COLOR_COMMENT, false, false);
+                    break;
+                }
+            }
+        }
+
+        // Strings: check triple quotes for Python (""" or ''')
+        let is_triple_quote = if syntax.triple_quotes
+            && (ch == '"' || ch == '\'')
+            && i + 2 < char_len
+            && chars[i + 1] == ch
+            && chars[i + 2] == ch
+        {
+            Some(ch)
+        } else {
+            None
+        };
+
+        if let Some(q) = is_triple_quote {
+            let delim = if q == '"' { "\"\"\"" } else { "'''" };
+            let start_byte = byte_pos;
+            let mut esc = false;
+            let mut found_pos = None;
+            for (rel_byte, c) in rest[byte_pos + 3..].char_indices() {
+                if esc {
+                    esc = false;
+                    continue;
+                }
+                if c == '\\' {
+                    esc = true;
+                    continue;
+                }
+                if c == q && rest[byte_pos + 3 + rel_byte..].starts_with(delim) {
+                    found_pos = Some(byte_pos + 3 + rel_byte);
+                    break;
+                }
+            }
+            if let Some(pos) = found_pos {
+                let end_byte = pos + 3;
+                push_code_span(
+                    &mut out,
+                    &rest[start_byte..end_byte],
+                    COLOR_STRING,
+                    false,
+                    false,
+                );
+                i = char_indices
+                    .iter()
+                    .position(|&(b, _)| b >= end_byte)
+                    .unwrap_or(char_len);
+                continue;
+            } else {
+                push_code_span(&mut out, &rest[start_byte..], COLOR_STRING, false, false);
+                break;
+            }
+        } else if syntax.string_quotes.contains(&ch) {
+            let quote = ch;
+            let start_byte = byte_pos;
+            i += 1;
+            let mut escaped = false;
+            while i < char_len {
+                let c = chars[i];
+                i += 1;
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' && !(quote == '\'' && syntax.literal_single_quotes) {
+                    escaped = true;
+                } else if c == quote {
+                    if quote == '\'' && syntax.case_insensitive && i < char_len && chars[i] == '\''
+                    {
+                        i += 1; // SQL escaped single quote
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            let str_slice = &rest[start_byte..end_byte];
+            if syntax.has_variables && quote == '"' && str_slice.contains('$') {
+                highlight_interpolated_string(&mut out, str_slice);
+            } else if quote == '`' && str_slice.contains("${") {
+                highlight_template_string(&mut out, str_slice);
+            } else {
+                push_code_span(&mut out, str_slice, COLOR_STRING, false, false);
+            }
+            continue;
+        }
+
+        // Shell variable: $VAR, ${VAR}, $1, $?, $@, etc.
+        if syntax.has_variables && ch == '$' {
+            let start_byte = byte_pos;
+            i += 1;
+            if i < char_len && chars[i] == '{' {
+                i += 1;
+                while i < char_len && chars[i] != '}' {
+                    i += 1;
+                }
+                if i < char_len && chars[i] == '}' {
+                    i += 1;
+                }
+            } else if i < char_len
+                && matches!(chars[i], '#' | '?' | '$' | '!' | '@' | '*' | '0'..='9')
+            {
+                i += 1;
+            } else {
+                while i < char_len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            push_code_span(
+                &mut out,
+                &rest[start_byte..end_byte],
+                COLOR_VAR,
+                false,
+                false,
+            );
+            continue;
+        }
+
+        // Python Decorator: @ident
+        if ch == '@' && i + 1 < char_len && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_') {
+            let start_byte = byte_pos;
+            i += 1;
+            while i < char_len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+            {
+                i += 1;
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            push_code_span(
+                &mut out,
+                &rest[start_byte..end_byte],
+                COLOR_TYPE,
+                true,
+                false,
+            );
+            continue;
+        }
+
+        // Numbers: hex 0x..., binary 0b..., float 1.23, integer 123
+        if ch.is_ascii_digit() && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+        {
+            let start_byte = byte_pos;
+            if ch == '0' && i + 1 < char_len && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+                i += 2;
+                while i < char_len && (chars[i].is_ascii_hexdigit() || chars[i] == '_') {
+                    i += 1;
+                }
+            } else if ch == '0' && i + 1 < char_len && (chars[i + 1] == 'b' || chars[i + 1] == 'B')
+            {
+                i += 2;
+                while i < char_len && (chars[i] == '0' || chars[i] == '1' || chars[i] == '_') {
+                    i += 1;
+                }
+            } else {
+                while i < char_len
+                    && (chars[i].is_ascii_digit()
+                        || chars[i] == '.'
+                        || chars[i] == '_'
+                        || chars[i] == 'e'
+                        || chars[i] == 'E')
+                {
+                    if (chars[i] == 'e' || chars[i] == 'E')
+                        && i + 1 < char_len
+                        && (chars[i + 1] == '+' || chars[i + 1] == '-')
+                    {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            push_code_span(
+                &mut out,
+                &rest[start_byte..end_byte],
+                COLOR_NUMBER,
+                false,
+                false,
+            );
+            continue;
+        }
+
+        // Identifiers / Words: [a-zA-Z_][a-zA-Z0-9_]*
+        if ch.is_alphabetic() || ch == '_' {
+            let start_byte = byte_pos;
+            while i < char_len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            let word = &rest[start_byte..end_byte];
+
+            let is_kw = if syntax.case_insensitive {
+                syntax.keywords.iter().any(|k| k.eq_ignore_ascii_case(word))
+            } else {
+                syntax.keywords.contains(&word)
+            };
+
+            let is_tp = if syntax.case_insensitive {
+                syntax.types.iter().any(|t| t.eq_ignore_ascii_case(word))
+            } else {
+                syntax.types.contains(&word)
+            };
+
+            let is_cn = if syntax.case_insensitive {
+                syntax
+                    .constants
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(word))
+            } else {
+                syntax.constants.contains(&word)
+            };
+
+            if is_kw {
+                push_code_span(&mut out, word, COLOR_KEYWORD, true, false);
+            } else if is_tp {
+                push_code_span(&mut out, word, COLOR_TYPE, false, false);
+            } else if is_cn {
+                push_code_span(&mut out, word, COLOR_CONST, false, false);
+            } else {
+                let next_non_ws = chars[i..].iter().find(|&&c| !c.is_whitespace());
+                if next_non_ws == Some(&'(') {
+                    push_code_span(&mut out, word, COLOR_FUNCTION, false, false);
+                } else {
+                    out.push_str(&escape_xml(word));
+                }
+            }
+            continue;
+        }
+
+        // Operators & punctuation
+        if matches!(
+            ch,
+            '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '^' | '~' | '?' | ':'
+        ) {
+            let start_byte = byte_pos;
+            while i < char_len
+                && matches!(
+                    chars[i],
+                    '+' | '-'
+                        | '*'
+                        | '/'
+                        | '%'
+                        | '='
+                        | '<'
+                        | '>'
+                        | '!'
+                        | '&'
+                        | '|'
+                        | '^'
+                        | '~'
+                        | '?'
+                        | ':'
+                )
+            {
+                if rest[char_indices[i].0..].starts_with(syntax.line_comment) {
+                    break;
+                }
+                if let Some((open, _)) = syntax.block_comment {
+                    if rest[char_indices[i].0..].starts_with(open) {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            let end_byte = if i < char_len {
+                char_indices[i].0
+            } else {
+                rest.len()
+            };
+            if end_byte > start_byte {
+                push_code_span(
+                    &mut out,
+                    &rest[start_byte..end_byte],
+                    COLOR_PUNCT,
+                    false,
+                    false,
+                );
+            }
+            continue;
+        }
+
+        // Brackets / Punctuation
+        if matches!(ch, '(' | ')' | '{' | '}' | '[' | ']' | ';' | ',') {
+            push_code_span(&mut out, &ch.to_string(), COLOR_PUNCT, false, false);
+            i += 1;
+            continue;
+        }
+
+        out.push_str(&escape_xml(&ch.to_string()));
+        i += 1;
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7969,5 +9385,382 @@ index abc1234..def5678 100644
         assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">--- a/file2.txt</tspan>"##));
         // Indented @@ in code line is context (#e4e4e7), NOT HunkHeader
         assert!(svg.contains(r##"fill="#e4e4e7">    @@ -1,1 +1,1 @@</tspan>"##));
+    }
+
+    #[test]
+    fn sh_syntax_highlighting_and_variables() {
+        let script = r#"#!/bin/bash
+# Install script for Glanvu
+export APP_NAME="Glanvu"
+if [ "$USER" = "root" ]; then
+    echo "Running as ${USER} with code $?"
+fi
+"#;
+        let doc = TextDocument::from_string_with_options(
+            script.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Shebang highlighted in sky-400 bold
+        assert!(svg.contains(r##"fill="#38bdf8" font-weight="bold">#!/bin/bash</tspan>"##));
+        // Comment in zinc-500
+        assert!(svg.contains(r##"fill="#71717a"># Install script for Glanvu</tspan>"##));
+        // Keywords in sky-300 bold
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">export</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">if</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">then</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">echo</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">fi</tspan>"##));
+        // String in green-300
+        assert!(svg.contains(r##"fill="#86efac">&quot;Glanvu&quot;</tspan>"##));
+        // Variables in amber-300
+        assert!(svg.contains(r##"fill="#fcd34d">$USER</tspan>"##));
+        assert!(svg.contains(r##"fill="#fcd34d">${USER}</tspan>"##));
+        assert!(svg.contains(r##"fill="#fcd34d">$?</tspan>"##));
+    }
+
+    #[test]
+    fn sql_syntax_highlighting_case_insensitive() {
+        let sql = r#"-- Get active users
+SELECT id, username, email
+FROM users
+WHERE is_active = true AND age >= 18
+ORDER BY created_at DESC;
+/* Multiline
+   block comment */
+"#;
+        let doc = TextDocument::from_string_with_options(
+            sql.to_string(),
+            SourceFormat::Sql,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Line comment
+        assert!(svg.contains(r##"fill="#71717a">-- Get active users</tspan>"##));
+        // Keywords (uppercase)
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">SELECT</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">FROM</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">WHERE</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">AND</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">ORDER</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">BY</tspan>"##));
+        // Constant boolean
+        assert!(svg.contains(r##"fill="#f472b6">true</tspan>"##));
+        // Number
+        assert!(svg.contains(r##"fill="#fdba74">18</tspan>"##));
+        // Block comment
+        assert!(svg.contains(r##"fill="#71717a">/* Multiline</tspan>"##));
+    }
+
+    #[test]
+    fn python_syntax_highlighting_and_decorators() {
+        let py = r#"# Python service
+@property
+def get_status(self) -> str:
+    """Return status."""
+    is_ready = True
+    if is_ready:
+        return "READY"
+    return None
+"#;
+        let doc = TextDocument::from_string_with_options(
+            py.to_string(),
+            SourceFormat::Py,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Comment
+        assert!(svg.contains(r##"fill="#71717a"># Python service</tspan>"##));
+        // Decorator in purple-400 bold
+        assert!(svg.contains(r##"fill="#c084fc" font-weight="bold">@property</tspan>"##));
+        // Keywords
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">def</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">if</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">return</tspan>"##));
+        // Constants
+        assert!(svg.contains(r##"fill="#f472b6">True</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">None</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">self</tspan>"##));
+        // Strings
+        assert!(svg.contains(
+            r##"fill="#86efac">&quot;&quot;&quot;Return status.&quot;&quot;&quot;</tspan>"##
+        ));
+        assert!(svg.contains(r##"fill="#86efac">&quot;READY&quot;</tspan>"##));
+    }
+
+    #[test]
+    fn js_ts_syntax_highlighting() {
+        let ts = r#"// TypeScript service
+import { Component } from 'react';
+
+export async function fetchData(url: string): Promise<void> {
+    const message = `Connecting to ${url}...`;
+    if (!message) {
+        throw new Error('invalid');
+    }
+}
+"#;
+        let doc = TextDocument::from_string_with_options(
+            ts.to_string(),
+            SourceFormat::Js,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+
+        // Comment
+        assert!(svg.contains(r##"fill="#71717a">// TypeScript service</tspan>"##));
+        // Keywords
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">import</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">export</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">async</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">function</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">const</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">throw</tspan>"##));
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">new</tspan>"##));
+        // Types
+        assert!(svg.contains(r##"fill="#c084fc">string</tspan>"##));
+        assert!(svg.contains(r##"fill="#c084fc">Promise</tspan>"##));
+        assert!(svg.contains(r##"fill="#c084fc">void</tspan>"##));
+        // Template literal with interpolation
+        assert!(svg.contains(r##"fill="#86efac">`Connecting to </tspan>"##));
+        assert!(svg.contains(r##"fill="#fcd34d">${url}</tspan>"##));
+    }
+
+    #[test]
+    fn code_raw_mode_renders_plain_text() {
+        let code = "const x = 42; // number";
+        let doc = TextDocument::from_string_with_options(
+            code.to_string(),
+            SourceFormat::Js,
+            PageLayout::Portrait,
+            1, // Mode 1 = Raw
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Raw mode has no syntax highlight tspans
+        assert!(!svg.contains(r##"fill="#7dd3fc""##));
+        assert!(!svg.contains(r##"fill="#71717a""##));
+        assert!(svg.contains("const x = 42; // number"));
+    }
+
+    #[test]
+    fn sh_and_sql_do_not_parse_triple_quotes_as_multiline() {
+        // Shell: echo '''hello'
+        let sh = "echo '''hello'\nx=1\n";
+        let doc_sh = TextDocument::from_string_with_options(
+            sh.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_sh = doc_sh.page_svg(0).unwrap();
+        // Line 2 x=1 must highlight x as identifier, = as operator, 1 as number (not string)
+        assert!(svg_sh.contains(r##"<tspan fill="#cbd5e1">=</tspan>"##));
+        assert!(svg_sh.contains(r##"<tspan fill="#fdba74">1</tspan>"##));
+        assert!(!svg_sh.contains(r##"fill="#86efac">x"##));
+
+        // SQL: SELECT '''hello';
+        let sql = "SELECT '''hello';\nSELECT 1;\n";
+        let doc_sql = TextDocument::from_string_with_options(
+            sql.to_string(),
+            SourceFormat::Sql,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_sql = doc_sql.page_svg(0).unwrap();
+        // Line 2 SELECT 1 must highlight SELECT as keyword and 1 as number
+        assert!(svg_sql.contains(r##"fill="#7dd3fc" font-weight="bold">SELECT</tspan>"##));
+        assert!(svg_sql.contains(r##"fill="#fdba74">1</tspan>"##));
+    }
+
+    #[test]
+    fn python_multiline_triple_quotes_preserves_content() {
+        let py = r#""""
+"+ 42 # text"
+"""
+status = "OK"
+"#;
+        let doc = TextDocument::from_string_with_options(
+            py.to_string(),
+            SourceFormat::Py,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // The line inside docstring must be all string green, not operator or comment
+        assert!(svg.contains(r##"fill="#86efac">&quot;+ 42 # text&quot;</tspan>"##));
+        assert!(!svg.contains(r##"fill="#71717a"># text"##));
+        // The line after closing """ must highlight status = "OK" correctly
+        assert!(svg.contains(r##"fill="#86efac">&quot;OK&quot;</tspan>"##));
+    }
+
+    #[test]
+    fn multiline_strings_in_shell_sql_js() {
+        // Shell multiline string
+        let sh = "echo \"first line\nsecond line\"\n";
+        let doc_sh = TextDocument::from_string_with_options(
+            sh.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_sh = doc_sh.page_svg(0).unwrap();
+        assert!(svg_sh.contains(r##"fill="#86efac">second line&quot;</tspan>"##));
+
+        // SQL multiline string
+        let sql = "SELECT 'first line\nsecond line';\n";
+        let doc_sql = TextDocument::from_string_with_options(
+            sql.to_string(),
+            SourceFormat::Sql,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_sql = doc_sql.page_svg(0).unwrap();
+        assert!(svg_sql.contains(r##"fill="#86efac">second line&apos;</tspan>"##));
+
+        // JS template string
+        let js = "const s = `first line\nsecond line`;\n";
+        let doc_js = TextDocument::from_string_with_options(
+            js.to_string(),
+            SourceFormat::Js,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg_js = doc_js.page_svg(0).unwrap();
+        assert!(svg_js.contains(r##"fill="#86efac">second line`</tspan>"##));
+    }
+
+    #[test]
+    fn split_block_comment_delimiters_across_wrapped_chunks() {
+        // Construct a line that wraps exactly so '*/' is split at the boundary
+        // Portrait WRAP_COLS is 92.
+        // "/*" (2) + 89 'a's (89) + "*" (1) = 92 chars on chunk 1.
+        // "/" (1) + " const done = true;" on chunk 2.
+        let mut js = String::from("/*");
+        js.push_str(&"a".repeat(89));
+        js.push_str("*/ const done = true;\n");
+
+        let doc =
+            TextDocument::from_string_with_options(js, SourceFormat::Js, PageLayout::Portrait, 0);
+        let svg = doc.page_svg(0).unwrap();
+        // The closing '/' should close the comment, and "const" should be colored as keyword!
+        assert!(svg.contains(r##"fill="#7dd3fc" font-weight="bold">const</tspan>"##));
+        assert!(svg.contains(r##"fill="#f472b6">true</tspan>"##));
+    }
+
+    #[test]
+    fn split_python_triple_quote_closing_across_wrapped_chunks() {
+        // WRAP_COLS is 92 in Portrait mode.
+        // Chunk 1: '"""' (3) + 87 'a's (87) + '""' (2) = 92 chars.
+        // Chunk 2: '"' (1) + " done = 1\n"
+        let mut py = String::from("\"\"\"");
+        py.push_str(&"a".repeat(87));
+        py.push_str("\"\"\" done = 1\n");
+
+        let doc =
+            TextDocument::from_string_with_options(py, SourceFormat::Py, PageLayout::Portrait, 0);
+        let svg = doc.page_svg(0).unwrap();
+        // Chunk 2's initial '"' closes the triple quote, and 'done = 1' must be highlighted as code
+        assert!(svg.contains(r##"<tspan fill="#cbd5e1">=</tspan>"##));
+        assert!(svg.contains(r##"<tspan fill="#fdba74">1</tspan>"##));
+    }
+
+    #[test]
+    fn python_escaped_quote_in_triple_quotes() {
+        let py = "s = \"\"\"hello \\\"\"\" world\"\"\"\nx = 1\n";
+        let doc = TextDocument::from_string_with_options(
+            py.to_string(),
+            SourceFormat::Py,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // x = 1 must be highlighted as code, not inside unclosed docstring
+        assert!(svg.contains(r##"<tspan fill="#cbd5e1">=</tspan>"##));
+        assert!(svg.contains(r##"<tspan fill="#fdba74">1</tspan>"##));
+    }
+
+    #[test]
+    fn wrapped_line_comment_does_not_close_on_slash_star() {
+        // Line comment that wraps and contains '*/'
+        let mut js = String::from("// ");
+        js.push_str(&"a".repeat(90));
+        js.push_str("*/ const x = 1;\n");
+        let doc =
+            TextDocument::from_string_with_options(js, SourceFormat::Js, PageLayout::Portrait, 0);
+        let svg = doc.page_svg(0).unwrap();
+        // Since it's a line comment '//', '*/' does not close it: entire line remains comment
+        assert!(!svg.contains(r##"fill="#7dd3fc" font-weight="bold">const</tspan>"##));
+        assert!(svg.contains(r##"fill="#71717a">"##));
+    }
+
+    #[test]
+    fn line_continuation_across_physical_newlines() {
+        let js = "const s = \"hello \\\nworld\";\nconst done = true;\n";
+        let doc = TextDocument::from_string_with_options(
+            js.to_string(),
+            SourceFormat::Js,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // Line 2 has string continuation
+        assert!(svg.contains(r##"fill="#86efac">world&quot;</tspan>"##));
+        // Line 3 is highlighted as new code
+        assert!(svg.contains(r##"fill="#f472b6">true</tspan>"##));
+    }
+
+    #[test]
+    fn shell_hash_requires_word_boundary() {
+        let sh = "echo foo#bar\nx=1\n";
+        let doc = TextDocument::from_string_with_options(
+            sh.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // foo#bar must not be colored as comment #71717a
+        assert!(!svg.contains(r##"fill="#71717a">#bar"##));
+        assert!(svg.contains("foo#bar"));
+        // x=1 must be code
+        assert!(svg.contains(r##"<tspan fill="#fdba74">1</tspan>"##));
+    }
+
+    #[test]
+    fn shell_literal_single_quotes_ignore_backslash() {
+        let sh = "printf '%s' 'C:\\'\nx=1\n";
+        let doc = TextDocument::from_string_with_options(
+            sh.to_string(),
+            SourceFormat::Sh,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // 'C:\' must close, and line 2 x=1 must be highlighted as code
+        assert!(svg.contains(r##"<tspan fill="#fdba74">1</tspan>"##));
+        assert!(svg.contains(r##"<tspan fill="#cbd5e1">=</tspan>"##));
+    }
+
+    #[test]
+    fn consumed_opening_delimiter_not_false_closing_prefix() {
+        // Line with /*/ where the initial /* should open, and trailing / should not close
+        let js = "/*/\nconst x = 1;\n*/\n";
+        let doc = TextDocument::from_string_with_options(
+            js.to_string(),
+            SourceFormat::Js,
+            PageLayout::Portrait,
+            0,
+        );
+        let svg = doc.page_svg(0).unwrap();
+        // const x = 1 must be inside comment, not highlighted as code keyword
+        assert!(!svg.contains(r##"fill="#7dd3fc" font-weight="bold">const</tspan>"##));
     }
 }

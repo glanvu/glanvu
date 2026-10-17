@@ -178,7 +178,7 @@ Glanvu refuses to overwrite an input or to map two inputs to the same output (da
 | `O` | Toggle sort order (name / date) |
 | `I` | Image info panel |
 | `R` / `F2` | Rename file |
-| `M` | Toggle render mode (Markdown, CSV/TSV) |
+| `M` | Toggle render mode (Markdown, CSV/TSV, Code) |
 | `C` / `Shift+C` | Copy image · copy file path to clipboard |
 | `F5` | Refresh from disk |
 | `Delete` / `Backspace` | Move image (or grid selection) to Trash |

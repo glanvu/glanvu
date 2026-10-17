@@ -52,6 +52,14 @@ pub enum SourceFormat {
     Tsv,
     /// A unified diff or patch document (.diff, .patch), rendered with addition/deletion syntax highlighting.
     Diff,
+    /// A Shell script (.sh, .bash, .zsh), rendered with monospace typography and syntax highlighting.
+    Sh,
+    /// An SQL document (.sql), rendered with monospace typography and syntax highlighting.
+    Sql,
+    /// A Python script (.py, .pyw), rendered with monospace typography and syntax highlighting.
+    Py,
+    /// A JavaScript or TypeScript script (.js, .mjs, .cjs, .ts, .mts, .cts, .jsx, .tsx), rendered with monospace typography and syntax highlighting.
+    Js,
 }
 
 impl SourceFormat {
@@ -84,6 +92,10 @@ impl SourceFormat {
             SourceFormat::Csv => "CSV",
             SourceFormat::Tsv => "TSV",
             SourceFormat::Diff => "Diff",
+            SourceFormat::Sh => "Shell",
+            SourceFormat::Sql => "SQL",
+            SourceFormat::Py => "Python",
+            SourceFormat::Js => "JavaScript",
         }
     }
 
@@ -118,6 +130,10 @@ impl SourceFormat {
             "csv" => Some(SourceFormat::Csv),
             "tsv" | "tab" => Some(SourceFormat::Tsv),
             "diff" | "patch" => Some(SourceFormat::Diff),
+            "sh" | "bash" | "zsh" => Some(SourceFormat::Sh),
+            "sql" => Some(SourceFormat::Sql),
+            "py" | "pyw" => Some(SourceFormat::Py),
+            "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx" => Some(SourceFormat::Js),
             _ => None,
         }
     }
@@ -146,6 +162,13 @@ impl SourceFormat {
             {
                 return Some(SourceFormat::Ini);
             }
+            if lower == ".bashrc"
+                || lower == ".zshrc"
+                || lower == ".bash_profile"
+                || lower == ".profile"
+            {
+                return Some(SourceFormat::Sh);
+            }
         }
         None
     }
@@ -153,7 +176,13 @@ impl SourceFormat {
     /// Number of distinct render modes supported by this format (at least 1: mode 0).
     pub fn render_mode_count(self) -> u8 {
         match self {
-            SourceFormat::Md | SourceFormat::Csv | SourceFormat::Tsv => 2,
+            SourceFormat::Md
+            | SourceFormat::Csv
+            | SourceFormat::Tsv
+            | SourceFormat::Sh
+            | SourceFormat::Sql
+            | SourceFormat::Py
+            | SourceFormat::Js => 2,
             _ => 1,
         }
     }
@@ -171,8 +200,37 @@ impl SourceFormat {
                 1 => "Table",
                 _ => "Raw",
             },
+            SourceFormat::Sh | SourceFormat::Sql | SourceFormat::Py | SourceFormat::Js => {
+                match mode {
+                    0 => "Code",
+                    1 => "Raw",
+                    _ => "Code",
+                }
+            }
             _ => "Default",
         }
+    }
+
+    /// Whether this format is a paginated text-based document rendered with monospace typography.
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            SourceFormat::Txt
+                | SourceFormat::Json
+                | SourceFormat::Jsonl
+                | SourceFormat::Xml
+                | SourceFormat::Ini
+                | SourceFormat::Toml
+                | SourceFormat::Yaml
+                | SourceFormat::Md
+                | SourceFormat::Csv
+                | SourceFormat::Tsv
+                | SourceFormat::Diff
+                | SourceFormat::Sh
+                | SourceFormat::Sql
+                | SourceFormat::Py
+                | SourceFormat::Js
+        )
     }
 
     /// Whether this format can be encoded to by the conversion pipeline.
@@ -212,6 +270,10 @@ impl SourceFormat {
             SourceFormat::Csv => None,
             SourceFormat::Tsv => None,
             SourceFormat::Diff => None,
+            SourceFormat::Sh => None,
+            SourceFormat::Sql => None,
+            SourceFormat::Py => None,
+            SourceFormat::Js => None,
         }
     }
 
@@ -635,6 +697,71 @@ mod tests {
         assert_eq!(
             SourceFormat::from_path(std::path::Path::new("changes.diff.bak")),
             Some(SourceFormat::Diff)
+        );
+    }
+
+    #[test]
+    fn script_and_code_extensions_resolve() {
+        assert_eq!(SourceFormat::from_extension("sh"), Some(SourceFormat::Sh));
+        assert_eq!(SourceFormat::from_extension("bash"), Some(SourceFormat::Sh));
+        assert_eq!(SourceFormat::from_extension("zsh"), Some(SourceFormat::Sh));
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new(".bashrc")),
+            Some(SourceFormat::Sh)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new(".zshrc")),
+            Some(SourceFormat::Sh)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new(".profile")),
+            Some(SourceFormat::Sh)
+        );
+        assert_eq!(SourceFormat::Sh.name(), "Shell");
+        assert_eq!(SourceFormat::Sh.render_mode_count(), 2);
+        assert_eq!(SourceFormat::Sh.render_mode_name(0), "Code");
+        assert_eq!(SourceFormat::Sh.render_mode_name(1), "Raw");
+        assert!(SourceFormat::Sh.is_text());
+
+        assert_eq!(SourceFormat::from_extension("sql"), Some(SourceFormat::Sql));
+        assert_eq!(SourceFormat::from_extension("SQL"), Some(SourceFormat::Sql));
+        assert_eq!(SourceFormat::Sql.name(), "SQL");
+        assert_eq!(SourceFormat::Sql.render_mode_count(), 2);
+        assert!(SourceFormat::Sql.is_text());
+
+        assert_eq!(SourceFormat::from_extension("py"), Some(SourceFormat::Py));
+        assert_eq!(SourceFormat::from_extension("pyw"), Some(SourceFormat::Py));
+        assert_eq!(SourceFormat::Py.name(), "Python");
+        assert_eq!(SourceFormat::Py.render_mode_count(), 2);
+        assert!(SourceFormat::Py.is_text());
+
+        assert_eq!(SourceFormat::from_extension("js"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("mjs"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("cjs"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("ts"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("mts"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("cts"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("jsx"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::from_extension("tsx"), Some(SourceFormat::Js));
+        assert_eq!(SourceFormat::Js.name(), "JavaScript");
+        assert_eq!(SourceFormat::Js.render_mode_count(), 2);
+        assert!(SourceFormat::Js.is_text());
+
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("deploy.sh.bak")),
+            Some(SourceFormat::Sh)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("schema.sql.bak")),
+            Some(SourceFormat::Sql)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("script.py.bak")),
+            Some(SourceFormat::Py)
+        );
+        assert_eq!(
+            SourceFormat::from_path(std::path::Path::new("index.ts.bak")),
+            Some(SourceFormat::Js)
         );
     }
 }

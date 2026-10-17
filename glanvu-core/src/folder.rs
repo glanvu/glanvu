@@ -26,25 +26,10 @@ pub fn is_pdf_path(path: &Path) -> bool {
     SourceFormat::from_path(path) == Some(SourceFormat::Pdf)
 }
 
-/// Whether a path's extension marks it as a text-based format (.txt, .log, .json, .jsonl, .xml, .ini, .toml, .yaml, .yml, .md, .markdown, .cfg, .conf, .env, .properties) —
+/// Whether a path's extension marks it as a text-based format —
 /// paginated and rendered with monospace typography and line numbers. Single source of truth for that check.
 pub fn is_text_path(path: &Path) -> bool {
-    matches!(
-        SourceFormat::from_path(path),
-        Some(
-            SourceFormat::Txt
-                | SourceFormat::Json
-                | SourceFormat::Jsonl
-                | SourceFormat::Xml
-                | SourceFormat::Ini
-                | SourceFormat::Toml
-                | SourceFormat::Yaml
-                | SourceFormat::Md
-                | SourceFormat::Csv
-                | SourceFormat::Tsv
-                | SourceFormat::Diff
-        )
-    )
+    SourceFormat::from_path(path).is_some_and(|f| f.is_text())
 }
 
 /// Whether a path's extension marks it as JSON (.json).
