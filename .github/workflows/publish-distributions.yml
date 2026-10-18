@@ -100,13 +100,12 @@ jobs:
           UPSTREAM="microsoft/winget-pkgs"
 
           # Sync fork's master with upstream before branching
-          UPSTREAM_SHA=$(gh api "repos/${UPSTREAM}/git/ref/heads/master" --jq '.object.sha')
+          gh api "repos/${FORK}/merge-upstream" \
+            --method POST \
+            --field branch=master 2>/dev/null || true
 
-          # Force the fork's master to match upstream so the SHA is known to the fork
-          gh api "repos/${FORK}/git/refs/heads/master" \
-            --method PATCH \
-            --field "sha=${UPSTREAM_SHA}" \
-            --field force=true 2>/dev/null || true
+          # Read latest synced master SHA from fork
+          SYNCED_SHA=$(gh api "repos/${FORK}/git/ref/heads/master" --jq '.object.sha')
 
           # Delete branch if it already exists (idempotent re-runs)
           gh api "repos/${FORK}/git/refs/heads/${BRANCH}" \
@@ -116,7 +115,7 @@ jobs:
           gh api "repos/${FORK}/git/refs" \
             --method POST \
             --field "ref=refs/heads/${BRANCH}" \
-            --field "sha=${UPSTREAM_SHA}"
+            --field "sha=${SYNCED_SHA}"
 
           # Push each manifest file to the branch
           for local_file in "dist/winget/${MANIFEST_DIR}"/*.yaml; do
