@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-18
+
+### Added
+
+- **Plain text and structured documents**: support for `.txt`, `.json`, `.xml`, `.yaml`, `.yml`, `.toml`, and `.ini`. Documents are rendered crisp with dark-theme styling, line-numbered gutters, and paginated navigation (`↑` / `↓` turn pages).
+- **Markdown document viewer with Reader & Source modes**: `.md` and `.markdown` files render by default in a rich Reader mode with clean typography, styled headers, blockquotes, bullet/numbered lists, task checkboxes, code blocks, tables, and thematic breaks. Press `M` to toggle between Reader and Source mode.
+- **CSV and TSV tabular data**: tabular data files render with alternate row shading, column grid layout, and header distinction in table view, as well as a column-rainbow palette in raw view.
+- **Diff and patch files**: `.diff` and `.patch` files display syntax highlighting with hunk-scoped line coloring: hunk headers in cyan, added lines (`+`) in green, and removed lines (`-`) in red.
+- **Lightweight code and script viewing**: preview Shell scripts (`.sh`, `.bash`, `.zsh`), SQL (`.sql`), Python (`.py`), and JavaScript/TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`) with monospace layout and line numbering.
+- **In-document text search**: press `F` or `/` when viewing any text document to open an interactive search bar. Supports case-insensitive searching, real-time match counter (`Match X/Y`), occurrence navigation with `n` (next) and `N` (previous), and a GPU-drawn active match indicator rect in both Reader and Raw modes. Automatically switches to raw mode during search for precise line/column positioning.
+- **Dynamic text font size adjustment**: press `+` / `=` to increase font size, `-` / `_` to decrease, and `0` to reset to the default 19px base font size. Reflows lines per page, column wrapping boundaries, table column widths, and active search match highlights in real-time.
+- **Asynchronous text reload & HUD indicator**: background worker reloads text documents without blocking the main event loop, accompanied by a persistent rendering HUD notification during processing.
+
 ## [0.10.0] — 2026-08-16
 
 ### Added
@@ -237,7 +250,8 @@ Workspace enforces `unsafe_code = deny` and `clippy::all = warn`.
 
 ---
 
-[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/glanvu/glanvu/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/glanvu/glanvu/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/glanvu/glanvu/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/glanvu/glanvu/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/glanvu/glanvu/releases/tag/v0.9.0

@@ -176,6 +176,7 @@ cargo fmt --all --check
   | Diff & patch viewing (.diff, .patch) | done |
   | Scripts & lightweight code viewing (.sh, .sql, .py, .js/.ts) | done |
   | In-document text search (`F` / `/`) | done |
+  | Text font size adjustment (`+` / `-` / `0`) | done |
   | Brew cask + Linux/Windows installers | planned |
   | Web app (glanvu.com) | planned (Phase 3) |
 

@@ -35,6 +35,20 @@ The name is **glance + view** — a fast look.
   resolution once you stop zooming, instead of stretching a blurry fixed-size raster.
 - **PDF viewing** — open multi-page PDFs like any other image; **↑ / ↓** turn pages (clamped at
   the first/last page) while **← / →** still walk the folder.
+- **Documents & code** — open plain text, JSON, YAML, TOML, XML, CSV/TSV, and code/scripts (.sh,
+  .sql, .py, .js/.ts) with crisp dark-themed typography, line numbers, and pagination.
+- **Rich Markdown Reader & Source modes** — Markdown (.md) documents render by default in a rich
+  Reader mode with headers, blockquotes, styled lists, task checkboxes, code blocks, and tables.
+  Press **M** to toggle between Reader and Source mode.
+- **Tabular CSV & TSV tables** — CSV/TSV files render as clean aligned tables with alternating row
+  highlights in table mode, or with a rainbow column palette in raw mode.
+- **Diff & patch inspection** — view .diff and .patch files with syntax coloring: hunk headers in
+  cyan, added lines in green, and removed lines in red.
+- **In-document text search** — press **F** (or **/**) in any document to search with a live match
+  counter (`Match X/Y`), jump between occurrences with **n** (next) and **N** (previous), and track
+  the active match via a GPU highlight rectangle.
+- **Dynamic text font sizing** — press **+** / **-** to scale text document font size with instant
+  reflow of pagination, wrap boundaries, and table widths. Press **0** to reset to default.
 - **Keyboard-first navigation** — walk a whole folder with the arrow keys; zoom, pan, rotate, fit,
   and go fullscreen without touching the mouse. Press **H** any time for the full cheatsheet.
 - **Find by name** — press **F** (or **/**) for a fuzzy search across the folder: a floating match
@@ -73,14 +87,14 @@ The name is **glance + view** — a fast look.
 
 ## Install
 
-Pre-built binaries for v0.10.0 are available at [glanvu.com](https://glanvu.com) and
+Pre-built binaries for v0.11.0 are available at [glanvu.com](https://glanvu.com) and
 [GitHub Releases](https://github.com/glanvu/glanvu/releases):
 
 | Platform | Download |
 |---|---|
-| macOS (Apple Silicon) | [`Glanvu-0.10.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.10.0/Glanvu-0.10.0-macos-arm64.zip) |
-| Linux x86_64 | [`glanvu-0.10.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.10.0/glanvu-0.10.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.10.0/glanvu_0.10.0_amd64.deb) |
-| Windows x64 | [`Glanvu-0.10.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.10.0/Glanvu-0.10.0-windows-x86_64.zip) |
+| macOS (Apple Silicon) | [`Glanvu-0.11.0-macos-arm64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.11.0/Glanvu-0.11.0-macos-arm64.zip) |
+| Linux x86_64 | [`glanvu-0.11.0-linux-x86_64.tar.gz`](https://github.com/glanvu/glanvu/releases/download/v0.11.0/glanvu-0.11.0-linux-x86_64.tar.gz) · [`.deb`](https://github.com/glanvu/glanvu/releases/download/v0.11.0/glanvu_0.11.0_amd64.deb) |
+| Windows x64 | [`Glanvu-0.11.0-windows-x86_64.zip`](https://github.com/glanvu/glanvu/releases/download/v0.11.0/Glanvu-0.11.0-windows-x86_64.zip) |
 
 Package managers (Homebrew tap, Scoop bucket, AUR, winget, Chocolatey) are being published —
 see the [Roadmap](#roadmap).
@@ -195,7 +209,7 @@ viewer above is the foundation. Planned, in priority order:
 - **More formats** — RAW (photography), AVIF/HEVC, EXR and gigapixel images.
 - **Technical & 3D** — DICOM (medical), CAD drawings, 3D-printing formats (STL/OBJ/3MF/STEP/G-code)
   and general 3D models.
-- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.10.0).
+- **Distribution** — Direct downloads available for macOS, Linux and Windows (v0.11.0).
   Package managers in progress: Homebrew tap, Scoop bucket, AUR, winget, Chocolatey.
   Code signing and auto-update planned.
 - **Hosted (Phase 3)** — [glanvu.com](https://glanvu.com): web viewer, shareable links, and a
