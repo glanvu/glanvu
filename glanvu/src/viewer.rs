@@ -5,12 +5,12 @@
 //! Folder navigation and prefetch live in `nav::FolderNav`; this module owns only the GPU state
 //! (`Gpu`), the view/transform state (`ViewState`), and the winit event loop (`App`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -331,6 +331,30 @@ fn spawn_text_reload_worker() -> (Arc<TextReloadMailbox>, Receiver<TextReloadRes
         }
     });
     (mailbox, res_rx)
+}
+
+// ── EXIF reader background worker ─────────────────────────────────────────────────────────────
+
+struct ExifCacheEntry {
+    mtime: Option<SystemTime>,
+    meta: Option<glanvu_core::ExifMeta>,
+}
+
+type ExifResult = (PathBuf, Option<SystemTime>, Option<glanvu_core::ExifMeta>);
+
+fn spawn_exif_worker() -> (std::sync::mpsc::Sender<PathBuf>, Receiver<ExifResult>) {
+    let (req_tx, req_rx) = std::sync::mpsc::channel::<PathBuf>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<ExifResult>();
+    std::thread::spawn(move || {
+        while let Ok(path) = req_rx.recv() {
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let meta = glanvu_core::read_exif_path(&path);
+            if res_tx.send((path, mtime, meta)).is_err() {
+                break;
+            }
+        }
+    });
+    (req_tx, res_rx)
 }
 
 /// Whether to print timing diagnostics (set `GLANVU_PERF=1`). Off by default so runs stay quiet.
@@ -1224,6 +1248,13 @@ struct Gpu {
     info_layout_scale: f32,
     info_line_h: f32,
     info_text_cache: String,
+    // EXIF overlay (shown below Info overlay when I is pressed):
+    exif_uniform_buf: wgpu::Buffer,
+    exif_uniform_bind: wgpu::BindGroup,
+    exif_text_buf: TextBuffer,
+    exif_layout_scale: f32,
+    exif_line_h: f32,
+    exif_text_cache: String,
     // Settings overlay (shown below Info overlay when I is pressed):
     settings_uniform_buf: wgpu::Buffer,
     settings_uniform_bind: wgpu::BindGroup,
@@ -1591,6 +1622,10 @@ impl Gpu {
         let info_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &info_uniform_buf);
         let info_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
+        let exif_uniform_buf = make_uniform_buffer(&device);
+        let exif_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &exif_uniform_buf);
+        let exif_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+
         let settings_uniform_buf = make_uniform_buffer(&device);
         let settings_uniform_bind =
             make_uniform_bind(&device, &uniform_layout_solo, &settings_uniform_buf);
@@ -1727,6 +1762,12 @@ impl Gpu {
             info_layout_scale: -1.0,
             info_line_h: 22.5,
             info_text_cache: String::new(),
+            exif_uniform_buf,
+            exif_uniform_bind,
+            exif_text_buf,
+            exif_layout_scale: -1.0,
+            exif_line_h: 22.5,
+            exif_text_cache: String::new(),
             settings_uniform_buf,
             settings_uniform_bind,
             settings_text_buf,
@@ -2052,7 +2093,55 @@ impl Gpu {
         (margin, margin, bw, bh, margin + pad_h, margin + pad_v)
     }
 
-    /// Lay out the settings/preferences overlay (shown below info overlay when I is pressed).
+    /// Lay out the EXIF overlay (shown below info overlay when I is pressed and EXIF data is present).
+    /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`.
+    fn layout_exif(
+        &mut self,
+        text: &str,
+        scale: f32,
+        win_w: f32,
+        win_h: f32,
+        top_y: f32,
+        reserved_bottom: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
+        if self.exif_text_cache != text || (self.exif_layout_scale - scale).abs() > f32::EPSILON {
+            self.exif_text_cache = text.to_string();
+            self.exif_layout_scale = scale;
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.exif_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
+            buf.set_wrap(&mut self.font_system, Wrap::None);
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Basic,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.exif_text_buf = buf;
+        }
+        let pad_h = 16.0 * scale;
+        let pad_v = 12.0 * scale;
+        let margin = 16.0 * scale;
+        let text_w = self
+            .exif_text_buf
+            .layout_runs()
+            .fold(0.0_f32, |m, r| m.max(r.line_w));
+        let rows = text.lines().count().max(1) as f32;
+        let bw = (text_w + 2.0 * pad_h).min(win_w - 2.0 * margin);
+        let max_h = (win_h - top_y - margin - reserved_bottom).max(0.0);
+        let needed_h = rows * self.exif_line_h + 2.0 * pad_v;
+        let bh = if max_h < self.exif_line_h + 2.0 * pad_v {
+            0.0
+        } else {
+            needed_h.min(max_h)
+        };
+        (margin, top_y, bw, bh, margin + pad_h, top_y + pad_v)
+    }
+
+    /// Lay out the settings/preferences overlay in the bottom-left corner (I key).
     /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`.
     fn layout_settings(
         &mut self,
@@ -2060,7 +2149,6 @@ impl Gpu {
         scale: f32,
         win_w: f32,
         win_h: f32,
-        top_y: f32,
     ) -> (f32, f32, f32, f32, f32, f32) {
         if self.settings_text_cache != text
             || (self.settings_layout_scale - scale).abs() > f32::EPSILON
@@ -2091,8 +2179,10 @@ impl Gpu {
             .fold(0.0_f32, |m, r| m.max(r.line_w));
         let rows = text.lines().count().max(1) as f32;
         let bw = (text_w + 2.0 * pad_h).min(win_w - 2.0 * margin);
-        let bh = (rows * self.settings_line_h + 2.0 * pad_v).min((win_h - top_y - margin).max(0.0));
-        (margin, top_y, bw, bh, margin + pad_h, top_y + pad_v)
+        let bh = (rows * self.settings_line_h + 2.0 * pad_v).min((win_h - 2.0 * margin).max(0.0));
+        let bx = margin;
+        let by = (win_h - bh - margin).max(margin);
+        (bx, by, bw, bh, bx + pad_h, by + pad_v)
     }
 
     /// Lay out the centered status overlay (slideshow message, etc.).
@@ -2420,6 +2510,7 @@ impl Gpu {
         confirm: Option<&str>,
         about: bool,
         info: Option<&str>,
+        exif: Option<&str>,
         settings: Option<&str>,
         scale: f32,
         logo: bool,
@@ -2654,17 +2745,43 @@ impl Gpu {
             show_info_box = true;
         }
 
-        // Settings overlay box (shown below Info overlay when I is pressed).
-        let mut show_settings_box = false;
-        let mut settings_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        if let Some(settings_text) = settings {
+        // EXIF overlay box (shown below Info overlay when I is pressed and EXIF data is present).
+        let mut show_exif_box = false;
+        let mut exif_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(exif_text) = exif {
             let top_y = if show_info_box {
                 let (_, by, _, bh, _, _) = info_coords;
                 by + bh + 10.0 * scale
             } else {
                 16.0 * scale
             };
-            settings_coords = self.layout_settings(settings_text, scale, win_w, win_h, top_y);
+            // Reserve space for Preferences below so EXIF never crowds out Preferences.
+            let reserved_bottom = if let Some(settings_text) = settings {
+                let (_, lh) = ui_text::metrics(ui_text::BODY, scale);
+                let rows = settings_text.lines().count().max(1) as f32;
+                rows * lh + 24.0 * scale + 10.0 * scale
+            } else {
+                0.0
+            };
+            exif_coords = self.layout_exif(exif_text, scale, win_w, win_h, top_y, reserved_bottom);
+            let (bx, by, bw, bh, _, _) = exif_coords;
+            if bh > 0.0 {
+                self.queue.write_buffer(
+                    &self.exif_uniform_buf,
+                    0,
+                    bytemuck::bytes_of(&Uniforms {
+                        mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                    }),
+                );
+                show_exif_box = true;
+            }
+        }
+
+        // Settings overlay box (shown in bottom-left corner when I is pressed).
+        let mut show_settings_box = false;
+        let mut settings_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(settings_text) = settings {
+            settings_coords = self.layout_settings(settings_text, scale, win_w, win_h);
             let (bx, by, bw, bh, _, _) = settings_coords;
             self.queue.write_buffer(
                 &self.settings_uniform_buf,
@@ -2881,6 +2998,7 @@ impl Gpu {
             || show_help_donate
             || show_about_box
             || show_info_box
+            || show_exif_box
             || show_settings_box
             || show_find_bar;
         let text_ok = if need_text {
@@ -2924,6 +3042,7 @@ impl Gpu {
             let donate_ptr = &self.donate_text_buf as *const TextBuffer;
             let about_ptr = &self.about_text_buf as *const TextBuffer;
             let info_ptr = &self.info_text_buf as *const TextBuffer;
+            let exif_ptr = &self.exif_text_buf as *const TextBuffer;
             let settings_ptr = &self.settings_text_buf as *const TextBuffer;
             // explorer_item_bufs is a Vec; get raw pointers to each element.
             let e_ptrs: Vec<*const TextBuffer> = self
@@ -3219,6 +3338,23 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
+            if show_exif_box {
+                let (bx, by, bw, bh, tx, ty) = exif_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*exif_ptr },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + bw) as i32,
+                        bottom: (by + bh) as i32,
+                    },
+                    default_color: Color::rgb(220, 225, 235),
+                    custom_glyphs: &[],
+                });
+            }
             if show_settings_box {
                 let (bx, by, bw, bh, tx, ty) = settings_coords;
                 areas.push(TextArea {
@@ -3420,7 +3556,14 @@ impl Gpu {
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
 
-            // 6c-2. Settings overlay box (shown below Info overlay when I is pressed).
+            // 6c-2. EXIF overlay box (shown below Info overlay when I is pressed).
+            if show_exif_box {
+                pass.set_bind_group(0, &self.exif_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+
+            // 6c-3. Settings overlay box.
             if show_settings_box {
                 pass.set_bind_group(0, &self.settings_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
@@ -3914,6 +4057,11 @@ struct App {
     config: UserConfig,
     /// Cached mtime string for the date overlay (updated when the path overlay fires).
     date_text: String,
+    /// In-memory cache of EXIF metadata, populated on demand only when info panel is active.
+    exif_cache: HashMap<PathBuf, ExifCacheEntry>,
+    exif_in_flight: HashSet<PathBuf>,
+    exif_tx: std::sync::mpsc::Sender<PathBuf>,
+    exif_rx: Receiver<ExifResult>,
     /// Whether the current image is SVG — gates the crisp re-raster-on-settle behavior (D11).
     current_is_svg: bool,
     /// When `Some(t)`, the current SVG is re-rasterized at its new effective on-screen resolution
@@ -4069,7 +4217,7 @@ const HELP_LEFT: &[HelpRow] = &[
 const HELP_RIGHT: &[HelpRow] = &[
     Section("Organize"),
     Keys("O", "sort order (name / date)"),
-    Keys("I", "file info & preferences"),
+    Keys("I", "file info, EXIF · preferences"),
     Keys("F2 / R", "rename"),
     Keys("C  ·  Shift+C", "copy content · copy path"),
     Keys("F5", "refresh from disk"),
@@ -4809,6 +4957,48 @@ impl App {
         Some(lines.join("\n"))
     }
 
+    /// Retrieve EXIF metadata for the current image. If not already cached or if the file
+    /// was modified on disk, dispatches an asynchronous read request to the background worker
+    /// so the UI thread never blocks.
+    fn get_current_exif(&mut self) -> Option<&glanvu_core::ExifMeta> {
+        if self.current_is_svg || self.current_is_pdf || self.current_is_text {
+            return None;
+        }
+        let path = self.nav.current_path()?;
+        let current_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if self
+            .exif_cache
+            .get(path)
+            .is_some_and(|e| e.mtime == current_mtime)
+        {
+            return self.exif_cache.get(path).and_then(|e| e.meta.as_ref());
+        }
+        if !self.exif_in_flight.contains(path) {
+            if self.exif_cache.len() >= 64 {
+                self.exif_cache.clear();
+            }
+            self.exif_in_flight.insert(path.to_path_buf());
+            let _ = self.exif_tx.send(path.to_path_buf());
+        }
+        None
+    }
+
+    /// Compose the EXIF metadata panel body (I key) if EXIF data is present.
+    fn build_exif_string(&mut self) -> Option<String> {
+        let meta = self.get_current_exif()?;
+        if meta.is_empty() {
+            return None;
+        }
+        let lines = meta.display_lines();
+        if lines.is_empty() {
+            None
+        } else {
+            let mut all = vec!["EXIF".to_string()];
+            all.extend(lines);
+            Some(all.join("\n"))
+        }
+    }
+
     /// Compose the settings/preferences panel body shown below the file info panel (I key).
     fn build_settings_string(&self) -> String {
         let sort_label = match self.sort_mode {
@@ -5359,6 +5549,7 @@ impl App {
             }
             for p in &stale {
                 self.thumbs.invalidate(p);
+                self.exif_cache.remove(p);
             }
         }
 
@@ -5420,6 +5611,8 @@ impl App {
     fn force_refresh(&mut self) {
         self.nav.clear_cache();
         self.thumbs.clear();
+        self.exif_cache.clear();
+        self.exif_in_flight.clear();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.thumb_binds.clear();
         }
@@ -5813,6 +6006,7 @@ impl App {
                 confirm_text,
                 self.about_visible,
                 None, // no image in empty mode → no info panel
+                None, // no image in empty mode → no exif panel
                 settings.as_deref(),
                 scale,
                 true,
@@ -5897,6 +6091,11 @@ impl App {
             .map(|g| (g.config.width as f32, g.config.height as f32))
             .unwrap_or((800.0, 600.0));
         let svg_tile_draws = self.svg_tile_draws(win_phys);
+        let exif = if self.info_visible {
+            self.build_exif_string()
+        } else {
+            None
+        };
         let overlay_active = matches!(self.overlay_until, Some(t) if now < t);
         let overlay = if overlay_active {
             self.nav.current_path().map(|p| p.display().to_string())
@@ -5946,14 +6145,8 @@ impl App {
         } else {
             None
         };
-        let status = self
-            .render_status_text
-            .as_deref()
-            .or_else(|| match self.status_until {
-                Some(t) if now < t => Some(self.status_text.as_str()),
-                _ => None,
-            });
-        // Info panel body (I key) — computed here (App owns nav) and passed into the renderer.
+        // Info, EXIF, and settings panel bodies (I key). Computed before borrowing gpu and before
+        // creating any string slices into `self` (such as `status`).
         let info = if self.info_visible {
             self.build_info_string()
         } else {
@@ -5964,6 +6157,13 @@ impl App {
         } else {
             None
         };
+        let status = self
+            .render_status_text
+            .as_deref()
+            .or_else(|| match self.status_until {
+                Some(t) if now < t => Some(self.status_text.as_str()),
+                _ => None,
+            });
         // Active modal overlay text — computed before borrowing gpu (it's a &self method).
         let modal_text = self.modal_text();
         let scale = self
@@ -5993,6 +6193,7 @@ impl App {
             confirm_text,
             self.about_visible,
             info.as_deref(),
+            exif.as_deref(),
             settings.as_deref(),
             scale,
             false,
@@ -7531,6 +7732,17 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Apply any completed background EXIF metadata load.
+        let mut exif_updated = false;
+        while let Ok((path, mtime, meta)) = self.exif_rx.try_recv() {
+            self.exif_in_flight.remove(&path);
+            self.exif_cache.insert(path, ExifCacheEntry { mtime, meta });
+            exif_updated = true;
+        }
+        if exif_updated && self.info_visible {
+            self.redraw();
+        }
+
         // SVG base layer re-raster: settle → render the WHOLE image at fit-to-window resolution
         // (bounded, cheap, independent of zoom). Zoomed-in sharpness is provided by the viewport
         // tiles composited on top; the base is just the always-present fallback, so it must never
@@ -7619,6 +7831,7 @@ impl ApplicationHandler for App {
             .svg_vp_pending
             .is_some()
             .then(|| now + SVG_RERENDER_POLL);
+        let exif_poll_deadline = (!self.exif_in_flight.is_empty()).then(|| now + SVG_RERENDER_POLL);
 
         let deadline = [
             self.overlay_until,
@@ -7630,6 +7843,7 @@ impl ApplicationHandler for App {
             svg_poll_deadline,
             text_reload_poll_deadline,
             tile_poll_deadline,
+            exif_poll_deadline,
             vp_debounce_deadline,
         ]
         .into_iter()
@@ -7690,6 +7904,7 @@ pub fn run(path: &str) -> ExitCode {
     let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
     let (tile_queue, tile_rx) = spawn_tile_worker();
     let (text_reload_mailbox, text_reload_rx) = spawn_text_reload_worker();
+    let (exif_tx, exif_rx) = spawn_exif_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -7747,6 +7962,10 @@ pub fn run(path: &str) -> ExitCode {
         sort_mode: initial_sort_mode,
         config: user_config,
         date_text: String::new(),
+        exif_cache: HashMap::new(),
+        exif_in_flight: HashSet::new(),
+        exif_tx,
+        exif_rx,
         current_is_svg,
         svg_rerender_at: None,
         svg_rerender_gen: 0,
@@ -7818,6 +8037,7 @@ pub fn run_empty() -> ExitCode {
     let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
     let (tile_queue, tile_rx) = spawn_tile_worker();
     let (text_reload_mailbox, text_reload_rx) = spawn_text_reload_worker();
+    let (exif_tx, exif_rx) = spawn_exif_worker();
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -7879,6 +8099,10 @@ pub fn run_empty() -> ExitCode {
         sort_mode: initial_sort_mode,
         config: user_config,
         date_text: String::new(),
+        exif_cache: HashMap::new(),
+        exif_in_flight: HashSet::new(),
+        exif_tx,
+        exif_rx,
         current_is_svg: false,
         svg_rerender_at: None,
         svg_rerender_gen: 0,

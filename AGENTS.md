@@ -177,6 +177,7 @@ cargo fmt --all --check
   | Scripts & lightweight code viewing (.sh, .sql, .py, .js/.ts) | done |
   | In-document text search (`F` / `/`) | done |
   | Text font size adjustment (`+` / `-` / `0`) | done |
+  | Image EXIF metadata viewer (`I`) | done |
   | Brew cask + Linux/Windows installers | planned |
   | Web app (glanvu.com) | planned (Phase 3) |
 

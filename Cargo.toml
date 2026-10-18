@@ -35,6 +35,8 @@ resvg = "0.47"
 # packaging in the CI workflow's PDFIUM_VERSION, not "latest" — that repo rolls frequently).
 # Missing library at runtime is a normal, non-fatal state: every other format is unaffected.
 pdfium-render = "0.9"
+# EXIF parsing in pure Rust (BSD-2-Clause) with no unsafe or system C libraries.
+kamadak-exif = "0.6"
 
 # Lints applied workspace-wide. Treat warnings as errors in CI / pre-push.
 [workspace.lints.clippy]

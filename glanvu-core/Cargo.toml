@@ -12,6 +12,7 @@ image.workspace = true
 thiserror.workspace = true
 resvg.workspace = true
 pdfium-render.workspace = true
+kamadak-exif.workspace = true
 
 [lints]
 workspace = true

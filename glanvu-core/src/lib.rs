@@ -14,6 +14,7 @@
 mod convert;
 mod decode;
 mod error;
+mod exif;
 mod folder;
 mod format;
 mod pdf;
@@ -25,6 +26,7 @@ pub use decode::{
     decode_thumbnail, fit_within, read_meta_path, DecodedImage, ImageMeta, SvgDocument,
 };
 pub use error::{Error, Result};
+pub use exif::{read_exif_bytes, read_exif_path, ExifMeta};
 pub use folder::{
     is_csv_path, is_diff_path, is_ini_path, is_json_path, is_md_path, is_pdf_path,
     is_supported_path, is_svg_path, is_text_path, is_toml_path, is_tsv_path, is_xml_path,
