@@ -13,9 +13,21 @@ use crate::format::SourceFormat;
 
 pub const TEXT_PAGE_WIDTH: u32 = 1200;
 pub const TEXT_PAGE_HEIGHT: u32 = 1600;
-const LINES_PER_PAGE: usize = 58;
+pub const FONT_SIZES: &[u32] = &[13, 16, 19, 22, 25, 28];
+pub const DEFAULT_FONT_SIZE: u32 = 19;
+pub const DEFAULT_FONT_SIZE_INDEX: usize = 2;
 const WRAP_COLS: usize = 92;
 const TAB_SIZE: usize = 4;
+
+/// Compute line height in pixels for a given font size.
+pub fn line_height_for_font(font_size: u32) -> u32 {
+    ((font_size as f32 * 1.37).round() as u32).max(18)
+}
+
+/// Compute character width in pixels for monospace text at a given font size.
+pub fn char_width_for_font(font_size: u32) -> f32 {
+    font_size as f32 * 0.601579
+}
 
 /// Layout orientation and target canvas aspect for paginated text documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,12 +48,17 @@ impl PageLayout {
         }
     }
 
-    /// Number of visual rows per page in this layout.
+    /// Number of visual rows per page in this layout with default font size (19px).
     pub fn lines_per_page(self) -> usize {
-        match self {
-            Self::Portrait => LINES_PER_PAGE,
-            Self::Landscape => 35,
-        }
+        self.lines_per_page_for_font(DEFAULT_FONT_SIZE)
+    }
+
+    /// Number of visual rows per page in this layout for a given font size.
+    pub fn lines_per_page_for_font(self, font_size: u32) -> usize {
+        let (_, page_h) = self.dimensions();
+        let lh = line_height_for_font(font_size);
+        let usable_h = page_h.saturating_sub(80);
+        (usable_h / lh) as usize
     }
 
     /// Choose layout based on window or viewport aspect ratio.
@@ -197,6 +214,7 @@ pub struct TextDocument {
     format: SourceFormat,
     layout: PageLayout,
     render_mode: u8,
+    font_size: u32,
 }
 
 impl TextDocument {
@@ -315,6 +333,11 @@ impl TextDocument {
         self.layout
     }
 
+    /// Active font size in pixels.
+    pub fn font_size(&self) -> u32 {
+        self.font_size
+    }
+
     /// Active render mode index.
     pub fn render_mode(&self) -> u8 {
         self.render_mode
@@ -342,6 +365,17 @@ impl TextDocument {
         layout: PageLayout,
         render_mode: u8,
     ) -> Result<Self> {
+        Self::from_bytes_with_font_size(bytes, format, layout, render_mode, DEFAULT_FONT_SIZE)
+    }
+
+    /// Parse and paginate a text document from in-memory UTF-8 bytes with layout, render mode, and font size.
+    pub fn from_bytes_with_font_size(
+        bytes: &[u8],
+        format: SourceFormat,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
+    ) -> Result<Self> {
         if bytes.contains(&0) {
             return Err(Error::Decode(
                 "binary file with null bytes is not plain text".to_string(),
@@ -350,11 +384,12 @@ impl TextDocument {
         let content = std::str::from_utf8(bytes)
             .map_err(|e| Error::Decode(format!("invalid UTF-8 text: {e}")))?
             .to_string();
-        Ok(Self::from_string_with_options(
+        Ok(Self::from_string_with_font_size(
             content,
             format,
             layout,
             render_mode,
+            font_size,
         ))
     }
 
@@ -368,6 +403,16 @@ impl TextDocument {
         path: P,
         layout: PageLayout,
         render_mode: u8,
+    ) -> Result<Self> {
+        Self::load_with_font_size(path, layout, render_mode, DEFAULT_FONT_SIZE)
+    }
+
+    /// Load and paginate a text document from disk with layout, render mode, and font size options.
+    pub fn load_with_font_size<P: AsRef<Path>>(
+        path: P,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
     ) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| Error::Io {
@@ -403,11 +448,12 @@ impl TextDocument {
             }
         }
 
-        Ok(Self::from_string_with_options(
+        Ok(Self::from_string_with_font_size(
             content,
             format,
             layout,
             render_mode,
+            font_size,
         ))
     }
 
@@ -428,6 +474,17 @@ impl TextDocument {
         layout: PageLayout,
         render_mode: u8,
     ) -> Self {
+        Self::from_string_with_font_size(content, format, layout, render_mode, DEFAULT_FONT_SIZE)
+    }
+
+    /// Build a paginated document with layout, render mode, and font size options.
+    pub fn from_string_with_font_size(
+        content: String,
+        format: SourceFormat,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
+    ) -> Self {
         let is_csv_table =
             (format == SourceFormat::Csv || format == SourceFormat::Tsv) && render_mode == 1;
         if is_csv_table {
@@ -436,7 +493,7 @@ impl TextDocument {
             } else {
                 detect_csv_delimiter(&content)
             };
-            return Self::build_csv_table_document(content, format, layout, delimiter);
+            return Self::build_csv_table_document(content, format, layout, delimiter, font_size);
         }
 
         let mut visual_rows = Vec::new();
@@ -459,7 +516,7 @@ impl TextDocument {
         let cleaned_lines: Vec<String> = content.lines().map(sanitize_line).collect();
         let is_md_reader = format == SourceFormat::Md && render_mode == 1;
         let mut aligned_md_tables = if is_md_reader {
-            build_aligned_markdown_tables(&cleaned_lines, layout)
+            build_aligned_markdown_tables(&cleaned_lines, layout, font_size)
         } else {
             std::collections::HashMap::new()
         };
@@ -642,27 +699,30 @@ impl TextDocument {
                     };
 
                 let indent_spaces = line_to_wrap.chars().take_while(|&c| c == ' ').count();
+                let wrap_limit = if is_md_reader {
+                    if !line_starts_in_code_block {
+                        let base = match layout {
+                            PageLayout::Portrait => 118,
+                            PageLayout::Landscape => 150,
+                        };
+                        (base * 19 + (font_size as usize) / 2) / (font_size as usize)
+                    } else {
+                        let base = match layout {
+                            PageLayout::Portrait => WRAP_COLS,
+                            PageLayout::Landscape => 130,
+                        };
+                        (base * 19 + (font_size as usize) / 2) / (font_size as usize)
+                    }
+                } else {
+                    let base = match layout {
+                        PageLayout::Portrait => WRAP_COLS,
+                        PageLayout::Landscape => 130,
+                    };
+                    (base * 19 + (font_size as usize) / 2) / (font_size as usize)
+                };
                 let chunks = if is_md_reader && is_table_row {
                     vec![line_to_wrap]
                 } else {
-                    let wrap_limit = if is_md_reader {
-                        if !line_starts_in_code_block {
-                            match layout {
-                                PageLayout::Portrait => 118,
-                                PageLayout::Landscape => 150,
-                            }
-                        } else {
-                            match layout {
-                                PageLayout::Portrait => WRAP_COLS,
-                                PageLayout::Landscape => 130,
-                            }
-                        }
-                    } else {
-                        match layout {
-                            PageLayout::Portrait => WRAP_COLS,
-                            PageLayout::Landscape => 130,
-                        }
-                    };
                     wrap_line(&line_to_wrap, wrap_limit)
                 };
                 let num_chunks = chunks.len();
@@ -774,7 +834,7 @@ impl TextDocument {
                             None
                         },
                         text: chunk,
-                        indent_cols: if chunk_idx > 0 && indent_spaces < WRAP_COLS / 2 {
+                        indent_cols: if chunk_idx > 0 && indent_spaces < wrap_limit / 2 {
                             indent_spaces
                         } else {
                             0
@@ -864,7 +924,7 @@ impl TextDocument {
             });
         }
 
-        let lines_per_page = layout.lines_per_page();
+        let lines_per_page = layout.lines_per_page_for_font(font_size);
         let pages = visual_rows
             .chunks(lines_per_page)
             .map(|c| c.to_vec())
@@ -876,6 +936,7 @@ impl TextDocument {
             format,
             layout,
             render_mode,
+            font_size,
         }
     }
 
@@ -884,11 +945,14 @@ impl TextDocument {
         format: SourceFormat,
         layout: PageLayout,
         delimiter: char,
+        font_size: u32,
     ) -> Self {
-        let max_width: usize = match layout {
+        let base_max_width: usize = match layout {
             PageLayout::Portrait => 114,
             PageLayout::Landscape => 154,
         };
+        let max_width: usize =
+            (base_max_width * 19 + (font_size as usize) / 2) / (font_size as usize);
         let max_cols = (max_width + 3) / 6;
         let records = parse_csv_rows(&content, delimiter);
         let total_cols = records.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -937,6 +1001,7 @@ impl TextDocument {
                 format,
                 layout,
                 render_mode: 1,
+                font_size,
             };
         }
 
@@ -1081,7 +1146,7 @@ impl TextDocument {
         let sep_parts: Vec<String> = col_widths.iter().map(|&w| "─".repeat(w)).collect();
         let sep_text = sep_parts.join("─┼─");
 
-        let lines_per_page = layout.lines_per_page();
+        let lines_per_page = layout.lines_per_page_for_font(font_size);
         let data_rows_per_page = lines_per_page.saturating_sub(2).max(1);
 
         let data_slice = if records.len() > 1 {
@@ -1246,6 +1311,7 @@ impl TextDocument {
             format,
             layout,
             render_mode: 1,
+            font_size,
         }
     }
 
@@ -1302,7 +1368,9 @@ impl TextDocument {
         }
 
         let top_y = 35;
-        let line_height = 26;
+        let line_height = line_height_for_font(self.font_size) as i32;
+        let row_offset_y = (line_height * 18 / 26).max(12);
+        let row_rect_h = (line_height - 2).max(16);
         let text_x = if is_advanced { 48 } else { 110 };
         let default_font = if is_md_reader {
             "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
@@ -1333,24 +1401,29 @@ impl TextDocument {
                 let row_opacity = if has_active { "0.22" } else { "0.14" };
                 let row_rect_x = if is_advanced { 42 } else { 104 };
                 let row_rect_w = page_w.saturating_sub(row_rect_x + 30);
-                let row_y = y - 18;
+                let row_y = y - row_offset_y;
                 svg.push_str(&format!(
-                    r##"<rect x="{row_rect_x}" y="{row_y}" width="{row_rect_w}" height="24" rx="4" fill="{row_fill}" fill-opacity="{row_opacity}"/>
+                    r##"<rect x="{row_rect_x}" y="{row_y}" width="{row_rect_w}" height="{row_rect_h}" rx="4" fill="{row_fill}" fill-opacity="{row_opacity}"/>
 "##
                 ));
 
                 if !is_md_reader || row.is_table_row {
                     let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
-                        15
+                        (self.font_size * 15 / 19).max(11)
                     } else {
-                        19
+                        self.font_size
                     };
-                    let char_w: f32 = if font_size_val == 15 { 9.0 } else { 11.43 };
+                    let char_w: f32 = if is_csv_table || (is_md_reader && row.is_table_row) {
+                        font_size_val as f32 * 0.6
+                    } else {
+                        font_size_val as f32 * 0.601579
+                    };
                     for (global_idx, m) in &this_row_matches {
                         let is_active = active_match_idx == Some(*global_idx);
                         let token_x = text_x as f32 + (m.col as f32) * char_w - 1.0;
                         let token_w = (m.len as f32) * char_w + 2.0;
-                        let token_y = y - 18;
+                        let token_y = y - row_offset_y;
+                        let token_h = (line_height - 4).max(14);
                         let (fill, opacity, stroke) = if is_active {
                             (
                                 "#38bdf8",
@@ -1361,7 +1434,7 @@ impl TextDocument {
                             ("#fbbf24", "0.35", "")
                         };
                         svg.push_str(&format!(
-                            r##"<rect x="{token_x:.1}" y="{token_y}" width="{token_w:.1}" height="22" rx="3" fill="{fill}" fill-opacity="{opacity}"{stroke}/>
+                            r##"<rect x="{token_x:.1}" y="{token_y}" width="{token_w:.1}" height="{token_h}" rx="3" fill="{fill}" fill-opacity="{opacity}"{stroke}/>
 "##
                         ));
                     }
@@ -1370,8 +1443,9 @@ impl TextDocument {
 
             if !is_advanced {
                 if let Some(num) = row.line_number {
+                    let lnum_font_size = (self.font_size * 16 / 19).max(11);
                     svg.push_str(&format!(
-                        r##"<text x="80" y="{y}" text-anchor="end" fill="#52525b" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="16">{num}</text>
+                        r##"<text x="80" y="{y}" text-anchor="end" fill="#52525b" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="{lnum_font_size}">{num}</text>
 "##
                     ));
                 }
@@ -1424,6 +1498,7 @@ impl TextDocument {
                         row.is_last_chunk,
                         self.render_mode,
                         self.layout,
+                        self.font_size,
                     ),
                     SourceFormat::Csv | SourceFormat::Tsv => {
                         let delimiter = if self.format == SourceFormat::Tsv {
@@ -1474,12 +1549,12 @@ impl TextDocument {
                         s
                     }
                 };
-                let font_size = if is_csv_table || (is_md_reader && row.is_table_row) {
-                    "15"
+                let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
+                    (self.font_size * 15 / 19).max(11)
                 } else if is_md_reader {
-                    "18"
+                    (self.font_size * 18 / 19).max(12)
                 } else {
-                    "19"
+                    self.font_size
                 };
                 let row_font = if is_csv_table
                     || (is_md_reader && (row.starts_in_code_block || row.is_table_row))
@@ -1489,7 +1564,7 @@ impl TextDocument {
                     default_font
                 };
                 svg.push_str(&format!(
-                    r##"<text x="{text_x}" y="{y}" fill="#e4e4e7" font-family="{row_font}" font-size="{font_size}" xml:space="preserve">{inner}</text>
+                    r##"<text x="{text_x}" y="{y}" fill="#e4e4e7" font-family="{row_font}" font-size="{font_size_val}" xml:space="preserve">{inner}</text>
 "##
                 ));
             }
@@ -1547,19 +1622,24 @@ impl TextDocument {
         }
 
         let top_y = 35.0;
-        let line_height = 26.0;
+        let line_height = line_height_for_font(self.font_size) as f32;
         let text_x = if is_advanced { 48.0 } else { 110.0 };
         let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
-            15
+            (self.font_size * 15 / 19).max(11)
         } else {
-            19
+            self.font_size
         };
-        let char_w: f32 = if font_size_val == 15 { 9.0 } else { 11.43 };
+        let char_w: f32 = if is_csv_table || (is_md_reader && row.is_table_row) {
+            font_size_val as f32 * 0.6
+        } else {
+            font_size_val as f32 * 0.601579
+        };
 
+        let row_offset_y = (line_height * 18.0 / 26.0).max(12.0);
         let token_x = text_x + (m.col as f32) * char_w - 1.0;
-        let token_y = top_y + (m.row as f32 + 1.0) * line_height - 18.0;
+        let token_y = top_y + (m.row as f32 + 1.0) * line_height - row_offset_y;
         let token_w = (m.len as f32) * char_w + 2.0;
-        let token_h = 22.0;
+        let token_h = (line_height - 4.0).max(14.0);
 
         Some((token_x, token_y, token_w, token_h))
     }
@@ -4117,6 +4197,7 @@ enum AlignedTableEntry {
 fn build_aligned_markdown_tables<S: AsRef<str>>(
     raw_lines: &[S],
     layout: PageLayout,
+    font_size: u32,
 ) -> std::collections::HashMap<usize, AlignedTableEntry> {
     let mut aligned_lines = std::collections::HashMap::new();
     let mut i = 0;
@@ -4124,10 +4205,11 @@ fn build_aligned_markdown_tables<S: AsRef<str>>(
     let mut in_frontmatter = false;
     let mut past_frontmatter = false;
 
-    let max_width: usize = match layout {
+    let base_max_width: usize = match layout {
         PageLayout::Portrait => 114,
         PageLayout::Landscape => 154,
     };
+    let max_width: usize = (base_max_width * 19 + (font_size as usize) / 2) / (font_size as usize);
     let max_cols = (max_width + 3) / 6;
 
     while i < raw_lines.len() {
@@ -4388,6 +4470,7 @@ fn highlight_md_row(
     is_last_chunk: bool,
     render_mode: u8,
     layout: PageLayout,
+    font_size: u32,
 ) -> String {
     if render_mode == 1 {
         highlight_md_reader_row(
@@ -4402,6 +4485,7 @@ fn highlight_md_row(
             is_table_separator,
             table_cells,
             layout,
+            font_size,
         )
     } else {
         highlight_md_source_row(
@@ -4432,6 +4516,7 @@ fn highlight_md_reader_row(
     is_table_separator: bool,
     table_cells: Option<&[String]>,
     layout: PageLayout,
+    font_size: u32,
 ) -> String {
     let mut out = String::with_capacity(text.len() * 2 + indent_cols * 15);
 
@@ -4451,8 +4536,9 @@ fn highlight_md_reader_row(
 
     // Content inside a fenced code block
     if starts_in_code_block {
+        let code_size = (font_size * 16 / 19).max(11);
         out.push_str(&format!(
-            r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="16">{}</tspan>"##,
+            r##"<tspan fill="#86efac" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="{code_size}">{}</tspan>"##,
             escape_xml(text)
         ));
         return out;
@@ -4467,11 +4553,12 @@ fn highlight_md_reader_row(
                     escape_xml(text)
                 ));
             } else {
-                let rule_len = if layout == PageLayout::Landscape {
+                let base_rule_len = if layout == PageLayout::Landscape {
                     108
                 } else {
                     76
                 };
+                let rule_len = (base_rule_len * 19) / (font_size as usize);
                 let rule = "─".repeat(rule_len);
                 out.push_str(&format!(r##"<tspan fill="#3f3f46">{rule}</tspan>"##));
             }
@@ -4485,16 +4572,18 @@ fn highlight_md_reader_row(
     let trimmed = text.trim();
     if let Some((_ch, _len, info)) = parse_code_fence(trimmed) {
         if !info.is_empty() {
+            let info_size = (font_size * 15 / 19).max(11);
             out.push_str(&format!(
-                r##"<tspan fill="#52525b">╭─ </tspan><tspan fill="#7dd3fc" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="15">{}</tspan>"##,
+                r##"<tspan fill="#52525b">╭─ </tspan><tspan fill="#7dd3fc" font-family="ui-monospace, Menlo, Monaco, Consolas, monospace" font-size="{info_size}">{}</tspan>"##,
                 escape_xml(info)
             ));
         } else {
-            let rule_len = if layout == PageLayout::Landscape {
+            let base_rule_len = if layout == PageLayout::Landscape {
                 90
             } else {
                 65
             };
+            let rule_len = (base_rule_len * 19) / (font_size as usize);
             let rule = "─".repeat(rule_len);
             out.push_str(&format!(r##"<tspan fill="#52525b">╰{rule}</tspan>"##));
         }
@@ -4503,14 +4592,15 @@ fn highlight_md_reader_row(
 
     // Heading (chunk 0 or continuation)
     if let Some(level) = heading_level {
-        let (color, weight, size) = match level {
-            1 => ("#fbbf24", "bold", "24"), // H1: Amber Gold, 24px
-            2 => ("#38bdf8", "bold", "21"), // H2: Sky Blue, 21px
-            3 => ("#34d399", "bold", "19"), // H3: Emerald, 19px
-            4 => ("#a78bfa", "bold", "18"), // H4: Purple, 18px
-            5 => ("#f472b6", "bold", "17"), // H5: Pink, 17px
-            _ => ("#94a3b8", "bold", "16"), // H6: Slate, 16px
+        let (color, weight, base_size): (&str, &str, u32) = match level {
+            1 => ("#fbbf24", "bold", 24), // H1: Amber Gold, 24px
+            2 => ("#38bdf8", "bold", 21), // H2: Sky Blue, 21px
+            3 => ("#34d399", "bold", 19), // H3: Emerald, 19px
+            4 => ("#a78bfa", "bold", 18), // H4: Purple, 18px
+            5 => ("#f472b6", "bold", 17), // H5: Pink, 17px
+            _ => ("#94a3b8", "bold", 16), // H6: Slate, 16px
         };
+        let size = (base_size * font_size / 19).max(12);
         let stripped = text.trim_start();
         let prefix_len = if stripped.starts_with('#') {
             stripped.chars().take_while(|&c| c == '#').count()
@@ -10210,5 +10300,72 @@ status = "OK"
         assert_eq!(matches[0].col, 8);
         // Logical line_col in the source line is 100
         assert_eq!(matches[0].line_col, 100);
+    }
+
+    #[test]
+    fn text_font_size_controls_pagination_and_wrapping() {
+        // Document with 100 short lines
+        let hundred_lines = (1..=100)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let doc_13 = TextDocument::from_string_with_font_size(
+            hundred_lines.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            13,
+        );
+        let doc_19 = TextDocument::from_string_with_font_size(
+            hundred_lines.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+        );
+        let doc_28 = TextDocument::from_string_with_font_size(
+            hundred_lines,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            28,
+        );
+
+        assert_eq!(doc_13.font_size(), 13);
+        assert_eq!(doc_19.font_size(), 19);
+        assert_eq!(doc_28.font_size(), 28);
+
+        // At 13px: 84 lines/page -> 100 lines take 2 pages
+        assert_eq!(doc_13.page_count(), 2);
+        // At 19px: 58 lines/page -> 100 lines take 2 pages
+        assert_eq!(doc_19.page_count(), 2);
+        // At 28px: 40 lines/page -> 100 lines take 3 pages (40 + 40 + 20)
+        assert_eq!(doc_28.page_count(), 3);
+
+        // Wrapping test: an 80-char line
+        let eighty_chars = "w".repeat(80);
+        let wrap_doc_19 = TextDocument::from_string_with_font_size(
+            eighty_chars.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+        );
+        let wrap_doc_28 = TextDocument::from_string_with_font_size(
+            eighty_chars,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            28,
+        );
+
+        // 80 chars < 92 cols -> 1 visual row at 19px
+        let svg_19 = wrap_doc_19.page_svg(0).unwrap();
+        assert!(svg_19.contains(r#"font-size="19""#));
+
+        // 80 chars > 62 cols -> wraps into 2 visual rows at 28px
+        let svg_28 = wrap_doc_28.page_svg(0).unwrap();
+        assert!(svg_28.contains(r#"font-size="28""#));
     }
 }

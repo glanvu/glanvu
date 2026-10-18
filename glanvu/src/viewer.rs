@@ -240,6 +240,7 @@ struct TextReloadRequest {
     path: PathBuf,
     layout: glanvu_core::PageLayout,
     render_mode: u8,
+    font_size: u32,
     target_page: usize,
     win_w: u32,
     win_h: u32,
@@ -288,10 +289,11 @@ fn spawn_text_reload_worker() -> (Arc<TextReloadMailbox>, Receiver<TextReloadRes
     std::thread::spawn(move || {
         while let Some(req) = worker_mailbox.take_blocking() {
             let result = (|| {
-                let doc = glanvu_core::TextDocument::load_with_options(
+                let doc = glanvu_core::TextDocument::load_with_font_size(
                     &req.path,
                     req.layout,
                     req.render_mode,
+                    req.font_size,
                 )?;
                 let page = req.target_page.min(doc.page_count().saturating_sub(1));
                 let (pw, ph) = doc.page_size(page)?;
@@ -3865,6 +3867,8 @@ struct App {
     last_doc_search_matches: Vec<glanvu_core::DocMatch>,
     /// Whether standalone in-document search highlights are currently active.
     doc_search_highlighted: bool,
+    /// Selected font size index into `glanvu_core::FONT_SIZES` for text rendering.
+    text_font_size_idx: usize,
 }
 
 /// Static keyboard cheatsheet shown by the help overlay (H).
@@ -3921,9 +3925,9 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("Enter", "directory explorer"),
     Keys("Tab / G", "thumbnail grid"),
     Section("View"),
-    Keys("+ / − / wheel", "zoom in · out"),
+    Keys("+ / − / wheel", "zoom (font size in text)"),
     Keys("drag", "pan"),
-    Keys("0  ·  1", "fit  ·  actual size (1:1)"),
+    Keys("0  ·  1", "fit / reset font · 1:1"),
     Keys("T", "turn (rotate) 90°"),
     Keys("M", "render mode (md/csv)"),
     Keys("Space / F11 / dbl-click", "fullscreen"),
@@ -4140,8 +4144,47 @@ impl App {
             .is_some_and(|fmt| fmt.render_mode_count() > 1 && self.get_render_mode(fmt) == 1)
     }
 
+    fn current_text_font_size(&self) -> u32 {
+        glanvu_core::FONT_SIZES
+            .get(self.text_font_size_idx)
+            .copied()
+            .unwrap_or(glanvu_core::DEFAULT_FONT_SIZE)
+    }
+
+    fn adjust_text_font_size(&mut self, delta: i32) {
+        if !self.current_is_text {
+            return;
+        }
+        let old_idx = self.text_font_size_idx;
+        let max_idx = glanvu_core::FONT_SIZES.len().saturating_sub(1);
+        let new_idx = (old_idx as i32 + delta).clamp(0, max_idx as i32) as usize;
+        if new_idx == old_idx {
+            return;
+        }
+        self.text_font_size_idx = new_idx;
+        let size = glanvu_core::FONT_SIZES[new_idx];
+        self.show_status(&format!("Text size: {size}px"));
+        self.refresh_text_doc();
+        self.redraw();
+    }
+
+    fn reset_text_font_size(&mut self) {
+        if !self.current_is_text {
+            return;
+        }
+        if self.text_font_size_idx == glanvu_core::DEFAULT_FONT_SIZE_INDEX {
+            return;
+        }
+        self.text_font_size_idx = glanvu_core::DEFAULT_FONT_SIZE_INDEX;
+        let size = glanvu_core::DEFAULT_FONT_SIZE;
+        self.show_status(&format!("Text size: {size}px"));
+        self.refresh_text_doc();
+        self.redraw();
+    }
+
     /// (Re)load the parsed text document for the current file and render its first page.
     fn refresh_text_doc(&mut self) {
+        let font_size = self.current_text_font_size();
         self.text_doc = if self.current_is_text {
             let render_mode = self
                 .current_format()
@@ -4154,7 +4197,8 @@ impl App {
                 glanvu_core::PageLayout::Portrait
             };
             self.nav.current_path().and_then(|p| {
-                glanvu_core::TextDocument::load_with_options(p, layout, render_mode).ok()
+                glanvu_core::TextDocument::load_with_font_size(p, layout, render_mode, font_size)
+                    .ok()
             })
         } else {
             None
@@ -6396,6 +6440,7 @@ impl ApplicationHandler for App {
                                             path,
                                             layout,
                                             render_mode: next,
+                                            font_size: self.current_text_font_size(),
                                             target_page: self.current_text_page,
                                             win_w: win_w.max(1.0) as u32,
                                             win_h: win_h.max(1.0) as u32,
@@ -6429,9 +6474,13 @@ impl ApplicationHandler for App {
                         self.redraw();
                     }
                     Key::Character("0") => {
-                        self.state = ViewState::fit();
-                        self.schedule_svg_rerender();
-                        self.redraw();
+                        if self.current_is_text {
+                            self.reset_text_font_size();
+                        } else {
+                            self.state = ViewState::fit();
+                            self.schedule_svg_rerender();
+                            self.redraw();
+                        }
                     }
                     Key::Character("1") => {
                         self.state.fit = false;
@@ -6441,14 +6490,22 @@ impl ApplicationHandler for App {
                         self.redraw();
                     }
                     Key::Character("+") | Key::Character("=") => {
-                        self.state.zoom *= 1.25;
-                        self.schedule_svg_rerender();
-                        self.redraw();
+                        if self.current_is_text {
+                            self.adjust_text_font_size(1);
+                        } else {
+                            self.state.zoom *= 1.25;
+                            self.schedule_svg_rerender();
+                            self.redraw();
+                        }
                     }
                     Key::Character("-") | Key::Character("_") => {
-                        self.state.zoom /= 1.25;
-                        self.schedule_svg_rerender();
-                        self.redraw();
+                        if self.current_is_text {
+                            self.adjust_text_font_size(-1);
+                        } else {
+                            self.state.zoom /= 1.25;
+                            self.schedule_svg_rerender();
+                            self.redraw();
+                        }
                     }
                     Key::Character("s") | Key::Character("S") => {
                         self.toggle_slideshow();
@@ -7237,6 +7294,7 @@ pub fn run(path: &str) -> ExitCode {
         last_doc_search_sel: 0,
         last_doc_search_matches: Vec::new(),
         doc_search_highlighted: false,
+        text_font_size_idx: glanvu_core::DEFAULT_FONT_SIZE_INDEX,
     };
 
     match event_loop.run_app(&mut app) {
@@ -7362,6 +7420,7 @@ pub fn run_empty() -> ExitCode {
         last_doc_search_sel: 0,
         last_doc_search_matches: Vec::new(),
         doc_search_highlighted: false,
+        text_font_size_idx: glanvu_core::DEFAULT_FONT_SIZE_INDEX,
     };
 
     match event_loop.run_app(&mut app) {
