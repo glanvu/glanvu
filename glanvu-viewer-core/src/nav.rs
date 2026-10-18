@@ -29,7 +29,7 @@ fn file_mtime(p: &Path) -> Option<SystemTime> {
 pub const PREFETCH_RADIUS: usize = 2;
 
 /// Order in which images are listed in the folder.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
     #[default]
     NameAsc,

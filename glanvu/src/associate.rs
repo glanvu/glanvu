@@ -16,12 +16,70 @@
 use std::process::ExitCode;
 use std::sync::Mutex;
 
-/// Image extensions Glanvu can decode. Keep in sync with `CFBundleTypeExtensions` in
+/// File extensions Glanvu can open and render. Keep in sync with `CFBundleTypeExtensions` in
 /// `scripts/build-macos-app.sh` and the `MimeType` line in `scripts/build-linux-pkg.sh`'s
 /// `.desktop` entry.
 pub const SUPPORTED_EXTS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "exr", "qoi", "dds", "pbm",
-    "pgm", "ppm", "pfm", "ff", "farbfeld", "tga", "svg", "pdf",
+    // Image formats
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "tif",
+    "tiff",
+    "webp",
+    "ico",
+    "exr",
+    "qoi",
+    "dds",
+    "pbm",
+    "pgm",
+    "ppm",
+    "pfm",
+    "ff",
+    "farbfeld",
+    "tga",
+    "svg",
+    "pdf",
+    // Documents, data & configs
+    "txt",
+    "log",
+    "json",
+    "jsonl",
+    "xml",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "editorconfig",
+    "gitconfig",
+    "toml",
+    "yaml",
+    "yml",
+    "md",
+    "markdown",
+    "csv",
+    "tsv",
+    "tab",
+    "diff",
+    "patch",
+    // Scripts & source code
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "py",
+    "pyw",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "mts",
+    "cts",
+    "jsx",
+    "tsx",
 ];
 
 /// Result of a background set/unset operation, posted here for the viewer to pick up.
@@ -106,7 +164,7 @@ pub fn unset_default_blocking() -> String {
 
 fn print_help() {
     println!(
-        "glanvu set-default - make Glanvu the default app for image files\n\
+        "glanvu set-default - make Glanvu the default app for images, documents, and code files\n\
          \n\
          USAGE:\n\
          \x20   glanvu set-default                 set Glanvu as default for all supported types\n\

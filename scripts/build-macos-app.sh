@@ -144,7 +144,6 @@ cat > "$CONTENTS/Info.plist" <<PLIST
       <string>Image</string>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
-      <!-- LSHandlerRank = Default makes Glanvu a candidate for "default app" -->
       <key>LSHandlerRank</key>
       <string>Alternate</string>
       <key>CFBundleTypeExtensions</key>
@@ -181,6 +180,84 @@ cat > "$CONTENTS/Info.plist" <<PLIST
         <string>image/webp</string>
         <string>image/svg+xml</string>
         <string>application/pdf</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>txt</string>
+        <string>log</string>
+        <string>json</string>
+        <string>jsonl</string>
+        <string>xml</string>
+        <string>ini</string>
+        <string>cfg</string>
+        <string>conf</string>
+        <string>env</string>
+        <string>properties</string>
+        <string>editorconfig</string>
+        <string>gitconfig</string>
+        <string>toml</string>
+        <string>yaml</string>
+        <string>yml</string>
+        <string>md</string>
+        <string>markdown</string>
+        <string>csv</string>
+        <string>tsv</string>
+        <string>tab</string>
+        <string>diff</string>
+        <string>patch</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>text/plain</string>
+        <string>application/json</string>
+        <string>application/xml</string>
+        <string>text/markdown</string>
+        <string>text/csv</string>
+        <string>text/tab-separated-values</string>
+        <string>application/toml</string>
+        <string>application/yaml</string>
+        <string>text/x-diff</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Source Code</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>sh</string>
+        <string>bash</string>
+        <string>zsh</string>
+        <string>sql</string>
+        <string>py</string>
+        <string>pyw</string>
+        <string>js</string>
+        <string>mjs</string>
+        <string>cjs</string>
+        <string>ts</string>
+        <string>mts</string>
+        <string>cts</string>
+        <string>jsx</string>
+        <string>tsx</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>application/x-sh</string>
+        <string>application/sql</string>
+        <string>text/x-python</string>
+        <string>application/javascript</string>
+        <string>application/typescript</string>
       </array>
     </dict>
   </array>

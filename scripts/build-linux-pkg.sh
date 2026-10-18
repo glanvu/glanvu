@@ -101,7 +101,7 @@ Exec=glanvu %F
 Icon=glanvu
 Type=Application
 Categories=Graphics;Viewer;
-MimeType=image/jpeg;image/png;image/gif;image/bmp;image/tiff;image/webp;image/svg+xml;application/pdf;
+MimeType=image/jpeg;image/png;image/gif;image/bmp;image/tiff;image/webp;image/svg+xml;application/pdf;text/plain;application/json;application/xml;text/markdown;text/csv;text/tab-separated-values;application/toml;application/yaml;text/x-diff;application/x-sh;text/x-python;application/javascript;
 StartupNotify=true
 EOF
 

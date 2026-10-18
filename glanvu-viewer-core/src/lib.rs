@@ -9,6 +9,7 @@
 //!
 //! **Never let GPU types leak into this crate.**
 
+pub mod config;
 pub mod explorer;
 pub mod find;
 pub mod grid;

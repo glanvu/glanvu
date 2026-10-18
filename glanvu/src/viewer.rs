@@ -29,6 +29,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 use arboard::Clipboard;
 use glanvu_core::DecodedImage;
 
+use glanvu_viewer_core::config::UserConfig;
 use glanvu_viewer_core::explorer::{
     ExplorerState, FONT as EXPLORER_FONT, LINE_H as EXPLORER_LINE_H, PANEL_W,
 };
@@ -1204,6 +1205,13 @@ struct Gpu {
     info_layout_scale: f32,
     info_line_h: f32,
     info_text_cache: String,
+    // Settings overlay (shown below Info overlay when I is pressed):
+    settings_uniform_buf: wgpu::Buffer,
+    settings_uniform_bind: wgpu::BindGroup,
+    settings_text_buf: TextBuffer,
+    settings_layout_scale: f32,
+    settings_line_h: f32,
+    settings_text_cache: String,
     // GPU-uploaded thumbnails keyed by path.
     thumb_binds: std::collections::HashMap<PathBuf, wgpu::BindGroup>,
     // SVG deep-zoom tiles: cached tile textures keyed by (epoch, col, row) with a last-used tick
@@ -1564,6 +1572,11 @@ impl Gpu {
         let info_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &info_uniform_buf);
         let info_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
 
+        let settings_uniform_buf = make_uniform_buffer(&device);
+        let settings_uniform_bind =
+            make_uniform_bind(&device, &uniform_layout_solo, &settings_uniform_buf);
+        let settings_text_buf = TextBuffer::new(&mut font_system, Metrics::new(15.0, 22.5));
+
         // Date overlay (bottom-right counterpart to the path overlay).
         let date_uniform_buf = make_uniform_buffer(&device);
         let date_uniform_bind = make_uniform_bind(&device, &uniform_layout_solo, &date_uniform_buf);
@@ -1695,6 +1708,12 @@ impl Gpu {
             info_layout_scale: -1.0,
             info_line_h: 22.5,
             info_text_cache: String::new(),
+            settings_uniform_buf,
+            settings_uniform_bind,
+            settings_text_buf,
+            settings_layout_scale: -1.0,
+            settings_line_h: 22.5,
+            settings_text_cache: String::new(),
             thumb_binds: std::collections::HashMap::new(),
             svg_tile_tex: std::collections::HashMap::new(),
             svg_tile_mvp_bufs,
@@ -2012,6 +2031,49 @@ impl Gpu {
         let bw = (text_w + 2.0 * pad_h).min(win_w - 2.0 * margin);
         let bh = (rows * self.info_line_h + 2.0 * pad_v).min(win_h - 2.0 * margin);
         (margin, margin, bw, bh, margin + pad_h, margin + pad_v)
+    }
+
+    /// Lay out the settings/preferences overlay (shown below info overlay when I is pressed).
+    /// Returns `(box_x, box_y, box_w, box_h, text_x, text_y)`.
+    fn layout_settings(
+        &mut self,
+        text: &str,
+        scale: f32,
+        win_w: f32,
+        win_h: f32,
+        top_y: f32,
+    ) -> (f32, f32, f32, f32, f32, f32) {
+        if self.settings_text_cache != text
+            || (self.settings_layout_scale - scale).abs() > f32::EPSILON
+        {
+            self.settings_text_cache = text.to_string();
+            self.settings_layout_scale = scale;
+            let (font, lh) = ui_text::metrics(ui_text::BODY, scale);
+            self.settings_line_h = lh;
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font, lh));
+            buf.set_wrap(&mut self.font_system, Wrap::None);
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Basic,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.settings_text_buf = buf;
+        }
+        let pad_h = 16.0 * scale;
+        let pad_v = 12.0 * scale;
+        let margin = 16.0 * scale;
+        let text_w = self
+            .settings_text_buf
+            .layout_runs()
+            .fold(0.0_f32, |m, r| m.max(r.line_w));
+        let rows = text.lines().count().max(1) as f32;
+        let bw = (text_w + 2.0 * pad_h).min(win_w - 2.0 * margin);
+        let bh = (rows * self.settings_line_h + 2.0 * pad_v).min((win_h - top_y - margin).max(0.0));
+        (margin, top_y, bw, bh, margin + pad_h, top_y + pad_v)
     }
 
     /// Lay out the centered status overlay (slideshow message, etc.).
@@ -2339,6 +2401,7 @@ impl Gpu {
         confirm: Option<&str>,
         about: bool,
         info: Option<&str>,
+        settings: Option<&str>,
         scale: f32,
         logo: bool,
         find_bar: Option<&str>,
@@ -2573,6 +2636,28 @@ impl Gpu {
             show_info_box = true;
         }
 
+        // Settings overlay box (shown below Info overlay when I is pressed).
+        let mut show_settings_box = false;
+        let mut settings_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        if let Some(settings_text) = settings {
+            let top_y = if show_info_box {
+                let (_, by, _, bh, _, _) = info_coords;
+                by + bh + 10.0 * scale
+            } else {
+                16.0 * scale
+            };
+            settings_coords = self.layout_settings(settings_text, scale, win_w, win_h, top_y);
+            let (bx, by, bw, bh, _, _) = settings_coords;
+            self.queue.write_buffer(
+                &self.settings_uniform_buf,
+                0,
+                bytemuck::bytes_of(&Uniforms {
+                    mvp: rect_mvp(bw, bh, bx, by, win_w, win_h),
+                }),
+            );
+            show_settings_box = true;
+        }
+
         // Top search bar (find in document).
         let mut show_find_bar = false;
         let mut findbar_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
@@ -2778,6 +2863,7 @@ impl Gpu {
             || show_help_donate
             || show_about_box
             || show_info_box
+            || show_settings_box
             || show_find_bar;
         let text_ok = if need_text {
             self.viewport.update(
@@ -2820,6 +2906,7 @@ impl Gpu {
             let donate_ptr = &self.donate_text_buf as *const TextBuffer;
             let about_ptr = &self.about_text_buf as *const TextBuffer;
             let info_ptr = &self.info_text_buf as *const TextBuffer;
+            let settings_ptr = &self.settings_text_buf as *const TextBuffer;
             // explorer_item_bufs is a Vec; get raw pointers to each element.
             let e_ptrs: Vec<*const TextBuffer> = self
                 .explorer_item_bufs
@@ -3114,6 +3201,23 @@ impl Gpu {
                     custom_glyphs: &[],
                 });
             }
+            if show_settings_box {
+                let (bx, by, bw, bh, tx, ty) = settings_coords;
+                areas.push(TextArea {
+                    buffer: unsafe { &*settings_ptr },
+                    left: tx,
+                    top: ty,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + bw) as i32,
+                        bottom: (by + bh) as i32,
+                    },
+                    default_color: Color::rgb(220, 225, 235),
+                    custom_glyphs: &[],
+                });
+            }
             if show_find_bar {
                 let f_buf = &self.findbar_text_buf as *const TextBuffer;
                 let (bx, by, bw, bh, tx, ty) = findbar_coords;
@@ -3294,6 +3398,13 @@ impl Gpu {
             // 6c. Info overlay box (I key) — top-left, same translucent dark bg as help/about.
             if show_info_box {
                 pass.set_bind_group(0, &self.info_uniform_bind, &[]);
+                pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
+                pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            }
+
+            // 6c-2. Settings overlay box (shown below Info overlay when I is pressed).
+            if show_settings_box {
+                pass.set_bind_group(0, &self.settings_uniform_bind, &[]);
                 pass.set_bind_group(1, &self.explorer_bg_bind, &[]);
                 pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
             }
@@ -3781,6 +3892,8 @@ struct App {
     single_drag_moved: bool,
     /// Current sort order.
     sort_mode: glanvu_viewer_core::nav::SortMode,
+    /// Persistent user configuration.
+    config: UserConfig,
     /// Cached mtime string for the date overlay (updated when the path overlay fires).
     date_text: String,
     /// Whether the current image is SVG — gates the crisp re-raster-on-settle behavior (D11).
@@ -3875,9 +3988,9 @@ struct App {
 /// Text for the D-key confirmation overlay. `set` = true → set as default; false → unset.
 fn confirm_overlay_text(set: bool) -> &'static str {
     if set {
-        "Set Glanvu as default?\n\njpg  jpeg  png  gif\nbmp  tif   tiff webp  svg  pdf\n\nEnter = confirm   Esc = cancel"
+        "Set Glanvu as default app?\n\nImages, documents & code\n(jpg, png, webp, svg, pdf, md, json, txt, code)\n\nEnter = confirm   Esc = cancel"
     } else {
-        "Restore previous defaults?\n\nGlanvu won't open images\nby default anymore.\n\nEnter = confirm   Esc = cancel"
+        "Restore previous defaults?\n\nGlanvu won't open files\nby default anymore.\n\nEnter = confirm   Esc = cancel"
     }
 }
 
@@ -3937,7 +4050,7 @@ const HELP_LEFT: &[HelpRow] = &[
 const HELP_RIGHT: &[HelpRow] = &[
     Section("Organize"),
     Keys("O", "sort order (name / date)"),
-    Keys("I", "image info"),
+    Keys("I", "file info & preferences"),
     Keys("F2 / R", "rename"),
     Keys("C  ·  Shift+C", "copy content · copy path"),
     Keys("F5", "refresh from disk"),
@@ -4162,6 +4275,8 @@ impl App {
             return;
         }
         self.text_font_size_idx = new_idx;
+        self.config.set_text_font_size_idx(new_idx);
+        let _ = self.config.save();
         let size = glanvu_core::FONT_SIZES[new_idx];
         self.show_status(&format!("Text size: {size}px"));
         self.refresh_text_doc();
@@ -4176,6 +4291,8 @@ impl App {
             return;
         }
         self.text_font_size_idx = glanvu_core::DEFAULT_FONT_SIZE_INDEX;
+        self.config.set_text_font_size_idx(self.text_font_size_idx);
+        let _ = self.config.save();
         let size = glanvu_core::DEFAULT_FONT_SIZE;
         self.show_status(&format!("Text size: {size}px"));
         self.refresh_text_doc();
@@ -4514,6 +4631,33 @@ impl App {
             ));
         }
         Some(lines.join("\n"))
+    }
+
+    /// Compose the settings/preferences panel body shown below the file info panel (I key).
+    fn build_settings_string(&self) -> String {
+        let sort_label = match self.sort_mode {
+            glanvu_viewer_core::nav::SortMode::NameAsc => "Name (Asc)",
+            glanvu_viewer_core::nav::SortMode::DateDesc => "Date (Desc)",
+        };
+        let font_size = self.current_text_font_size();
+        let slideshow_secs = self.slideshow_interval.as_secs();
+        let line_num_str = if self.config.line_numbers {
+            "On"
+        } else {
+            "Off"
+        };
+        let wrap_str = if self.config.word_wrap { "On" } else { "Off" };
+        let cfg_path = UserConfig::display_path();
+
+        format!(
+            "Preferences\n\
+             Sort: {sort_label}  [O]\n\
+             Text font: {font_size}px  [+/-/0]\n\
+             Slideshow: {slideshow_secs}s  [S]\n\
+             Line numbers: {line_num_str}  [L]\n\
+             Word wrap: {wrap_str}  [W]\n\
+             Config: {cfg_path}"
+        )
     }
 
     /// Body text for the delete confirmation modal. Shows the filename for a single image,
@@ -5164,6 +5308,8 @@ impl App {
             .collect();
 
         self.sort_mode = self.sort_mode.next();
+        self.config.sort_mode = self.sort_mode;
+        let _ = self.config.save();
         self.nav.resort(self.sort_mode);
 
         // Remap to the new indices by path.
@@ -5429,6 +5575,11 @@ impl App {
                 .unwrap_or(1.0);
             let modal = self.modal_text();
             let confirm_text = modal.as_deref();
+            let settings = if self.info_visible {
+                Some(self.build_settings_string())
+            } else {
+                None
+            };
             let Some(gpu) = self.gpu.as_mut() else { return };
             let win = (gpu.config.width as f32, gpu.config.height as f32);
             // Re-use the status overlay as a centred hint text (hidden when a modal overlay is active).
@@ -5450,6 +5601,7 @@ impl App {
                 confirm_text,
                 self.about_visible,
                 None, // no image in empty mode → no info panel
+                settings.as_deref(),
                 scale,
                 true,
                 None, // no find bar in empty mode
@@ -5595,6 +5747,11 @@ impl App {
         } else {
             None
         };
+        let settings = if self.info_visible {
+            Some(self.build_settings_string())
+        } else {
+            None
+        };
         // Active modal overlay text — computed before borrowing gpu (it's a &self method).
         let modal_text = self.modal_text();
         let scale = self
@@ -5624,6 +5781,7 @@ impl App {
             confirm_text,
             self.about_visible,
             info.as_deref(),
+            settings.as_deref(),
             scale,
             false,
             None,
@@ -6593,6 +6751,8 @@ impl ApplicationHandler for App {
                     Key::Character("C") => self.copy_path_to_clipboard(),
                     Key::Character("o") | Key::Character("O") => {
                         self.sort_mode = self.sort_mode.next();
+                        self.config.sort_mode = self.sort_mode;
+                        let _ = self.config.save();
                         self.nav.resort(self.sort_mode);
                         self.show_status(self.sort_mode.label());
                         self.redraw();
@@ -7200,7 +7360,20 @@ pub fn run(path: &str) -> ExitCode {
         0
     });
 
-    let nav = FolderNav::new(paths, index, first_path, first_image);
+    let user_config = UserConfig::load();
+    let initial_sort_mode = user_config.sort_mode;
+    let initial_font_size_idx = user_config.text_font_size_idx();
+    let initial_slideshow_interval = Duration::from_secs(user_config.slideshow_interval_secs);
+    let initial_mode = if user_config.start_in_grid {
+        ViewMode::Grid
+    } else {
+        ViewMode::Single
+    };
+
+    let mut nav = FolderNav::new(paths, index, first_path, first_image);
+    if initial_sort_mode != glanvu_viewer_core::nav::SortMode::NameAsc {
+        nav.resort(initial_sort_mode);
+    }
     let (svg_rerender_mailbox, svg_rerender_rx) = spawn_svg_rerender_worker();
     let (tile_queue, tile_rx) = spawn_tile_worker();
     let (text_reload_mailbox, text_reload_rx) = spawn_text_reload_worker();
@@ -7228,7 +7401,7 @@ pub fn run(path: &str) -> ExitCode {
         nav,
         img_size,
         state: ViewState::fit(),
-        mode: ViewMode::Single,
+        mode: initial_mode,
         grid: GridState::new(index),
         thumbs: ThumbnailCache::new(),
         window: None,
@@ -7238,7 +7411,7 @@ pub fn run(path: &str) -> ExitCode {
         dragging: false,
         overlay_until: None,
         slideshow_next: None,
-        slideshow_interval: Duration::from_secs(3),
+        slideshow_interval: initial_slideshow_interval,
         status_text: String::new(),
         status_until: None,
         explorer: None,
@@ -7257,7 +7430,8 @@ pub fn run(path: &str) -> ExitCode {
         last_single_click: None,
         single_drag_start: None,
         single_drag_moved: false,
-        sort_mode: glanvu_viewer_core::nav::SortMode::default(),
+        sort_mode: initial_sort_mode,
+        config: user_config,
         date_text: String::new(),
         current_is_svg,
         svg_rerender_at: None,
@@ -7294,7 +7468,7 @@ pub fn run(path: &str) -> ExitCode {
         last_doc_search_sel: 0,
         last_doc_search_matches: Vec::new(),
         doc_search_highlighted: false,
-        text_font_size_idx: glanvu_core::DEFAULT_FONT_SIZE_INDEX,
+        text_font_size_idx: initial_font_size_idx,
     };
 
     match event_loop.run_app(&mut app) {
@@ -7349,6 +7523,11 @@ pub fn run_empty() -> ExitCode {
     // Temporary simulation for testing: pass "0.9.0" so it detects the remote 0.9.1 release.
     crate::updater::spawn_update_check(crate::VERSION);
 
+    let user_config = UserConfig::load();
+    let initial_sort_mode = user_config.sort_mode;
+    let initial_font_size_idx = user_config.text_font_size_idx();
+    let initial_slideshow_interval = Duration::from_secs(user_config.slideshow_interval_secs);
+
     let mut app = App {
         start,
         nav,
@@ -7364,7 +7543,7 @@ pub fn run_empty() -> ExitCode {
         dragging: false,
         overlay_until: None,
         slideshow_next: None,
-        slideshow_interval: Duration::from_secs(3),
+        slideshow_interval: initial_slideshow_interval,
         status_text: String::new(),
         status_until: None,
         explorer: None,
@@ -7383,7 +7562,8 @@ pub fn run_empty() -> ExitCode {
         last_single_click: None,
         single_drag_start: None,
         single_drag_moved: false,
-        sort_mode: glanvu_viewer_core::nav::SortMode::default(),
+        sort_mode: initial_sort_mode,
+        config: user_config,
         date_text: String::new(),
         current_is_svg: false,
         svg_rerender_at: None,
@@ -7420,7 +7600,7 @@ pub fn run_empty() -> ExitCode {
         last_doc_search_sel: 0,
         last_doc_search_matches: Vec::new(),
         doc_search_highlighted: false,
-        text_font_size_idx: glanvu_core::DEFAULT_FONT_SIZE_INDEX,
+        text_font_size_idx: initial_font_size_idx,
     };
 
     match event_loop.run_app(&mut app) {
