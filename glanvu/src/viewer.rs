@@ -27,7 +27,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use arboard::Clipboard;
-use glanvu_core::DecodedImage;
+use glanvu_core::{DecodedImage, SourceFormat};
 
 use glanvu_viewer_core::config::UserConfig;
 use glanvu_viewer_core::explorer::{
@@ -242,6 +242,8 @@ struct TextReloadRequest {
     layout: glanvu_core::PageLayout,
     render_mode: u8,
     font_size: u32,
+    line_numbers: bool,
+    word_wrap: bool,
     target_page: usize,
     win_w: u32,
     win_h: u32,
@@ -290,15 +292,28 @@ fn spawn_text_reload_worker() -> (Arc<TextReloadMailbox>, Receiver<TextReloadRes
     std::thread::spawn(move || {
         while let Some(req) = worker_mailbox.take_blocking() {
             let result = (|| {
-                let doc = glanvu_core::TextDocument::load_with_font_size(
+                let doc = glanvu_core::TextDocument::load_with_full_options(
                     &req.path,
                     req.layout,
                     req.render_mode,
                     req.font_size,
+                    req.line_numbers,
+                    req.word_wrap,
                 )?;
                 let page = req.target_page.min(doc.page_count().saturating_sub(1));
                 let (pw, ph) = doc.page_size(page)?;
-                let (out_w, out_h) = glanvu_core::fit_within(pw, ph, req.win_w, req.win_h);
+                let (out_w, out_h) = if !req.word_wrap {
+                    let max_w_scale = glanvu_core::MAX_UNWRAPPED_PAGE_WIDTH as f32 / pw.max(1.0);
+                    let max_h_scale = glanvu_core::MAX_UNWRAPPED_PAGE_WIDTH as f32 / ph.max(1.0);
+                    let scale = (req.win_h as f32 / ph.max(1.0))
+                        .min(max_w_scale)
+                        .min(max_h_scale);
+                    let w = (pw * scale).round().max(1.0) as u32;
+                    let h = (ph * scale).round().max(1.0) as u32;
+                    (w, h)
+                } else {
+                    glanvu_core::fit_within(pw, ph, req.win_w, req.win_h)
+                };
                 let img = doc.render_page(page, out_w, out_h)?;
                 Ok((doc, img))
             })();
@@ -469,8 +484,12 @@ impl FindState {
                 }
             }
             FindTarget::Document => {
-                if let Some(doc) = text_doc {
-                    self.doc_matches = doc.search(&self.input.text());
+                let text = self.input.text();
+                if text.trim().starts_with(':') {
+                    self.doc_matches.clear();
+                    self.doc_sel = 0;
+                } else if let Some(doc) = text_doc {
+                    self.doc_matches = doc.search(&text);
                     if !self.doc_matches.is_empty() {
                         let best = self
                             .doc_matches
@@ -2462,11 +2481,10 @@ impl Gpu {
             show_date_box = true;
         }
 
-        // Page overlay (top-right, PDF "N/M"). Suppressed while the info panel is open —
-        // the page count is already shown there, so the top-right overlay would be redundant.
+        // Page overlay (top-right, PDF "N/M", or search position match counter).
         let mut show_page_box = false;
         let mut page_coords = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-        if let Some(text) = page_overlay.filter(|_| info.is_none()) {
+        if let Some(text) = page_overlay {
             page_coords = self.layout_page_overlay(text, scale, win_w, win_h);
             let (bx, by, bw, bh, _, _) = page_coords;
             self.queue.write_buffer(
@@ -4033,7 +4051,7 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("← / →", "previous · next image"),
     Keys("↑ / ↓", "turn page (PDF · text)"),
     Keys("Home / End", "first · last image"),
-    Keys("F  ·  /  ·  Cmd+F", "find (in document · file)"),
+    Keys("F  ·  /  ·  :N", "find text · jump to line"),
     Keys("arrows / n / N", "next · previous match"),
     Keys("Enter", "directory explorer"),
     Keys("Tab / G", "thumbnail grid"),
@@ -4041,6 +4059,7 @@ const HELP_LEFT: &[HelpRow] = &[
     Keys("+ / − / wheel", "zoom (font size in text)"),
     Keys("drag", "pan"),
     Keys("0  ·  1", "fit / reset font · 1:1"),
+    Keys("L  ·  W", "toggle line numbers · word wrap"),
     Keys("T", "turn (rotate) 90°"),
     Keys("M", "render mode (md/csv)"),
     Keys("Space / F11 / dbl-click", "fullscreen"),
@@ -4264,6 +4283,15 @@ impl App {
             .unwrap_or(glanvu_core::DEFAULT_FONT_SIZE)
     }
 
+    fn cancel_pending_text_reload(&mut self) {
+        self.text_reload_gen = self.text_reload_gen.wrapping_add(1);
+        self.text_reload_inflight = false;
+        self.render_status_text = None;
+        if self.status_text.starts_with("Rendering:") {
+            self.status_until = None;
+        }
+    }
+
     fn adjust_text_font_size(&mut self, delta: i32) {
         if !self.current_is_text {
             return;
@@ -4279,6 +4307,7 @@ impl App {
         let _ = self.config.save();
         let size = glanvu_core::FONT_SIZES[new_idx];
         self.show_status(&format!("Text size: {size}px"));
+        self.cancel_pending_text_reload();
         self.refresh_text_doc();
         self.redraw();
     }
@@ -4295,13 +4324,44 @@ impl App {
         let _ = self.config.save();
         let size = glanvu_core::DEFAULT_FONT_SIZE;
         self.show_status(&format!("Text size: {size}px"));
+        self.cancel_pending_text_reload();
         self.refresh_text_doc();
+        self.redraw();
+    }
+
+    fn toggle_line_numbers(&mut self) {
+        self.config.line_numbers = !self.config.line_numbers;
+        let _ = self.config.save();
+        let state = if self.config.line_numbers {
+            "on"
+        } else {
+            "off"
+        };
+        self.show_status(&format!("Line numbers: {state}"));
+        if self.current_is_text {
+            self.cancel_pending_text_reload();
+            self.refresh_text_doc();
+        }
+        self.redraw();
+    }
+
+    fn toggle_word_wrap(&mut self) {
+        self.config.word_wrap = !self.config.word_wrap;
+        let _ = self.config.save();
+        let state = if self.config.word_wrap { "on" } else { "off" };
+        self.show_status(&format!("Word wrap: {state}"));
+        if self.current_is_text {
+            self.cancel_pending_text_reload();
+            self.refresh_text_doc();
+        }
         self.redraw();
     }
 
     /// (Re)load the parsed text document for the current file and render its first page.
     fn refresh_text_doc(&mut self) {
         let font_size = self.current_text_font_size();
+        let line_numbers = self.config.line_numbers;
+        let word_wrap = self.config.word_wrap;
         self.text_doc = if self.current_is_text {
             let render_mode = self
                 .current_format()
@@ -4314,8 +4374,15 @@ impl App {
                 glanvu_core::PageLayout::Portrait
             };
             self.nav.current_path().and_then(|p| {
-                glanvu_core::TextDocument::load_with_font_size(p, layout, render_mode, font_size)
-                    .ok()
+                glanvu_core::TextDocument::load_with_full_options(
+                    p,
+                    layout,
+                    render_mode,
+                    font_size,
+                    line_numbers,
+                    word_wrap,
+                )
+                .ok()
             })
         } else {
             None
@@ -4325,6 +4392,16 @@ impl App {
             .as_ref()
             .and_then(|d| self.last_doc_search_query.as_ref().map(|q| d.search(q)))
             .unwrap_or_default();
+        if !self.last_doc_search_matches.is_empty() {
+            if self.last_doc_search_sel >= self.last_doc_search_matches.len() {
+                self.last_doc_search_sel = self.last_doc_search_matches.len() - 1;
+            }
+            if self.doc_search_highlighted {
+                if let Some(m) = self.last_doc_search_matches.get(self.last_doc_search_sel) {
+                    self.current_text_page = m.page;
+                }
+            }
+        }
         if let Some(doc) = self.text_doc.as_ref() {
             self.current_text_page = self
                 .current_text_page
@@ -4372,8 +4449,18 @@ impl App {
         let (win_w, win_h) = self.win_size();
         let page_size = doc.page_size(self.current_text_page);
         let render_result = page_size.and_then(|(pw, ph)| {
-            let (out_w, out_h) =
-                glanvu_core::fit_within(pw, ph, win_w.max(1.0) as u32, win_h.max(1.0) as u32);
+            let (out_w, out_h) = if !self.config.word_wrap {
+                let max_w_scale = glanvu_core::MAX_UNWRAPPED_PAGE_WIDTH as f32 / pw.max(1.0);
+                let max_h_scale = glanvu_core::MAX_UNWRAPPED_PAGE_WIDTH as f32 / ph.max(1.0);
+                let scale = (win_h.max(1.0) / ph.max(1.0))
+                    .min(max_w_scale)
+                    .min(max_h_scale);
+                let w = (pw * scale).round().max(1.0) as u32;
+                let h = (ph * scale).round().max(1.0) as u32;
+                (w, h)
+            } else {
+                glanvu_core::fit_within(pw, ph, win_w.max(1.0) as u32, win_h.max(1.0) as u32)
+            };
             if let Some(st) = self
                 .find
                 .as_ref()
@@ -4414,9 +4501,7 @@ impl App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.set_image(&img);
                 }
-                if !preserve_view || size_changed {
-                    self.state = ViewState::fit();
-                }
+                self.apply_text_page_view_state(preserve_view, size_changed);
                 self.flash_overlay();
             }
             Err(e) => {
@@ -4427,6 +4512,97 @@ impl App {
             }
         }
         self.redraw();
+    }
+
+    fn pan_to_active_match_if_needed(&mut self, win: (f32, f32)) {
+        if !self.current_is_text || self.config.word_wrap {
+            return;
+        }
+        let (win_w, _) = win;
+        let iw = self.img_size.0 as f32;
+        if iw <= win_w {
+            return;
+        }
+        let doc = match self.text_doc.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+        let m = if let Some(st) = self
+            .find
+            .as_ref()
+            .filter(|f| f.target == FindTarget::Document)
+        {
+            st.active_doc_match().cloned()
+        } else if self.doc_search_highlighted {
+            self.last_doc_search_matches
+                .get(self.last_doc_search_sel)
+                .cloned()
+        } else {
+            None
+        };
+        let Some(m) = m else { return };
+        if m.page != self.current_text_page {
+            return;
+        }
+        let (token_x, _token_y, token_w, _token_h) = match doc.match_rect(&m) {
+            Some(r) => r,
+            None => return,
+        };
+        let (pw, _) = match doc.page_size(self.current_text_page) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let sx = self.img_size.0 as f32 / pw;
+        let token_center_x = (token_x + token_w / 2.0) * sx;
+        let scale = image_scale(self.img_size, win, &self.state);
+        self.state.pan.0 = Self::clamp_match_pan_x(iw, token_center_x, scale, win_w);
+    }
+
+    fn apply_text_page_view_state(&mut self, preserve_view: bool, size_changed: bool) {
+        let (win_w, win_h) = self.win_size();
+        let wide_unwrapped =
+            !self.config.word_wrap && self.current_is_text && self.img_size.0 as f32 > win_w;
+
+        if !preserve_view || size_changed || (wide_unwrapped && self.state.fit) {
+            self.state = Self::compute_text_page_view_state(
+                self.config.word_wrap,
+                self.current_is_text,
+                self.img_size.0,
+                win_w,
+            );
+        }
+        if wide_unwrapped {
+            self.pan_to_active_match_if_needed((win_w, win_h));
+        }
+    }
+
+    fn compute_text_page_view_state(
+        word_wrap: bool,
+        is_text: bool,
+        img_w: u32,
+        win_w: f32,
+    ) -> ViewState {
+        let wide_unwrapped = !word_wrap && is_text && img_w as f32 > win_w;
+        if wide_unwrapped {
+            let pan_x = (img_w as f32 - win_w) / 2.0;
+            ViewState {
+                fit: false,
+                zoom: 1.0,
+                pan: (pan_x, 0.0),
+                quarter_turns: 0,
+            }
+        } else {
+            ViewState::fit()
+        }
+    }
+
+    fn clamp_match_pan_x(iw: f32, token_center_x: f32, scale: f32, win_w: f32) -> f32 {
+        let max_pan_x = (iw * scale - win_w) / 2.0;
+        if max_pan_x <= 0.0 {
+            return 0.0;
+        }
+        let desired_pan_x = (iw / 2.0 - token_center_x) * scale;
+        desired_pan_x.clamp(-max_pan_x, max_pan_x)
     }
 
     /// The SVG deep-zoom viewport quad to composite this frame: a draw for the currently CACHED
@@ -4761,6 +4937,11 @@ impl App {
 
     /// Open find, seeded with an empty query.
     fn begin_find(&mut self, preferred_target: Option<FindTarget>) {
+        self.begin_find_with_seed(preferred_target, "");
+    }
+
+    /// Open find, seeded with an initial query string (e.g. ":" for go-to-line).
+    fn begin_find_with_seed(&mut self, preferred_target: Option<FindTarget>, seed: &str) {
         let limit = if self.mode == ViewMode::Grid {
             usize::MAX
         } else {
@@ -4773,17 +4954,19 @@ impl App {
                 preferred_target.unwrap_or(self.last_find_target)
             };
         self.last_find_target = target;
-        self.doc_search_highlighted = false;
         if target == FindTarget::Document {
             if let Some(fmt) = self.current_format() {
-                if self.get_render_mode(fmt) != 0 {
+                let is_tabular = fmt == SourceFormat::Csv || fmt == SourceFormat::Tsv;
+                let is_md_search = fmt == SourceFormat::Md && !seed.trim().starts_with(':');
+                if (is_tabular || is_md_search) && self.get_render_mode(fmt) != 0 {
                     self.render_modes.insert(fmt, 0);
                     self.refresh_text_doc();
                 }
             }
         }
+        self.doc_search_highlighted = false;
         let st = FindState {
-            input: TextInput::new(""),
+            input: TextInput::new(seed),
             target,
             matches: Vec::new(),
             sel: 0,
@@ -4896,8 +5079,31 @@ impl App {
             let title = "Find in document  [● In doc  ○ Files] (Tab)";
             let q = st.input.display_with_caret();
             let mut out = format!("{title}\n\n  {q}\n\n");
+            let raw_text = st.input.text();
+            let trimmed = raw_text.trim();
+            if let Some(stripped) = trimmed.strip_prefix(':') {
+                let num_str = stripped.trim();
+                if num_str.is_empty() {
+                    out.push_str("(type line number to jump, e.g. :120)\n");
+                } else if let Ok(line_num) = num_str.parse::<usize>() {
+                    if let Some(doc) = self.text_doc.as_ref() {
+                        let total_pages = doc.page_count();
+                        let target_page = doc.page_for_line(line_num).unwrap_or(0);
+                        out.push_str(&format!(
+                            "Jump to line {line_num}  (page {} of {total_pages})\n",
+                            target_page + 1
+                        ));
+                    } else {
+                        out.push_str(&format!("Jump to line {line_num}\n"));
+                    }
+                } else {
+                    out.push_str("(invalid line number)\n");
+                }
+                out.push_str("\nEnter = jump to line   Tab = find files   Esc = cancel");
+                return Some(out);
+            }
             if st.input.chars.is_empty() {
-                out.push_str("(type query to search in document)\n");
+                out.push_str("(type query or :line to jump, e.g. :120)\n");
             } else if st.doc_matches.is_empty() {
                 out.push_str("(no matches found)\n");
             } else {
@@ -4952,7 +5158,9 @@ impl App {
     /// Jump to next or previous match using the last search query without opening the find prompt.
     fn doc_search_jump(&mut self, next: bool) {
         if let Some(fmt) = self.current_format() {
-            if self.get_render_mode(fmt) != 0 {
+            if (fmt == SourceFormat::Csv || fmt == SourceFormat::Tsv || fmt == SourceFormat::Md)
+                && self.get_render_mode(fmt) != 0
+            {
                 self.render_modes.insert(fmt, 0);
                 self.refresh_text_doc();
             }
@@ -4995,6 +5203,9 @@ impl App {
         if page_changed || !was_highlighted {
             self.current_text_page = m.page;
             self.render_current_text_page();
+        } else {
+            let win = self.win_size();
+            self.pan_to_active_match_if_needed(win);
         }
         self.redraw();
     }
@@ -5007,10 +5218,10 @@ impl App {
             return None;
         }
         let (token_x, token_y, token_w, token_h) = doc.match_rect(m)?;
-        let (pw, ph) = doc.layout().dimensions();
+        let (pw, ph) = doc.page_size(self.current_text_page).ok()?;
         let scale = image_scale(self.img_size, win, &self.state);
-        let sx = self.img_size.0 as f32 / pw as f32;
-        let sy = self.img_size.1 as f32 / ph as f32;
+        let sx = self.img_size.0 as f32 / pw;
+        let sy = self.img_size.1 as f32 / ph;
 
         let iw = self.img_size.0 as f32;
         let ih = self.img_size.1 as f32;
@@ -5395,7 +5606,10 @@ impl App {
             match glanvu_core::decode_path(path) {
                 Ok(img) => {
                     self.nav = FolderNav::new(images, idx, path.to_path_buf(), img);
-                    if let Some(res) = self.nav.show_index(idx) {
+                    if self.sort_mode != glanvu_viewer_core::nav::SortMode::NameAsc {
+                        self.nav.resort(self.sort_mode);
+                    }
+                    if let Some(res) = self.nav.show_index(self.nav.index) {
                         self.apply_nav_result(res);
                     }
                 }
@@ -5420,6 +5634,9 @@ impl App {
         // matching `glanvu <file>` behavior. Skip on normal navigation (keeps the user's window size).
         if was_empty {
             self.fit_window_to_image();
+            if self.config.start_in_grid {
+                self.enter_grid();
+            }
         }
     }
 
@@ -5497,12 +5714,7 @@ impl App {
         self.current_pdf_page = 0;
         self.current_is_text = glanvu_core::is_text_path(&res.path);
         self.current_text_page = 0;
-        self.text_reload_inflight = false;
-        self.text_reload_gen = self.text_reload_gen.wrapping_add(1);
-        self.render_status_text = None;
-        if self.status_text.starts_with("Rendering:") {
-            self.status_until = None;
-        }
+        self.cancel_pending_text_reload();
         if let (Some(gpu), Some(img)) = (self.gpu.as_mut(), self.nav.current_image()) {
             gpu.set_image(img);
         }
@@ -5835,6 +6047,16 @@ impl ApplicationHandler for App {
         // exists, so re-render at the now-known window size.
         self.refresh_pdf_doc();
         self.refresh_text_doc();
+        if self.mode == ViewMode::Grid {
+            let n = self.nav.paths.len();
+            self.grid.select_single(self.nav.index);
+            let (win_w, win_h) = self.win_size();
+            self.grid.scroll_to_sel(n, win_w, win_h);
+            for p in &self.nav.paths.clone() {
+                self.thumbs.request(p);
+            }
+            self.update_title_grid();
+        }
         self.draw();
         self.redraw();
     }
@@ -6090,8 +6312,18 @@ impl ApplicationHandler for App {
                                     .as_ref()
                                     .is_some_and(|f| f.target == FindTarget::Document)
                                 {
+                                    let is_goto_line = self
+                                        .find
+                                        .as_ref()
+                                        .map(|f| f.input.text().trim().starts_with(':'))
+                                        .unwrap_or(false);
                                     if let Some(fmt) = self.current_format() {
-                                        if self.get_render_mode(fmt) != 0 {
+                                        let is_tabular =
+                                            fmt == SourceFormat::Csv || fmt == SourceFormat::Tsv;
+                                        let is_md_search = fmt == SourceFormat::Md && !is_goto_line;
+                                        if (is_tabular || is_md_search)
+                                            && self.get_render_mode(fmt) != 0
+                                        {
                                             self.render_modes.insert(fmt, 0);
                                             self.refresh_text_doc();
                                         }
@@ -6112,6 +6344,37 @@ impl ApplicationHandler for App {
                             if is_doc {
                                 if let Some(st) = self.find.take() {
                                     let query = st.input.text();
+                                    let trimmed = query.trim();
+                                    if let Some(stripped) = trimmed.strip_prefix(':') {
+                                        let num_str = stripped.trim();
+                                        if let Ok(line_num) = num_str.parse::<usize>() {
+                                            if let Some(doc) = self.text_doc.as_ref() {
+                                                if let Some(target_page) =
+                                                    doc.page_for_line(line_num)
+                                                {
+                                                    let page_changed =
+                                                        target_page != self.current_text_page;
+                                                    self.current_text_page = target_page;
+                                                    self.last_doc_search_matches.clear();
+                                                    self.doc_search_highlighted = false;
+                                                    let total_pages = doc.page_count();
+                                                    self.show_status(&format!(
+                                                        "Line {line_num} (page {} of {total_pages})",
+                                                        target_page + 1
+                                                    ));
+                                                    self.render_current_text_page_inner(
+                                                        !page_changed,
+                                                    );
+                                                    self.redraw();
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        self.show_status("Invalid line number");
+                                        self.render_current_text_page_preserving_view();
+                                        self.redraw();
+                                        return;
+                                    }
                                     if query.is_empty() || st.doc_matches.is_empty() {
                                         self.last_doc_search_matches.clear();
                                         self.doc_search_highlighted = false;
@@ -6120,11 +6383,28 @@ impl ApplicationHandler for App {
                                         self.redraw();
                                         return;
                                     }
+                                    let mut new_matches = st.doc_matches;
+                                    if let Some(fmt) = self.current_format() {
+                                        if fmt == SourceFormat::Md && self.get_render_mode(fmt) != 0
+                                        {
+                                            self.render_modes.insert(fmt, 0);
+                                            self.refresh_text_doc();
+                                            if let Some(doc) = self.text_doc.as_ref() {
+                                                new_matches = doc.search(&query);
+                                            }
+                                        }
+                                    }
                                     self.last_doc_search_query = Some(query);
-                                    self.last_doc_search_matches = st.doc_matches.clone();
-                                    self.last_doc_search_sel = st.doc_sel;
+                                    self.last_doc_search_matches = new_matches;
+                                    self.last_doc_search_sel = st
+                                        .doc_sel
+                                        .min(self.last_doc_search_matches.len().saturating_sub(1));
                                     self.doc_search_highlighted = true;
-                                    let Some(m) = st.active_doc_match() else {
+                                    let Some(m) = self
+                                        .last_doc_search_matches
+                                        .get(self.last_doc_search_sel)
+                                        .cloned()
+                                    else {
                                         return;
                                     };
                                     let page_changed = m.page != self.current_text_page;
@@ -6143,6 +6423,13 @@ impl ApplicationHandler for App {
                                 if let Some(st) = self.find.as_mut() {
                                     st.next_doc_match();
                                 }
+                                if let Some(m) =
+                                    self.find.as_ref().and_then(|f| f.active_doc_match())
+                                {
+                                    let page_changed = m.page != self.current_text_page;
+                                    self.current_text_page = m.page;
+                                    self.render_current_text_page_inner(!page_changed);
+                                }
                                 self.redraw();
                             } else {
                                 if let Some(st) = self.find.as_mut() {
@@ -6159,6 +6446,13 @@ impl ApplicationHandler for App {
                             } else if is_doc {
                                 if let Some(st) = self.find.as_mut() {
                                     st.prev_doc_match();
+                                }
+                                if let Some(m) =
+                                    self.find.as_ref().and_then(|f| f.active_doc_match())
+                                {
+                                    let page_changed = m.page != self.current_text_page;
+                                    self.current_text_page = m.page;
+                                    self.render_current_text_page_inner(!page_changed);
                                 }
                                 self.redraw();
                             } else {
@@ -6352,6 +6646,8 @@ impl ApplicationHandler for App {
                         }
                         // Toggle sort order (name / date), keeping the selection.
                         Key::Character("o") | Key::Character("O") => self.grid_cycle_sort(),
+                        Key::Character("l") | Key::Character("L") => self.toggle_line_numbers(),
+                        Key::Character("w") | Key::Character("W") => self.toggle_word_wrap(),
                         Key::Named(NamedKey::Enter) => {
                             let sel = self.grid.sel;
                             self.enter_single(sel);
@@ -6599,6 +6895,8 @@ impl ApplicationHandler for App {
                                             layout,
                                             render_mode: next,
                                             font_size: self.current_text_font_size(),
+                                            line_numbers: self.config.line_numbers,
+                                            word_wrap: self.config.word_wrap,
                                             target_page: self.current_text_page,
                                             win_w: win_w.max(1.0) as u32,
                                             win_h: win_h.max(1.0) as u32,
@@ -6607,6 +6905,20 @@ impl ApplicationHandler for App {
                                     self.redraw();
                                 }
                             }
+                        }
+                    }
+                    // L: toggle line numbers display.
+                    Key::Character("l") | Key::Character("L") => {
+                        self.toggle_line_numbers();
+                    }
+                    // W: toggle word wrap.
+                    Key::Character("w") | Key::Character("W") => {
+                        self.toggle_word_wrap();
+                    }
+                    // :: jump to line (opens find in document with ':' prefix).
+                    Key::Character(":") => {
+                        if self.current_is_text {
+                            self.begin_find_with_seed(Some(FindTarget::Document), ":");
                         }
                     }
                     // R / F2: begin inline rename.
@@ -7166,11 +7478,12 @@ impl ApplicationHandler for App {
                         self.find_recompute();
                         self.render_current_text_page();
                     } else if page == msg.target_page && !self.doc_search_highlighted {
+                        let size_changed = self.img_size != (img.width, img.height);
                         self.img_size = (img.width, img.height);
                         if let Some(gpu) = self.gpu.as_mut() {
                             gpu.set_image(&img);
                         }
-                        self.state = ViewState::fit();
+                        self.apply_text_page_view_state(false, size_changed);
                         self.flash_overlay();
                     } else {
                         self.render_current_text_page();
@@ -7396,13 +7709,14 @@ pub fn run(path: &str) -> ExitCode {
     // Temporary simulation for testing: pass "0.9.0" so it detects the remote 0.9.1 release.
     crate::updater::spawn_update_check(crate::VERSION);
 
+    let initial_index = nav.index;
     let mut app = App {
         start,
         nav,
         img_size,
         state: ViewState::fit(),
         mode: initial_mode,
-        grid: GridState::new(index),
+        grid: GridState::new(initial_index),
         thumbs: ThumbnailCache::new(),
         window: None,
         gpu: None,
@@ -7923,5 +8237,52 @@ mod tests {
         // Verify queue is empty after drain
         let remaining = crate::macos_open::PENDING_OPEN_PATHS.lock().unwrap().len();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_compute_text_page_view_state() {
+        // Wrapped text defaults to fit
+        let st_wrapped = super::App::compute_text_page_view_state(true, true, 2000, 1000.0);
+        assert!(st_wrapped.fit);
+
+        // Non-text defaults to fit even if unwrapped flag is set
+        let st_image = super::App::compute_text_page_view_state(false, false, 2000, 1000.0);
+        assert!(st_image.fit);
+
+        // Unwrapped text narrower than window defaults to fit
+        let st_narrow = super::App::compute_text_page_view_state(false, true, 800, 1000.0);
+        assert!(st_narrow.fit);
+
+        // Unwrapped text wider than window uses 1.0 scale and left-aligned pan
+        let st_wide = super::App::compute_text_page_view_state(false, true, 2400, 1000.0);
+        assert!(!st_wide.fit);
+        assert_eq!(st_wide.zoom, 1.0);
+        assert_eq!(st_wide.pan.0, 700.0); // (2400 - 1000) / 2
+        assert_eq!(st_wide.pan.1, 0.0);
+    }
+
+    #[test]
+    fn test_clamp_match_pan_x() {
+        // Zoomed out: image scaled width (600) is narrower than window (1000)
+        // Must not panic with invalid clamp range; returns 0.0
+        let pan_zoomed_out = super::App::clamp_match_pan_x(1200.0, 1000.0, 0.5, 1000.0);
+        assert_eq!(pan_zoomed_out, 0.0);
+
+        // Scaled width equals window width: returns 0.0
+        let pan_equal = super::App::clamp_match_pan_x(1000.0, 500.0, 1.0, 1000.0);
+        assert_eq!(pan_equal, 0.0);
+
+        // Wide page (2000px in 1000px window at 1.0 scale): max_pan_x is 500.0
+        // Match at token_center_x = 0: clamped to +500.0 (left-aligned)
+        let pan_start = super::App::clamp_match_pan_x(2000.0, 0.0, 1.0, 1000.0);
+        assert_eq!(pan_start, 500.0);
+
+        // Match at token_center_x = 2000: clamped to -500.0 (right-aligned)
+        let pan_end = super::App::clamp_match_pan_x(2000.0, 2000.0, 1.0, 1000.0);
+        assert_eq!(pan_end, -500.0);
+
+        // Match at token_center_x = 1000 (middle of texture): centered at 0.0
+        let pan_mid = super::App::clamp_match_pan_x(2000.0, 1000.0, 1.0, 1000.0);
+        assert_eq!(pan_mid, 0.0);
     }
 }

@@ -170,7 +170,7 @@ fn print_help() {
          \x20   glanvu set-default                 set Glanvu as default for all supported types\n\
          \x20   glanvu set-default jpg png webp    set only the listed extensions\n\
          \x20   glanvu set-default --list          show the current default app per type\n\
-         \x20   glanvu set-default --unset         restore to Apple Preview\n\
+         \x20   glanvu set-default --unset         restore to system defaults (Preview / TextEdit)\n\
          \x20   glanvu set-default --reset         same as --unset\n\
          \n\
          Supported extensions: {}\n\
@@ -197,6 +197,36 @@ mod platform {
 
     const BUNDLE_ID: &str = "com.glanvu.app";
     const PREVIEW_ID: &str = "com.apple.Preview";
+    const TEXTEDIT_ID: &str = "com.apple.TextEdit";
+
+    fn is_image_or_pdf(ext: &str) -> bool {
+        matches!(
+            ext,
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "webp"
+                | "gif"
+                | "bmp"
+                | "tiff"
+                | "tif"
+                | "ico"
+                | "cur"
+                | "exr"
+                | "qoi"
+                | "dds"
+                | "pbm"
+                | "pgm"
+                | "ppm"
+                | "pnm"
+                | "pfm"
+                | "ff"
+                | "farbfeld"
+                | "tga"
+                | "svg"
+                | "pdf"
+        )
+    }
 
     // UTType lives in UniformTypeIdentifiers, which neither winit nor wgpu link.
     #[link(name = "UniformTypeIdentifiers", kind = "framework")]
@@ -302,20 +332,34 @@ mod platform {
         unsafe {
             let ws = shared_workspace();
             let preview_url = url_for_bundle_id(ws, PREVIEW_ID);
-            if preview_url.is_null() {
-                return "Preview.app not found on this system.".to_string();
+            let textedit_url = url_for_bundle_id(ws, TEXTEDIT_ID);
+            if preview_url.is_null() && textedit_url.is_null() {
+                return "Default macOS apps (Preview/TextEdit) not found on this system."
+                    .to_string();
             }
+            let mut sent = 0usize;
             for ext in SUPPORTED_EXTS {
                 let utt = uttype_for_ext(ext);
                 if utt.is_null() {
                     continue;
                 }
-                request(ws, preview_url, utt);
+                let target = if is_image_or_pdf(ext) {
+                    if !preview_url.is_null() {
+                        preview_url
+                    } else {
+                        textedit_url
+                    }
+                } else if !textedit_url.is_null() {
+                    textedit_url
+                } else {
+                    preview_url
+                };
+                if !target.is_null() {
+                    request(ws, target, utt);
+                    sent += 1;
+                }
             }
-            format!(
-                "Approve the system dialogs to restore Preview ({} types).",
-                SUPPORTED_EXTS.len()
-            )
+            format!("Approve the system dialogs to restore default apps ({sent} types).")
         }
     }
 
@@ -345,14 +389,28 @@ mod platform {
 
                 Mode::Reset => {
                     let preview_url = url_for_bundle_id(ws, PREVIEW_ID);
-                    if preview_url.is_null() {
-                        eprintln!("Could not find Apple Preview on this system.");
+                    let textedit_url = url_for_bundle_id(ws, TEXTEDIT_ID);
+                    if preview_url.is_null() && textedit_url.is_null() {
+                        eprintln!("Could not find Apple Preview or TextEdit on this system.");
                         return ExitCode::FAILURE;
                     }
                     for ext in exts {
                         let utt = uttype_for_ext(ext);
                         if !utt.is_null() {
-                            request(ws, preview_url, utt);
+                            let target = if is_image_or_pdf(ext) {
+                                if !preview_url.is_null() {
+                                    preview_url
+                                } else {
+                                    textedit_url
+                                }
+                            } else if !textedit_url.is_null() {
+                                textedit_url
+                            } else {
+                                preview_url
+                            };
+                            if !target.is_null() {
+                                request(ws, target, utt);
+                            }
                         }
                     }
                     println!("Sent reset requests for {} types.", exts.len());

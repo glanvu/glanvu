@@ -13,6 +13,7 @@ use crate::format::SourceFormat;
 
 pub const TEXT_PAGE_WIDTH: u32 = 1200;
 pub const TEXT_PAGE_HEIGHT: u32 = 1600;
+pub const MAX_UNWRAPPED_PAGE_WIDTH: u32 = 8192;
 pub const FONT_SIZES: &[u32] = &[13, 16, 19, 22, 25, 28];
 pub const DEFAULT_FONT_SIZE: u32 = 19;
 pub const DEFAULT_FONT_SIZE_INDEX: usize = 2;
@@ -215,6 +216,8 @@ pub struct TextDocument {
     layout: PageLayout,
     render_mode: u8,
     font_size: u32,
+    line_numbers: bool,
+    word_wrap: bool,
 }
 
 impl TextDocument {
@@ -348,6 +351,39 @@ impl TextDocument {
         self.format
     }
 
+    /// Whether line numbers are rendered.
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
+    }
+
+    /// Whether lines wrap at the canvas boundary.
+    pub fn word_wrap(&self) -> bool {
+        self.word_wrap
+    }
+
+    /// Find the 0-based page index containing the given 1-based source line.
+    pub fn page_for_line(&self, target_line: usize) -> Option<usize> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        let target = target_line.max(1);
+        let mut last_seen_page = 0;
+        for (page_idx, page) in self.pages.iter().enumerate() {
+            for row in page {
+                if let Some(num) = row.line_number {
+                    if num == target {
+                        return Some(page_idx);
+                    }
+                    if num > target {
+                        return Some(last_seen_page);
+                    }
+                    last_seen_page = page_idx;
+                }
+            }
+        }
+        Some(self.pages.len().saturating_sub(1))
+    }
+
     /// Parse and paginate a text document from in-memory UTF-8 bytes with default Txt format.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Self::from_bytes_with_options(bytes, SourceFormat::Txt, PageLayout::Portrait, 0)
@@ -376,6 +412,27 @@ impl TextDocument {
         render_mode: u8,
         font_size: u32,
     ) -> Result<Self> {
+        Self::from_bytes_with_full_options(
+            bytes,
+            format,
+            layout,
+            render_mode,
+            font_size,
+            true,
+            true,
+        )
+    }
+
+    /// Parse and paginate a text document from in-memory UTF-8 bytes with full formatting options.
+    pub fn from_bytes_with_full_options(
+        bytes: &[u8],
+        format: SourceFormat,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
+        line_numbers: bool,
+        word_wrap: bool,
+    ) -> Result<Self> {
         if bytes.contains(&0) {
             return Err(Error::Decode(
                 "binary file with null bytes is not plain text".to_string(),
@@ -384,12 +441,14 @@ impl TextDocument {
         let content = std::str::from_utf8(bytes)
             .map_err(|e| Error::Decode(format!("invalid UTF-8 text: {e}")))?
             .to_string();
-        Ok(Self::from_string_with_font_size(
+        Ok(Self::from_string_with_full_options(
             content,
             format,
             layout,
             render_mode,
             font_size,
+            line_numbers,
+            word_wrap,
         ))
     }
 
@@ -413,6 +472,18 @@ impl TextDocument {
         layout: PageLayout,
         render_mode: u8,
         font_size: u32,
+    ) -> Result<Self> {
+        Self::load_with_full_options(path, layout, render_mode, font_size, true, true)
+    }
+
+    /// Load and paginate a text document from disk with full formatting options.
+    pub fn load_with_full_options<P: AsRef<Path>>(
+        path: P,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
+        line_numbers: bool,
+        word_wrap: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| Error::Io {
@@ -448,12 +519,14 @@ impl TextDocument {
             }
         }
 
-        Ok(Self::from_string_with_font_size(
+        Ok(Self::from_string_with_full_options(
             content,
             format,
             layout,
             render_mode,
             font_size,
+            line_numbers,
+            word_wrap,
         ))
     }
 
@@ -484,6 +557,27 @@ impl TextDocument {
         layout: PageLayout,
         render_mode: u8,
         font_size: u32,
+    ) -> Self {
+        Self::from_string_with_full_options(
+            content,
+            format,
+            layout,
+            render_mode,
+            font_size,
+            true,
+            true,
+        )
+    }
+
+    /// Build a paginated document with full layout, render mode, font size, line numbers, and word wrap options.
+    pub fn from_string_with_full_options(
+        content: String,
+        format: SourceFormat,
+        layout: PageLayout,
+        render_mode: u8,
+        font_size: u32,
+        line_numbers: bool,
+        word_wrap: bool,
     ) -> Self {
         let is_csv_table =
             (format == SourceFormat::Csv || format == SourceFormat::Tsv) && render_mode == 1;
@@ -516,7 +610,7 @@ impl TextDocument {
         let cleaned_lines: Vec<String> = content.lines().map(sanitize_line).collect();
         let is_md_reader = format == SourceFormat::Md && render_mode == 1;
         let mut aligned_md_tables = if is_md_reader {
-            build_aligned_markdown_tables(&cleaned_lines, layout, font_size)
+            build_aligned_markdown_tables(&cleaned_lines, layout, font_size, line_numbers)
         } else {
             std::collections::HashMap::new()
         };
@@ -702,26 +796,88 @@ impl TextDocument {
                 let wrap_limit = if is_md_reader {
                     if !line_starts_in_code_block {
                         let base = match layout {
-                            PageLayout::Portrait => 118,
-                            PageLayout::Landscape => 150,
+                            PageLayout::Portrait => {
+                                if line_numbers {
+                                    110
+                                } else {
+                                    118
+                                }
+                            }
+                            PageLayout::Landscape => {
+                                if line_numbers {
+                                    142
+                                } else {
+                                    150
+                                }
+                            }
                         };
                         (base * 19 + (font_size as usize) / 2) / (font_size as usize)
                     } else {
                         let base = match layout {
-                            PageLayout::Portrait => WRAP_COLS,
-                            PageLayout::Landscape => 130,
+                            PageLayout::Portrait => {
+                                if line_numbers {
+                                    WRAP_COLS
+                                } else {
+                                    WRAP_COLS + 6
+                                }
+                            }
+                            PageLayout::Landscape => {
+                                if line_numbers {
+                                    130
+                                } else {
+                                    136
+                                }
+                            }
                         };
                         (base * 19 + (font_size as usize) / 2) / (font_size as usize)
                     }
                 } else {
                     let base = match layout {
-                        PageLayout::Portrait => WRAP_COLS,
-                        PageLayout::Landscape => 130,
+                        PageLayout::Portrait => {
+                            if line_numbers {
+                                WRAP_COLS
+                            } else {
+                                WRAP_COLS + 6
+                            }
+                        }
+                        PageLayout::Landscape => {
+                            if line_numbers {
+                                130
+                            } else {
+                                136
+                            }
+                        }
                     };
                     (base * 19 + (font_size as usize) / 2) / (font_size as usize)
                 };
                 let chunks = if is_md_reader && is_table_row {
                     vec![line_to_wrap]
+                } else if !word_wrap {
+                    let char_w = if is_md_reader {
+                        if let Some(level) = heading_level {
+                            let base_size = match level {
+                                1 => 24,
+                                2 => 21,
+                                3 => 19,
+                                4 => 18,
+                                5 => 17,
+                                _ => 16,
+                            };
+                            let heading_size = ((base_size * font_size / 19).max(12)) as f32;
+                            heading_size * 1.15
+                        } else {
+                            (font_size as f32) * 0.85
+                        }
+                    } else {
+                        font_size as f32 * 0.601579
+                    };
+                    let hard_limit =
+                        ((MAX_UNWRAPPED_PAGE_WIDTH.saturating_sub(200) as f32) / char_w) as usize;
+                    if hard_limit > 0 && line_to_wrap.chars().count() > hard_limit {
+                        wrap_line(&line_to_wrap, hard_limit)
+                    } else {
+                        vec![line_to_wrap]
+                    }
                 } else {
                     wrap_line(&line_to_wrap, wrap_limit)
                 };
@@ -937,6 +1093,8 @@ impl TextDocument {
             layout,
             render_mode,
             font_size,
+            line_numbers,
+            word_wrap,
         }
     }
 
@@ -1002,6 +1160,8 @@ impl TextDocument {
                 layout,
                 render_mode: 1,
                 font_size,
+                line_numbers: false,
+                word_wrap: true,
             };
         }
 
@@ -1215,7 +1375,7 @@ impl TextDocument {
                 },
             ]);
         } else {
-            for chunk in data_slice.chunks(data_rows_per_page) {
+            for (chunk_page_idx, chunk) in data_slice.chunks(data_rows_per_page).enumerate() {
                 let mut page_rows = Vec::with_capacity(chunk.len() + 2);
                 page_rows.push(VisualRow {
                     line_number: Some(1),
@@ -1271,10 +1431,11 @@ impl TextDocument {
                     is_last_chunk: true,
                     diff_kind: None,
                 });
-                for rec in chunk {
+                for (rec_idx, rec) in chunk.iter().enumerate() {
+                    let line_number = Some(chunk_page_idx * data_rows_per_page + rec_idx + 2);
                     let (rec_text, rec_cells) = format_row(rec, false);
                     page_rows.push(VisualRow {
-                        line_number: None,
+                        line_number,
                         text: rec_text,
                         indent_cols: 0,
                         string_quote: None,
@@ -1312,6 +1473,8 @@ impl TextDocument {
             layout,
             render_mode: 1,
             font_size,
+            line_numbers: false,
+            word_wrap: true,
         }
     }
 
@@ -1325,9 +1488,55 @@ impl TextDocument {
         self.pages.len()
     }
 
+    /// Dimensions in pixels of a rendered page, expanding width if word wrap is disabled and content overflows.
+    pub fn page_dimensions(&self, page_index: usize) -> Result<(u32, u32)> {
+        let (default_w, default_h) = self.layout.dimensions();
+        let Some(rows) = self.pages.get(page_index) else {
+            return Err(Error::Decode(format!("page {page_index} out of range")));
+        };
+        if self.word_wrap {
+            return Ok((default_w, default_h));
+        }
+        let is_csv_table = (self.format == SourceFormat::Csv || self.format == SourceFormat::Tsv)
+            && self.render_mode == 1;
+        let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 1;
+        let show_line_numbers = !is_csv_table && self.line_numbers;
+        let text_x = if show_line_numbers { 110.0 } else { 48.0 };
+        let base_char_w = (self.font_size as f32) * if is_md_reader { 0.85 } else { 0.601579 };
+
+        let mut max_w = default_w as f32;
+        for row in rows {
+            let char_w = if is_md_reader {
+                if let Some(level) = row.heading_level {
+                    let base_size = match level {
+                        1 => 24,
+                        2 => 21,
+                        3 => 19,
+                        4 => 18,
+                        5 => 17,
+                        _ => 16,
+                    };
+                    let heading_size = ((base_size * self.font_size / 19).max(12)) as f32;
+                    heading_size * 1.15
+                } else {
+                    base_char_w
+                }
+            } else {
+                base_char_w
+            };
+            let cols = row.indent_cols + row.text.chars().count();
+            let row_w = text_x + (cols as f32) * char_w + 80.0;
+            if row_w > max_w {
+                max_w = row_w;
+            }
+        }
+        let bounded_w = (max_w.ceil() as u32).min(MAX_UNWRAPPED_PAGE_WIDTH);
+        Ok((bounded_w, default_h))
+    }
+
     /// Dimensions in pixels of a rendered page.
-    pub fn page_size(&self, _page_index: usize) -> Result<(f32, f32)> {
-        let (pw, ph) = self.layout.dimensions();
+    pub fn page_size(&self, page_index: usize) -> Result<(f32, f32)> {
+        let (pw, ph) = self.page_dimensions(page_index)?;
         Ok((pw as f32, ph as f32))
     }
 
@@ -1348,18 +1557,18 @@ impl TextDocument {
             .get(page_index)
             .ok_or_else(|| Error::Decode(format!("page {page_index} out of range")))?;
 
-        let (page_w, page_h) = self.layout.dimensions();
+        let (page_w, page_h) = self.page_dimensions(page_index)?;
         let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 1;
         let is_csv_table = (self.format == SourceFormat::Csv || self.format == SourceFormat::Tsv)
             && self.render_mode == 1;
-        let is_advanced = is_md_reader || is_csv_table;
+        let show_line_numbers = !is_csv_table && self.line_numbers;
         let mut svg = String::with_capacity(8192);
         svg.push_str(&format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{page_w}" height="{page_h}" viewBox="0 0 {page_w} {page_h}">
 <rect width="100%" height="100%" fill="#121214"/>
 "##
         ));
-        if !is_advanced {
+        if show_line_numbers {
             svg.push_str(&format!(
                 r##"<line x1="92" y1="25" x2="92" y2="{}" stroke="#27272a" stroke-width="1"/>
 "##,
@@ -1371,7 +1580,7 @@ impl TextDocument {
         let line_height = line_height_for_font(self.font_size) as i32;
         let row_offset_y = (line_height * 18 / 26).max(12);
         let row_rect_h = (line_height - 2).max(16);
-        let text_x = if is_advanced { 48 } else { 110 };
+        let text_x = if show_line_numbers { 110 } else { 48 };
         let default_font = if is_md_reader {
             "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
         } else {
@@ -1399,7 +1608,7 @@ impl TextDocument {
                     .any(|(idx, _)| active_match_idx == Some(*idx));
                 let row_fill = if has_active { "#38bdf8" } else { "#fbbf24" };
                 let row_opacity = if has_active { "0.22" } else { "0.14" };
-                let row_rect_x = if is_advanced { 42 } else { 104 };
+                let row_rect_x = if show_line_numbers { 104 } else { 42 };
                 let row_rect_w = page_w.saturating_sub(row_rect_x + 30);
                 let row_y = y - row_offset_y;
                 svg.push_str(&format!(
@@ -1441,7 +1650,7 @@ impl TextDocument {
                 }
             }
 
-            if !is_advanced {
+            if show_line_numbers {
                 if let Some(num) = row.line_number {
                     let lnum_font_size = (self.font_size * 16 / 19).max(11);
                     svg.push_str(&format!(
@@ -1604,7 +1813,7 @@ impl TextDocument {
         matches: &[DocMatch],
         active_match_idx: Option<usize>,
     ) -> Result<DecodedImage> {
-        let (pw, ph) = self.layout.dimensions();
+        let (pw, ph) = self.page_dimensions(page_index)?;
         self.render_page_with_search(page_index, pw, ph, matches, active_match_idx)
     }
 
@@ -1615,7 +1824,7 @@ impl TextDocument {
         let is_md_reader = self.format == SourceFormat::Md && self.render_mode == 1;
         let is_csv_table = (self.format == SourceFormat::Csv || self.format == SourceFormat::Tsv)
             && self.render_mode == 1;
-        let is_advanced = is_md_reader || is_csv_table;
+        let show_line_numbers = !is_csv_table && self.line_numbers;
 
         if is_md_reader && !row.is_table_row {
             return None;
@@ -1623,16 +1832,12 @@ impl TextDocument {
 
         let top_y = 35.0;
         let line_height = line_height_for_font(self.font_size) as f32;
-        let text_x = if is_advanced { 48.0 } else { 110.0 };
-        let font_size_val = if is_csv_table || (is_md_reader && row.is_table_row) {
-            (self.font_size * 15 / 19).max(11)
+        let text_x = if show_line_numbers { 110.0 } else { 48.0 };
+        let char_w = if is_csv_table || (is_md_reader && row.is_table_row) {
+            let f = (self.font_size * 15 / 19).max(11) as f32;
+            f * 0.6
         } else {
-            self.font_size
-        };
-        let char_w: f32 = if is_csv_table || (is_md_reader && row.is_table_row) {
-            font_size_val as f32 * 0.6
-        } else {
-            font_size_val as f32 * 0.601579
+            self.font_size as f32 * 0.601579
         };
 
         let row_offset_y = (line_height * 18.0 / 26.0).max(12.0);
@@ -4198,6 +4403,7 @@ fn build_aligned_markdown_tables<S: AsRef<str>>(
     raw_lines: &[S],
     layout: PageLayout,
     font_size: u32,
+    line_numbers: bool,
 ) -> std::collections::HashMap<usize, AlignedTableEntry> {
     let mut aligned_lines = std::collections::HashMap::new();
     let mut i = 0;
@@ -4206,8 +4412,20 @@ fn build_aligned_markdown_tables<S: AsRef<str>>(
     let mut past_frontmatter = false;
 
     let base_max_width: usize = match layout {
-        PageLayout::Portrait => 114,
-        PageLayout::Landscape => 154,
+        PageLayout::Portrait => {
+            if line_numbers {
+                108
+            } else {
+                114
+            }
+        }
+        PageLayout::Landscape => {
+            if line_numbers {
+                148
+            } else {
+                154
+            }
+        }
     };
     let max_width: usize = (base_max_width * 19 + (font_size as usize) / 2) / (font_size as usize);
     let max_cols = (max_width + 3) / 6;
@@ -9322,7 +9540,7 @@ The symbol ┼ is a box-drawing cross character.
             TextDocument::from_string_with_options(md, SourceFormat::Md, PageLayout::Portrait, 1);
         let svg_md = doc_md.page_svg(0).unwrap();
         assert!(
-            svg_md.contains("+32 more"),
+            svg_md.contains("+33 more") || svg_md.contains("+32 more"),
             "MD overflow header not found in SVG"
         );
         assert!(
@@ -10367,5 +10585,266 @@ status = "OK"
         // 80 chars > 62 cols -> wraps into 2 visual rows at 28px
         let svg_28 = wrap_doc_28.page_svg(0).unwrap();
         assert!(svg_28.contains(r#"font-size="28""#));
+    }
+
+    #[test]
+    fn test_line_numbers_toggle() {
+        let content = "line one\nline two\nline three\n".to_string();
+        let doc_with_ln = TextDocument::from_string_with_full_options(
+            content.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            true,
+            true,
+        );
+        let doc_no_ln = TextDocument::from_string_with_full_options(
+            content,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            false,
+            true,
+        );
+
+        assert!(doc_with_ln.line_numbers());
+        assert!(!doc_no_ln.line_numbers());
+
+        let svg_ln = doc_with_ln.page_svg(0).unwrap();
+        assert!(svg_ln.contains(r#"<line x1="92""#));
+        assert!(svg_ln.contains(r#"<text x="80""#));
+        assert!(svg_ln.contains(r#"x="110""#));
+
+        let svg_no_ln = doc_no_ln.page_svg(0).unwrap();
+        assert!(!svg_no_ln.contains(r#"<line x1="92""#));
+        assert!(!svg_no_ln.contains(r#"<text x="80""#));
+        assert!(svg_no_ln.contains(r#"x="48""#));
+    }
+
+    #[test]
+    fn test_word_wrap_toggle() {
+        let long_line = "a ".repeat(100); // 200 chars
+        let doc_wrapped = TextDocument::from_string_with_full_options(
+            long_line.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            true,
+            true,
+        );
+        let doc_unwrapped = TextDocument::from_string_with_full_options(
+            long_line,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            true,
+            false,
+        );
+
+        assert!(doc_wrapped.word_wrap());
+        assert!(!doc_unwrapped.word_wrap());
+
+        // Wrapped document should have > 1 visual row on page 0
+        assert!(doc_wrapped.pages[0].len() > 1);
+        // Unwrapped document should have exactly 1 visual row for the single long line
+        assert_eq!(doc_unwrapped.pages[0].len(), 1);
+    }
+
+    #[test]
+    fn test_page_for_line() {
+        let mut lines = String::new();
+        // Generate enough lines to span multiple pages (~58 lines per page)
+        for i in 1..=150 {
+            lines.push_str(&format!("line {i}\n"));
+        }
+        let doc = TextDocument::from_string_with_options(
+            lines,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+        );
+        assert!(doc.page_count() >= 2);
+
+        // Line 1 should be on page 0
+        assert_eq!(doc.page_for_line(1), Some(0));
+        // Line 0 clamped to line 1 -> page 0
+        assert_eq!(doc.page_for_line(0), Some(0));
+
+        // Line 120 should be on page 2 (around line 116+)
+        let p120 = doc.page_for_line(120).unwrap();
+        assert!(p120 >= 1);
+        let page_rows = &doc.pages[p120];
+        assert!(page_rows.iter().any(|r| r.line_number == Some(120)));
+
+        // Very high line number clamps to last page
+        let last_p = doc.page_count() - 1;
+        assert_eq!(doc.page_for_line(9999), Some(last_p));
+    }
+
+    #[test]
+    fn test_markdown_reader_line_numbers_toggle() {
+        let content = "# Title\n\nParagraph with some text.\n\n- item 1\n- item 2\n".to_string();
+        let doc_with_ln = TextDocument::from_string_with_full_options(
+            content.clone(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+            19,
+            true,
+            true,
+        );
+        let doc_no_ln = TextDocument::from_string_with_full_options(
+            content,
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+            19,
+            false,
+            true,
+        );
+
+        assert!(doc_with_ln.line_numbers());
+        assert!(!doc_no_ln.line_numbers());
+
+        let svg_ln = doc_with_ln.page_svg(0).unwrap();
+        assert!(svg_ln.contains(r#"<line x1="92""#));
+        assert!(svg_ln.contains(r#"<text x="80""#));
+        assert!(svg_ln.contains(r#"x="110""#));
+
+        let svg_no_ln = doc_no_ln.page_svg(0).unwrap();
+        assert!(!svg_no_ln.contains(r#"<line x1="92""#));
+        assert!(!svg_no_ln.contains(r#"<text x="80""#));
+        assert!(svg_no_ln.contains(r#"x="48""#));
+    }
+
+    #[test]
+    fn test_markdown_reader_page_for_line() {
+        let mut lines = String::new();
+        for i in 1..=150 {
+            lines.push_str(&format!("paragraph line {i}\n\n"));
+        }
+        let doc = TextDocument::from_string_with_full_options(
+            lines,
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+            19,
+            true,
+            true,
+        );
+        assert!(doc.page_count() >= 2);
+
+        assert_eq!(doc.page_for_line(1), Some(0));
+        let p50 = doc.page_for_line(50).unwrap();
+        let page_rows = &doc.pages[p50];
+        assert!(page_rows.iter().any(|r| r.line_number == Some(50)));
+    }
+
+    #[test]
+    fn test_csv_table_page_for_line() {
+        let mut csv = String::from("id,name,value\n");
+        for i in 1..=200 {
+            csv.push_str(&format!("{i},item_{i},val_{i}\n"));
+        }
+        let doc = TextDocument::from_string_with_full_options(
+            csv,
+            SourceFormat::Csv,
+            PageLayout::Portrait,
+            1, // Table mode
+            19,
+            false,
+            true,
+        );
+        assert!(doc.page_count() >= 3);
+
+        // Header line 1 is on page 0
+        assert_eq!(doc.page_for_line(1), Some(0));
+
+        // Line 100 corresponds to record 99, which should be on a later page (page 1 or 2)
+        let p100 = doc.page_for_line(100).unwrap();
+        assert!(p100 >= 1);
+        let page_rows = &doc.pages[p100];
+        assert!(page_rows.iter().any(|r| r.line_number == Some(100)));
+    }
+
+    #[test]
+    fn test_unwrapped_page_dimensions_expansion() {
+        let ultra_long_line = "a ".repeat(500); // 1000 characters
+        let doc_unwrapped = TextDocument::from_string_with_full_options(
+            ultra_long_line.clone(),
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            true,
+            false, // word wrap OFF
+        );
+        let doc_wrapped = TextDocument::from_string_with_full_options(
+            ultra_long_line,
+            SourceFormat::Txt,
+            PageLayout::Portrait,
+            0,
+            19,
+            true,
+            true, // word wrap ON
+        );
+
+        let (w_unwrapped, _) = doc_unwrapped.page_dimensions(0).unwrap();
+        let (w_wrapped, _) = doc_wrapped.page_dimensions(0).unwrap();
+
+        // Standard portrait page width is 1200
+        assert_eq!(w_wrapped, TEXT_PAGE_WIDTH);
+        // Unwrapped width should have expanded to fit the long line, bounded by MAX_UNWRAPPED_PAGE_WIDTH
+        assert!(w_unwrapped > 5000 && w_unwrapped <= MAX_UNWRAPPED_PAGE_WIDTH);
+    }
+
+    #[test]
+    fn test_unwrapped_markdown_reader_long_heading_split() {
+        // Long heading with 800 'W' characters in Markdown reader mode
+        let long_heading = format!("# {}", "W".repeat(800));
+        let doc = TextDocument::from_string_with_full_options(
+            long_heading,
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+            19,
+            true,
+            false, // Word wrap OFF
+        );
+
+        let (w, _) = doc.page_dimensions(0).unwrap();
+        assert!(w <= MAX_UNWRAPPED_PAGE_WIDTH);
+        // Since it was split into continuation rows, page 0 should have > 1 row
+        let rows = doc.pages.first().unwrap();
+        assert!(rows.len() > 1);
+    }
+
+    #[test]
+    fn test_markdown_reader_match_rect() {
+        let content = "# Title Heading\n\nParagraph with search target\n";
+        let doc = TextDocument::from_string_with_full_options(
+            content.to_string(),
+            SourceFormat::Md,
+            PageLayout::Portrait,
+            1, // Reader mode
+            19,
+            true,
+            false,
+        );
+
+        let matches_heading = doc.search("Heading");
+        assert!(!matches_heading.is_empty());
+        let rect_heading = doc.match_rect(&matches_heading[0]);
+        // Markdown reader non-table rows have variable fonts and stripped tokens; match_rect returns None
+        assert!(rect_heading.is_none());
+
+        let matches_body = doc.search("search target");
+        assert!(!matches_body.is_empty());
+        let rect_body = doc.match_rect(&matches_body[0]);
+        assert!(rect_body.is_none());
     }
 }

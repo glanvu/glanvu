@@ -47,7 +47,7 @@ impl Default for UserConfig {
             text_font_size: glanvu_core::DEFAULT_FONT_SIZE,
             slideshow_interval_secs: 3,
             start_in_grid: false,
-            line_numbers: false,
+            line_numbers: true,
             word_wrap: true,
         }
     }
@@ -218,10 +218,23 @@ impl UserConfig {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = path.with_extension("toml.tmp");
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let file_stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config");
+        let tmp_file_name = format!(".{file_stem}.{pid}.{nanos}.tmp");
+        let tmp_path = path.with_file_name(tmp_file_name);
         let content = self.to_toml_string();
         fs::write(&tmp_path, content)?;
-        fs::rename(&tmp_path, path)?;
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -237,7 +250,7 @@ mod tests {
         assert_eq!(cfg.text_font_size, 19);
         assert_eq!(cfg.slideshow_interval_secs, 3);
         assert!(!cfg.start_in_grid);
-        assert!(!cfg.line_numbers);
+        assert!(cfg.line_numbers);
         assert!(cfg.word_wrap);
         assert_eq!(
             cfg.text_font_size_idx(),
@@ -253,7 +266,7 @@ mod tests {
             text_font_size = 22 # larger text
             slideshow_interval_secs = 5
             start_view = "grid"
-            line_numbers = true
+            line_numbers = false
             word_wrap = false
         "#;
         let cfg = UserConfig::from_toml_str(toml);
@@ -261,7 +274,7 @@ mod tests {
         assert_eq!(cfg.text_font_size, 22);
         assert_eq!(cfg.slideshow_interval_secs, 5);
         assert!(cfg.start_in_grid);
-        assert!(cfg.line_numbers);
+        assert!(!cfg.line_numbers);
         assert!(!cfg.word_wrap);
     }
 
@@ -275,7 +288,7 @@ mod tests {
         assert_eq!(cfg.text_font_size, 19);
         assert_eq!(cfg.slideshow_interval_secs, 3);
         assert!(!cfg.start_in_grid);
-        assert!(!cfg.line_numbers);
+        assert!(cfg.line_numbers);
         assert!(cfg.word_wrap);
     }
 
@@ -291,7 +304,7 @@ mod tests {
         assert_eq!(cfg.sort_mode, SortMode::NameAsc);
         assert_eq!(cfg.text_font_size, 19);
         assert_eq!(cfg.slideshow_interval_secs, 1); // clamped to min 1
-        assert!(!cfg.line_numbers);
+        assert!(cfg.line_numbers);
     }
 
     #[test]
@@ -301,7 +314,7 @@ mod tests {
             text_font_size: 28,
             slideshow_interval_secs: 10,
             start_in_grid: true,
-            line_numbers: true,
+            line_numbers: false,
             word_wrap: false,
         };
 

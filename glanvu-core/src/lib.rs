@@ -35,7 +35,7 @@ pub use pdf::PdfDocument;
 pub use text::{
     char_width_for_font, line_height_for_font, pretty_format_json, pretty_format_xml, DocMatch,
     PageLayout, TextDocument, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE_INDEX, FONT_SIZES,
-    TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH,
+    MAX_UNWRAPPED_PAGE_WIDTH, TEXT_PAGE_HEIGHT, TEXT_PAGE_WIDTH,
 };
 
 /// The crate version, taken from `Cargo.toml` at build time.
