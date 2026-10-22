@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-22
+
+### Added
+
+- **Image EXIF metadata inspection**: press `I` to toggle an overlay card displaying camera make/model, lens, exposure time, aperture, ISO, focal length, captured timestamp, flash, orientation, and GPS coordinates.
+- **EXIF orientation auto-rotation**: images with EXIF orientation metadata are automatically oriented correctly in the main viewer, thumbnail grid, and batch conversion (`glanvu convert`).
+- **Enhanced CLI `glanvu info`**: added `--exif` flag to print formatted EXIF details, and `--json` for machine-readable output across image format, dimensions, file size, decoded memory, and metadata.
+- **Terminal output sanitization**: stripped control characters and ANSI escape sequences in EXIF text fields to prevent console escape injection.
+- **Optimized thumbnail generation**: scaled bounding boxes prior to orientation rotation to eliminate peak memory allocations on large portrait images.
+- **Thumbnail cache versioning (`v2`)**: bumped cache key version to transparently refresh existing thumbnails with correct orientation.
+
 ## [0.11.0] — 2026-10-18
 
 ### Added
