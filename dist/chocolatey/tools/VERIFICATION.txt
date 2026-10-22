@@ -1,20 +1,20 @@
 VERIFICATION
 
 Glanvu is published by the software author (Juan García Longarón) on GitHub:
-  https://github.com/glanvu/glanvu/releases/tag/v0.11.0
+  https://github.com/glanvu/glanvu/releases/tag/v0.12.0
 
 This package downloads the official Windows release zip and verifies its SHA256:
 
-  File:   Glanvu-0.11.0-windows-x86_64.zip
-  SHA256: 4452C227B5CB58AEE0FCE7036F7ECE52E423FB8E140EADAD36DE95C6E40F1F12
+  File:   Glanvu-0.12.0-windows-x86_64.zip
+  SHA256: 709C16F6341B706708EAB0611EAA19A9737FFC264F8AB3540E847810788C0203
 
 To verify the checksum yourself:
 
   PowerShell:
-    Get-FileHash .\Glanvu-0.11.0-windows-x86_64.zip -Algorithm SHA256
+    Get-FileHash .\Glanvu-0.12.0-windows-x86_64.zip -Algorithm SHA256
 
   GitHub CLI:
-    gh release view v0.11.0 --repo glanvu/glanvu --json assets `
+    gh release view v0.12.0 --repo glanvu/glanvu --json assets `
       --jq '.assets[] | select(.name | endswith("windows-x86_64.zip")) | .digest'
 
 The bundled LICENSE.txt is a copy of the project's Apache-2.0 license:

@@ -1,13 +1,13 @@
 {
-    "version": "0.11.0",
+    "version": "0.12.0",
     "description": "Fast, keyboard-driven, cross-platform universal image viewer and converter",
     "homepage": "https://glanvu.com",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/glanvu/glanvu/releases/download/v0.11.0/Glanvu-0.11.0-windows-x86_64.zip",
-            "hash": "4452c227b5cb58aee0fce7036f7ece52e423fb8e140eadad36de95c6e40f1f12",
-            "extract_dir": "Glanvu-0.11.0"
+            "url": "https://github.com/glanvu/glanvu/releases/download/v0.12.0/Glanvu-0.12.0-windows-x86_64.zip",
+            "hash": "709c16f6341b706708eab0611eaa19a9737ffc264f8ab3540e847810788c0203",
+            "extract_dir": "Glanvu-0.12.0"
         }
     },
     "bin": "glanvu.exe",

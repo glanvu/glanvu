@@ -1,6 +1,6 @@
 # Maintainer: Juan García Longarón <glanvu@mobilife.es>
 pkgname=glanvu-bin
-pkgver=0.11.0
+pkgver=0.12.0
 pkgrel=1
 pkgdesc="Fast, keyboard-driven, cross-platform universal image viewer and converter"
 arch=('x86_64')
@@ -11,7 +11,7 @@ optdepends=('vulkan-icd-loader: GPU-accelerated rendering')
 provides=('glanvu')
 conflicts=('glanvu')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/glanvu/glanvu/releases/download/v$pkgver/glanvu-$pkgver-linux-x86_64.tar.gz")
-sha256sums=('93081c6ae53350ba0b236cb015c25ac7c652b9bdd42f78f34de267e1a320add7')
+sha256sums=('4735e536de2b419d0af10239682832a30f628aff8fdee8bc9ca9f582ef990878')
 
 package() {
     install -Dm755 "glanvu-$pkgver/glanvu" "$pkgdir/usr/bin/glanvu"
