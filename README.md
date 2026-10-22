@@ -55,8 +55,10 @@ The name is **glance + view** — a fast look.
   list in single view, or a live thumbnail filter in the grid.
 - **Thumbnail grid** — press **Tab** for a fast, scrollable overview, with multi-selection
   (Shift / Ctrl-⌘ click, rubber-band drag) for batch actions.
-- **File info** — press **I** for a floating panel with the image's dimensions, format, size and
-  date.
+- **Image EXIF metadata & auto-orientation** — press **I** for a floating overlay showing camera
+  make/model, lens, exposure time, aperture, ISO, focal length, captured date, flash, and GPS
+  coordinates. Photos with EXIF orientation flags are automatically oriented in the viewer, thumbnail
+  grid, and batch converter.
 - **Manage files in place** — **rename** (`R`) and **move to Trash** (`Delete`, single or a whole
   grid selection), each behind a confirmation. Glanvu also notices files added, removed or changed
   on disk and refreshes itself (or press **F5**).
@@ -138,7 +140,9 @@ library kept somewhere other than next to the binary (handy so it survives `carg
 ```bash
 glanvu <IMAGE>                  # open the viewer (arrow keys walk the folder)
 glanvu                          # open a file picker, then the viewer
-glanvu info <IMAGE>             # print format, dimensions and size
+glanvu info <IMAGE>             # print format, dimensions, size and EXIF
+glanvu info --exif <IMAGE>      # print only EXIF camera and shooting metadata
+glanvu info --json <IMAGE>      # machine-readable JSON output
 glanvu convert --to webp --resize 2000x2000 --out out/ photos/*.jpg
 glanvu set-default              # make Glanvu the default app for image files (macOS)
 glanvu --help
@@ -190,7 +194,7 @@ Glanvu refuses to overwrite an input or to map two inputs to the same output (da
 | `Space` / `F11` | Fullscreen |
 | `S` | Slideshow |
 | `O` | Toggle sort order (name / date) |
-| `I` | Image info panel |
+| `I` | Image info & EXIF metadata panel |
 | `R` / `F2` | Rename file |
 | `M` | Toggle render mode (Markdown, CSV/TSV, Code) |
 | `C` / `Shift+C` | Copy image · copy file path to clipboard |

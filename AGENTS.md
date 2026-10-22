@@ -138,7 +138,7 @@ Users: `brew tap glanvu/glanvu && brew install --cask glanvu`.
 
 ```bash
 cargo run -- <IMAGE_PATH>          # open viewer
-cargo run -- info <IMAGE_PATH>     # print format/dims
+cargo run -- info [--exif] [--json] <IMAGE_PATH>  # print format/dims/EXIF
 cargo run -- convert --to webp --resize 2000x2000 --out out/ photos/*.jpg
 cargo run -- set-default           # set Glanvu as default for all image types (macOS)
 cargo run -- set-default --list    # show current default per type
@@ -177,7 +177,7 @@ cargo fmt --all --check
   | Scripts & lightweight code viewing (.sh, .sql, .py, .js/.ts) | done |
   | In-document text search (`F` / `/`) | done |
   | Text font size adjustment (`+` / `-` / `0`) | done |
-  | Image EXIF metadata viewer (`I`) | done |
+  | Image EXIF metadata viewer (`I`) & auto-rotation | done |
   | Brew cask + Linux/Windows installers | planned |
   | Web app (glanvu.com) | planned (Phase 3) |
 
