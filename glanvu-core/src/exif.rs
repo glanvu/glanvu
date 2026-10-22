@@ -38,6 +38,8 @@ pub struct ExifMeta {
     pub gps_coords: Option<String>,
     /// Flash firing status (e.g. "Flash fired", "Flash did not fire").
     pub flash: Option<String>,
+    /// Raw EXIF orientation flag (1..=8).
+    pub orientation: Option<u8>,
 }
 
 impl ExifMeta {
@@ -55,6 +57,7 @@ impl ExifMeta {
             && self.date_time_original.is_none()
             && self.gps_coords.is_none()
             && self.flash.is_none()
+            && self.orientation.is_none()
     }
 
     /// Combined camera make and model (e.g. "Sony ILCE-7M4", "Canon EOS R5"), avoiding repetition
@@ -110,6 +113,12 @@ impl ExifMeta {
 
     /// Formatted multi-line text block suitable for the info overlay card.
     pub fn display_lines(&self) -> Vec<String> {
+        self.display_lines_with_defaults(false)
+    }
+
+    /// Formatted multi-line text block. If `include_default_orientation` is true,
+    /// includes orientation even when it is standard `Normal (0°)` (Orientation 1).
+    pub fn display_lines_with_defaults(&self, include_default_orientation: bool) -> Vec<String> {
         let mut lines = Vec::new();
 
         if let Some(cam) = self.camera_name() {
@@ -132,11 +141,35 @@ impl ExifMeta {
         if let Some(flash) = &self.flash {
             lines.push(format!("Flash: {flash}"));
         }
+        if let Some(orient) = self.orientation_description() {
+            if include_default_orientation || self.orientation != Some(1) {
+                lines.push(format!("Orientation: {orient}"));
+            }
+        }
         if let Some(gps) = &self.gps_coords {
             lines.push(format!("GPS: {gps}"));
         }
 
         lines
+            .into_iter()
+            .map(|l| sanitize_text(&l))
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Human-friendly description of the EXIF orientation transformation.
+    pub fn orientation_description(&self) -> Option<&'static str> {
+        match self.orientation {
+            Some(1) => Some("Normal (0°)"),
+            Some(2) => Some("Flipped horizontal"),
+            Some(3) => Some("Rotate 180°"),
+            Some(4) => Some("Flipped vertical"),
+            Some(5) => Some("Flipped & Rotate 90° CW"),
+            Some(6) => Some("Rotate 90° CW"),
+            Some(7) => Some("Flipped & Rotate 270° CW"),
+            Some(8) => Some("Rotate 270° CW"),
+            _ => None,
+        }
     }
 }
 
@@ -253,6 +286,8 @@ fn parse_exif(exif: &exif::Exif) -> ExifMeta {
         .map(|f| f.display_value().to_string())
         .filter(|s| !s.is_empty());
 
+    let orientation = parse_orientation(exif);
+
     let gps_coords = parse_gps_coords(exif);
 
     ExifMeta {
@@ -268,7 +303,19 @@ fn parse_exif(exif: &exif::Exif) -> ExifMeta {
         date_time_original,
         flash,
         gps_coords,
+        orientation,
     }
+}
+
+/// Strip ASCII and Unicode control characters (including escape sequences `\x1b`)
+/// and collapse multiple spaces.
+pub fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn get_string_field(exif: &exif::Exif, tag: Tag) -> Option<String> {
@@ -277,8 +324,9 @@ fn get_string_field(exif: &exif::Exif, tag: Tag) -> Option<String> {
         Value::Ascii(vec) => {
             if let Some(first) = vec.first() {
                 let s = std::str::from_utf8(first).ok()?.trim();
-                if !s.is_empty() {
-                    return Some(s.to_string());
+                let clean = sanitize_text(s);
+                if !clean.is_empty() {
+                    return Some(clean);
                 }
             }
             None
@@ -289,9 +337,23 @@ fn get_string_field(exif: &exif::Exif, tag: Tag) -> Option<String> {
             if trimmed.is_empty() || trimmed == "\"\"" {
                 None
             } else {
-                Some(trimmed.trim_matches('"').to_string())
+                let clean = sanitize_text(trimmed.trim_matches('"'));
+                if clean.is_empty() {
+                    None
+                } else {
+                    Some(clean)
+                }
             }
         }
+    }
+}
+
+fn parse_orientation(exif: &exif::Exif) -> Option<u8> {
+    let field = exif.get_field(Tag::Orientation, In::PRIMARY)?;
+    match &field.value {
+        Value::Short(v) => v.first().copied().and_then(|val| u8::try_from(val).ok()),
+        Value::Byte(v) => v.first().copied(),
+        _ => None,
     }
 }
 
@@ -431,6 +493,7 @@ mod tests {
             date_time_original: Some("2024-05-12 18:22:01".to_string()),
             gps_coords: Some("40°25'1.2\" N, 3°42'12.0\" W".to_string()),
             flash: None,
+            orientation: None,
         };
         let lines = meta.display_lines();
         assert!(lines.contains(&"Camera: Apple iPhone 15 Pro".to_string()));
@@ -471,5 +534,48 @@ mod tests {
             },
         ]);
         assert_eq!(format_dms(&val3), Some("40°26'0.0\"".to_string()));
+    }
+
+    #[test]
+    fn orientation_descriptions_and_display_lines() {
+        let meta_normal = ExifMeta {
+            orientation: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(meta_normal.orientation_description(), Some("Normal (0°)"));
+        // Orientation 1 is not pushed to default display_lines to avoid cluttering normal images
+        assert!(!meta_normal
+            .display_lines()
+            .iter()
+            .any(|l| l.starts_with("Orientation:")));
+        // But with include_default_orientation=true, it is included
+        assert!(meta_normal
+            .display_lines_with_defaults(true)
+            .contains(&"Orientation: Normal (0°)".to_string()));
+
+        let meta_rotated = ExifMeta {
+            orientation: Some(6),
+            ..Default::default()
+        };
+        assert_eq!(
+            meta_rotated.orientation_description(),
+            Some("Rotate 90° CW")
+        );
+        assert!(meta_rotated
+            .display_lines()
+            .contains(&"Orientation: Rotate 90° CW".to_string()));
+    }
+
+    #[test]
+    fn sanitize_text_and_control_characters() {
+        let dirty = "Canon\x1b[2J\x1b[H EOS\r\n 5D\t";
+        assert_eq!(sanitize_text(dirty), "Canon [2J [H EOS 5D");
+
+        let meta = ExifMeta {
+            make: Some("Injected\x1b[2J".to_string()),
+            ..Default::default()
+        };
+        let lines = meta.display_lines();
+        assert_eq!(lines, vec!["Camera: Injected [2J".to_string()]);
     }
 }

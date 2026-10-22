@@ -40,11 +40,11 @@ fn thumb_cache_dir() -> PathBuf {
     base.join("glanvu").join("thumbs")
 }
 
-/// Cache key: `<path_hash>_<mtime_secs>.jpg`.
+/// Cache key: `v2_<path_hash>_<mtime_secs>.jpg`.
 fn disk_key(path: &Path, mtime_secs: u64) -> String {
     let mut h = DefaultHasher::new();
     path.hash(&mut h);
-    format!("{:016x}_{mtime_secs}.jpg", h.finish())
+    format!("v2_{:016x}_{mtime_secs}.jpg", h.finish())
 }
 
 // ---------------------------------------------------------------------------

@@ -51,7 +51,13 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedImage> {
     if sniff_pdf(bytes) {
         return decode_pdf_page0(&PdfDocument::from_bytes(bytes)?);
     }
-    let img = image::load_from_memory(bytes).map_err(map_image_error)?;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|source| Error::Io {
+            path: std::path::PathBuf::from("<bytes>"),
+            source,
+        })?;
+    let img = decode_image_reader(reader)?;
     Ok(to_decoded(img))
 }
 
@@ -67,7 +73,8 @@ pub fn decode_path<P: AsRef<Path>>(path: P) -> Result<DecodedImage> {
     if is_text_path(path) {
         return TextDocument::load(path)?.render_fit(0);
     }
-    let img = open_reader(path)?.decode().map_err(map_image_error)?;
+    let reader = open_reader(path)?;
+    let img = decode_image_reader(reader)?;
     Ok(to_decoded(img))
 }
 
@@ -155,8 +162,8 @@ pub fn decode_thumbnail<P: AsRef<Path>>(path: P, max_w: u32, max_h: u32) -> Resu
         let (tw, th) = fit_within(w, h, max_w.max(1), max_h.max(1));
         return doc.render_page(0, tw, th);
     }
-    let img = open_reader(path)?.decode().map_err(map_image_error)?;
-    let thumb = img.thumbnail(max_w.max(1), max_h.max(1));
+    let reader = open_reader(path)?;
+    let thumb = decode_thumbnail_reader(reader, max_w, max_h)?;
     Ok(to_decoded(thumb))
 }
 
@@ -211,7 +218,15 @@ pub fn read_meta_path<P: AsRef<Path>>(path: P) -> Result<ImageMeta> {
         .format()
         .and_then(SourceFormat::from_image)
         .ok_or(Error::UnsupportedFormat)?;
-    let (width, height) = reader.into_dimensions().map_err(map_image_error)?;
+    use image::ImageDecoder;
+    let mut decoder = reader.into_decoder().map_err(map_image_error)?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (mut width, mut height) = decoder.dimensions();
+    if orientation_swaps_dimensions(orientation) {
+        std::mem::swap(&mut width, &mut height);
+    }
 
     Ok(ImageMeta {
         width,
@@ -234,6 +249,60 @@ fn open_reader(path: &Path) -> Result<image::ImageReader<std::io::BufReader<std:
             path: path.to_path_buf(),
             source,
         })
+}
+
+fn orientation_swaps_dimensions(o: image::metadata::Orientation) -> bool {
+    matches!(
+        o,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    )
+}
+
+pub(crate) fn decode_image_reader<R: std::io::BufRead + std::io::Seek>(
+    reader: image::ImageReader<R>,
+) -> Result<image::DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = reader.into_decoder().map_err(map_image_error)?;
+    let mut limits = image::Limits::default();
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(map_image_error)?;
+    decoder.set_limits(limits).map_err(map_image_error)?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
+pub(crate) fn decode_thumbnail_reader<R: std::io::BufRead + std::io::Seek>(
+    reader: image::ImageReader<R>,
+    max_w: u32,
+    max_h: u32,
+) -> Result<image::DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = reader.into_decoder().map_err(map_image_error)?;
+    let mut limits = image::Limits::default();
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(map_image_error)?;
+    decoder.set_limits(limits).map_err(map_image_error)?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let img = image::DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    let (target_w, target_h) = if orientation_swaps_dimensions(orientation) {
+        (max_h.max(1), max_w.max(1))
+    } else {
+        (max_w.max(1), max_h.max(1))
+    };
+    let mut thumb = img.thumbnail(target_w, target_h);
+    thumb.apply_orientation(orientation);
+    Ok(thumb)
 }
 
 fn to_decoded(img: image::DynamicImage) -> DecodedImage {
@@ -852,6 +921,75 @@ mod tests {
         let meta_jsonl = read_meta_path(&jsonl_path).unwrap();
         assert_eq!(meta_jsonl.format, SourceFormat::Jsonl);
         assert_eq!(meta_jsonl.page_count, Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orientation_swaps_dimensions_cases() {
+        use image::metadata::Orientation;
+        assert!(!orientation_swaps_dimensions(Orientation::NoTransforms));
+        assert!(!orientation_swaps_dimensions(Orientation::FlipHorizontal));
+        assert!(!orientation_swaps_dimensions(Orientation::Rotate180));
+        assert!(!orientation_swaps_dimensions(Orientation::FlipVertical));
+        assert!(orientation_swaps_dimensions(Orientation::Rotate90));
+        assert!(orientation_swaps_dimensions(Orientation::Rotate270));
+        assert!(orientation_swaps_dimensions(Orientation::Rotate90FlipH));
+        assert!(orientation_swaps_dimensions(Orientation::Rotate270FlipH));
+    }
+
+    #[test]
+    fn decode_and_meta_respect_exif_orientation() {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
+        let entries: &[(u16, u16, u32, u32)] = &[
+            (0x0100, 4, 1, 4),   // ImageWidth = 4
+            (0x0101, 4, 1, 2),   // ImageLength = 2
+            (0x0102, 3, 4, 110), // BitsPerSample -> offset 110
+            (0x0106, 3, 1, 2),   // PhotometricInterpretation = 2 (RGB)
+            (0x0111, 4, 1, 130), // StripOffsets -> offset 130
+            (0x0112, 3, 1, 6),   // Orientation = 6 (Rotate 90 CW)
+            (0x0115, 3, 1, 4),   // SamplesPerPixel = 4
+            (0x0117, 4, 1, 32),  // StripByteCounts = 32
+        ];
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, typ, cnt, val) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&typ.to_le_bytes());
+            tiff.extend_from_slice(&cnt.to_le_bytes());
+            tiff.extend_from_slice(&val.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        if tiff.len() < 110 {
+            tiff.resize(110, 0);
+        }
+        tiff.extend_from_slice(&[8u8, 0, 8, 0, 8, 0, 8, 0]);
+        if tiff.len() < 130 {
+            tiff.resize(130, 0);
+        }
+        tiff.extend_from_slice(&[255u8; 32]);
+
+        let decoded = decode_bytes(&tiff).unwrap();
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 4);
+
+        let dir = std::env::temp_dir().join("glanvu-orientation-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rot6.tiff");
+        std::fs::write(&path, &tiff).unwrap();
+
+        let meta = read_meta_path(&path).unwrap();
+        assert_eq!(meta.width, 2);
+        assert_eq!(meta.height, 4);
+
+        let decoded_path = decode_path(&path).unwrap();
+        assert_eq!(decoded_path.width, 2);
+        assert_eq!(decoded_path.height, 4);
+
+        let thumb = decode_thumbnail(&path, 2, 4).unwrap();
+        assert_eq!(thumb.width, 2);
+        assert_eq!(thumb.height, 4);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

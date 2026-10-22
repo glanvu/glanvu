@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::decode::{decode_path, map_image_error};
+use crate::decode::{decode_image_reader, decode_path, map_image_error};
 use crate::error::{Error, Result};
 use crate::folder::{is_pdf_path, is_svg_path, is_text_path};
 use crate::format::SourceFormat;
@@ -82,7 +82,7 @@ pub fn convert_file(
                 path: input.to_path_buf(),
                 source,
             })?;
-        reader.decode().map_err(map_image_error)?
+        decode_image_reader(reader)?
     };
 
     // 1. Crop (pixels on the decoded image), validated against the actual dimensions.
@@ -407,6 +407,49 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn convert_raster_respects_exif_orientation() {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
+        let entries: &[(u16, u16, u32, u32)] = &[
+            (0x0100, 4, 1, 4),   // ImageWidth = 4
+            (0x0101, 4, 1, 2),   // ImageLength = 2
+            (0x0102, 3, 4, 110), // BitsPerSample -> offset 110
+            (0x0106, 3, 1, 2),   // PhotometricInterpretation = 2 (RGB)
+            (0x0111, 4, 1, 130), // StripOffsets -> offset 130
+            (0x0112, 3, 1, 6),   // Orientation = 6 (Rotate 90 CW)
+            (0x0115, 3, 1, 4),   // SamplesPerPixel = 4
+            (0x0117, 4, 1, 32),  // StripByteCounts = 32
+        ];
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, typ, cnt, val) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&typ.to_le_bytes());
+            tiff.extend_from_slice(&cnt.to_le_bytes());
+            tiff.extend_from_slice(&val.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        if tiff.len() < 110 {
+            tiff.resize(110, 0);
+        }
+        tiff.extend_from_slice(&[8u8, 0, 8, 0, 8, 0, 8, 0]);
+        if tiff.len() < 130 {
+            tiff.resize(130, 0);
+        }
+        tiff.extend_from_slice(&[255u8; 32]);
+
+        let dir = temp_dir("orient-convert");
+        let src = dir.join("src.tiff");
+        std::fs::write(&src, &tiff).unwrap();
+        let dst = dir.join("out.png");
+
+        convert_file(&src, &dst, SourceFormat::Png, &ConvertOptions::default()).unwrap();
+        let meta = crate::read_meta_path(&dst).unwrap();
+        assert_eq!((meta.width, meta.height), (2, 4));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
