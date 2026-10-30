@@ -104,19 +104,17 @@ jobs:
           FOOTER="This single tracking issue is maintained automatically by daily distribution verification. Direct channels (Homebrew, Scoop) update on release; winget and Chocolatey clear external moderation."
 
           if [[ ${#pending[@]} -eq 0 ]]; then
-            NEW_TITLE="[release-watch] v${VERSION} distribution status — all live"
-            printf -v BODY 'Automated distribution check for **v%s** — ✅ all channels live (updated %s):\n\n%s\n%s' \
-              "$VERSION" "$(date -u +%Y-%m-%dT%H:%MZ)" "$report" "$FOOTER"
+            echo "All channels live for v${VERSION}; no tracking issue needed."
           else
             NEW_TITLE="[release-watch] v${VERSION} distribution status"
             printf -v BODY 'Automated distribution check for **v%s** (updated %s):\n\n%s\n%s' \
               "$VERSION" "$(date -u +%Y-%m-%dT%H:%MZ)" "$report" "$FOOTER"
-          fi
 
-          if [[ -n "$TRACK_NUM" ]]; then
-            gh issue edit "$TRACK_NUM" --repo "$REPO" --title "$NEW_TITLE" --body "$BODY"
-            echo "Updated persistent tracking issue #${TRACK_NUM} (pending: ${pending[*]:-none})."
-          else
-            gh issue create --repo "$REPO" --title "$NEW_TITLE" --body "$BODY" --label "$TRACK_LABEL"
-            echo "Created persistent tracking issue (pending: ${pending[*]:-none})."
+            if [[ -n "$TRACK_NUM" ]]; then
+              gh issue edit "$TRACK_NUM" --repo "$REPO" --title "$NEW_TITLE" --body "$BODY"
+              echo "Updated tracking issue #${TRACK_NUM} (pending: ${pending[*]})."
+            else
+              gh issue create --repo "$REPO" --title "$NEW_TITLE" --body "$BODY" --label "$TRACK_LABEL"
+              echo "Created tracking issue (pending: ${pending[*]})."
+            fi
           fi
